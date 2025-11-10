@@ -1274,6 +1274,9 @@ class FECClient:
         self,
         candidate_id: Optional[str] = None,
         committee_id: Optional[str] = None,
+        name: Optional[str] = None,
+        committee_type: Optional[str] = None,
+        state: Optional[str] = None,
         limit: int = 100
     ) -> List[Dict]:
         """Get committees - queries local DB first, falls back to API"""
@@ -1283,7 +1286,16 @@ class FECClient:
                 candidate_id=candidate_id, committee_id=committee_id, limit=limit
             )
             if local_data:
-                return local_data
+                # Filter by name/type/state if provided
+                filtered = local_data
+                if name:
+                    filtered = [c for c in filtered if name.lower() in (c.get('name', '') or '').lower()]
+                if committee_type:
+                    filtered = [c for c in filtered if c.get('committee_type') == committee_type]
+                if state:
+                    filtered = [c for c in filtered if c.get('state') == state]
+                if filtered:
+                    return filtered[:limit]
         
         # Fall back to API
         params = {"per_page": limit}
@@ -1291,6 +1303,12 @@ class FECClient:
             params["candidate_id"] = candidate_id
         if committee_id:
             params["committee_id"] = committee_id
+        if name:
+            params["q"] = name
+        if committee_type:
+            params["committee_type"] = committee_type
+        if state:
+            params["state"] = state
         
         data = await self._make_request("committees", params)
         results = data.get("results", [])
@@ -1301,6 +1319,19 @@ class FECClient:
                 asyncio.create_task(self._store_committee(committee))
         
         return results
+    
+    async def get_committee_totals(
+        self,
+        committee_id: str,
+        cycle: Optional[int] = None
+    ) -> List[Dict]:
+        """Get committee financial totals"""
+        params = {}
+        if cycle:
+            params["cycle"] = cycle
+        
+        data = await self._make_request(f"committee/{committee_id}/totals", params)
+        return data.get("results", [])
     
     async def get_independent_expenditures(
         self,

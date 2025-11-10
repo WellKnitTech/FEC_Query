@@ -4,6 +4,7 @@ import CandidateDetail from './pages/CandidateDetail';
 import DonorAnalysis from './pages/DonorAnalysis';
 import RaceAnalysis from './pages/RaceAnalysis';
 import BulkDataManagement from './pages/BulkDataManagement';
+import IndependentExpenditures from './pages/IndependentExpenditures';
 import './App.css';
 
 function App() {
@@ -42,6 +43,12 @@ function App() {
                   >
                     Bulk Data
                   </Link>
+                  <Link
+                    to="/independent-expenditures"
+                    className="text-gray-600 hover:text-gray-900 px-3 py-2 rounded-md text-sm font-medium"
+                  >
+                    Independent Expenditures
+                  </Link>
                 </div>
               </div>
             </div>
@@ -53,6 +60,7 @@ function App() {
           <Route path="/race" element={<RaceAnalysis />} />
           <Route path="/donor-analysis" element={<DonorAnalysis />} />
           <Route path="/bulk-data" element={<BulkDataManagement />} />
+          <Route path="/independent-expenditures" element={<IndependentExpenditures />} />
         </Routes>
       </div>
     </Router>

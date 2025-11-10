@@ -269,6 +269,94 @@ export interface IndependentExpenditureAnalysis {
   top_candidates: Array<{ candidate_id: string; total_amount: number; count: number }>;
 }
 
+export interface CommitteeSummary {
+  committee_id: string;
+  name: string;
+  committee_type?: string;
+  committee_type_full?: string;
+  party?: string;
+  state?: string;
+  candidate_ids?: string[];
+}
+
+export interface CommitteeFinancials {
+  committee_id: string;
+  cycle?: number;
+  total_receipts: number;
+  total_disbursements: number;
+  cash_on_hand: number;
+  total_contributions: number;
+}
+
+export interface CommitteeTransfer {
+  transfer_id?: string;
+  from_committee_id: string;
+  to_committee_id?: string;
+  amount: number;
+  date?: string;
+  purpose?: string;
+}
+
+export const committeeApi = {
+  search: async (params: {
+    name?: string;
+    committee_type?: string;
+    state?: string;
+    limit?: number;
+  }): Promise<CommitteeSummary[]> => {
+    const response = await api.get('/api/committees/search', { params });
+    return response.data;
+  },
+
+  getById: async (committeeId: string): Promise<CommitteeSummary> => {
+    const response = await api.get(`/api/committees/${committeeId}`);
+    return response.data;
+  },
+
+  getFinancials: async (committeeId: string, cycle?: number): Promise<CommitteeFinancials[]> => {
+    const response = await api.get(`/api/committees/${committeeId}/financials`, {
+      params: cycle ? { cycle } : {},
+    });
+    return response.data;
+  },
+
+  getContributions: async (
+    committeeId: string,
+    params?: {
+      min_date?: string;
+      max_date?: string;
+      limit?: number;
+    }
+  ): Promise<Contribution[]> => {
+    const response = await api.get(`/api/committees/${committeeId}/contributions`, { params });
+    return response.data;
+  },
+
+  getExpenditures: async (
+    committeeId: string,
+    params?: {
+      min_date?: string;
+      max_date?: string;
+      limit?: number;
+    }
+  ): Promise<any[]> => {
+    const response = await api.get(`/api/committees/${committeeId}/expenditures`, { params });
+    return response.data;
+  },
+
+  getTransfers: async (
+    committeeId: string,
+    params?: {
+      min_date?: string;
+      max_date?: string;
+      limit?: number;
+    }
+  ): Promise<CommitteeTransfer[]> => {
+    const response = await api.get(`/api/committees/${committeeId}/transfers`, { params });
+    return response.data;
+  },
+};
+
 export const independentExpenditureApi = {
   get: async (params: {
     candidate_id?: string;

@@ -153,3 +153,31 @@ class IndependentExpenditureAnalysis(BaseModel):
     top_committees: List[Dict[str, Any]]
     top_candidates: List[Dict[str, Any]]
 
+
+class CommitteeSummary(BaseModel):
+    committee_id: str
+    name: str
+    committee_type: Optional[str] = None
+    committee_type_full: Optional[str] = None
+    party: Optional[str] = None
+    state: Optional[str] = None
+    candidate_ids: Optional[List[str]] = None
+
+
+class CommitteeFinancials(BaseModel):
+    committee_id: str
+    cycle: Optional[int] = None
+    total_receipts: float = 0.0
+    total_disbursements: float = 0.0
+    cash_on_hand: float = 0.0
+    total_contributions: float = 0.0
+
+
+class CommitteeTransfer(BaseModel):
+    transfer_id: Optional[str] = None
+    from_committee_id: str
+    to_committee_id: Optional[str] = None
+    amount: float = 0.0
+    date: Optional[str] = None
+    purpose: Optional[str] = None
+
