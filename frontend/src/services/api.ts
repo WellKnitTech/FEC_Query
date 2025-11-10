@@ -244,6 +244,67 @@ export const fraudApi = {
   },
 };
 
+export interface IndependentExpenditure {
+  expenditure_id?: string;
+  cycle?: number;
+  committee_id?: string;
+  candidate_id?: string;
+  candidate_name?: string;
+  support_oppose_indicator?: string;
+  expenditure_amount: number;
+  expenditure_date?: string;
+  payee_name?: string;
+  expenditure_purpose?: string;
+}
+
+export interface IndependentExpenditureAnalysis {
+  total_expenditures: number;
+  total_support: number;
+  total_oppose: number;
+  total_transactions: number;
+  expenditures_by_date: Record<string, number>;
+  expenditures_by_committee: Record<string, number>;
+  expenditures_by_candidate: Record<string, number>;
+  top_committees: Array<{ committee_id: string; total_amount: number; count: number }>;
+  top_candidates: Array<{ candidate_id: string; total_amount: number; count: number }>;
+}
+
+export const independentExpenditureApi = {
+  get: async (params: {
+    candidate_id?: string;
+    committee_id?: string;
+    support_oppose?: string;
+    min_date?: string;
+    max_date?: string;
+    min_amount?: number;
+    max_amount?: number;
+    limit?: number;
+  }): Promise<IndependentExpenditure[]> => {
+    const response = await api.get('/api/independent-expenditures/', { params });
+    return response.data;
+  },
+
+  analyze: async (params: {
+    candidate_id?: string;
+    committee_id?: string;
+    min_date?: string;
+    max_date?: string;
+  }): Promise<IndependentExpenditureAnalysis> => {
+    const response = await api.get('/api/independent-expenditures/analysis', { params });
+    return response.data;
+  },
+
+  getCandidateSummary: async (candidateId: string, minDate?: string, maxDate?: string): Promise<any> => {
+    const response = await api.get(`/api/independent-expenditures/${candidateId}/summary`, {
+      params: {
+        min_date: minDate,
+        max_date: maxDate,
+      },
+    });
+    return response.data;
+  },
+};
+
 export interface BulkDataStatus {
   enabled: boolean;
   available_cycles: number[];

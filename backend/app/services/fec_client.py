@@ -1302,6 +1302,52 @@ class FECClient:
         
         return results
     
+    async def get_independent_expenditures(
+        self,
+        candidate_id: Optional[str] = None,
+        committee_id: Optional[str] = None,
+        support_oppose: Optional[str] = None,
+        min_date: Optional[str] = None,
+        max_date: Optional[str] = None,
+        min_amount: Optional[float] = None,
+        max_amount: Optional[float] = None,
+        limit: int = 1000,
+        two_year_transaction_period: Optional[int] = None
+    ) -> List[Dict]:
+        """Get independent expenditures/schedules/schedule_e"""
+        params = {
+            "per_page": 100,
+            "sort": "-expenditure_date",
+            "_original_limit": limit
+        }
+        
+        # Always add two_year_transaction_period if not provided (must be even year)
+        current_year = datetime.now().year
+        default_cycle = (current_year // 2) * 2
+        if not two_year_transaction_period:
+            two_year_transaction_period = default_cycle
+        
+        params["two_year_transaction_period"] = two_year_transaction_period
+        
+        if candidate_id:
+            params["candidate_id"] = candidate_id
+        if committee_id:
+            params["committee_id"] = committee_id
+        if support_oppose:
+            params["support_oppose_indicator"] = support_oppose
+        if min_amount:
+            params["min_amount"] = min_amount
+        if max_amount:
+            params["max_amount"] = max_amount
+        if min_date:
+            params["min_date"] = min_date
+        if max_date:
+            params["max_date"] = max_date
+        
+        data = await self._make_request("schedules/schedule_e", params)
+        results = data.get("results", [])
+        return results[:limit]
+    
     async def close(self):
         """Close HTTP client"""
         await self.client.aclose()

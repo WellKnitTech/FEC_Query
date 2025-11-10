@@ -128,3 +128,28 @@ class ContributionVelocity(BaseModel):
     peak_days: List[Dict[str, Any]]
     average_daily_velocity: float
 
+
+class IndependentExpenditure(BaseModel):
+    expenditure_id: Optional[str] = None
+    cycle: Optional[int] = None
+    committee_id: Optional[str] = None
+    candidate_id: Optional[str] = None
+    candidate_name: Optional[str] = None
+    support_oppose_indicator: Optional[str] = None  # 'S' for support, 'O' for oppose
+    expenditure_amount: float = 0.0
+    expenditure_date: Optional[str] = None
+    payee_name: Optional[str] = None
+    expenditure_purpose: Optional[str] = None
+
+
+class IndependentExpenditureAnalysis(BaseModel):
+    total_expenditures: float
+    total_support: float
+    total_oppose: float
+    total_transactions: int
+    expenditures_by_date: Dict[str, float]
+    expenditures_by_committee: Dict[str, float]
+    expenditures_by_candidate: Dict[str, float]
+    top_committees: List[Dict[str, Any]]
+    top_candidates: List[Dict[str, Any]]
+

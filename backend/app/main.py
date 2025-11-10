@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import candidates, contributions, analysis, fraud, bulk_data, export
+from app.api.routes import candidates, contributions, analysis, fraud, bulk_data, export, independent_expenditures
 from app.db.database import init_db
 from app.services.bulk_data import _cancelled_jobs, _running_tasks
 import os
@@ -55,6 +55,7 @@ app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(fraud.router, prefix="/api/fraud", tags=["fraud"])
 app.include_router(bulk_data.router, prefix="/api/bulk-data", tags=["bulk-data"])
 app.include_router(export.router, prefix="/api/export", tags=["export"])
+app.include_router(independent_expenditures.router, prefix="/api/independent-expenditures", tags=["independent-expenditures"])
 
 
 @app.on_event("startup")
