@@ -12,6 +12,7 @@ class CandidateSummary(BaseModel):
     district: Optional[str] = None
     election_years: Optional[List[int]] = None
     active_through: Optional[int] = None
+    contact_info: Optional['ContactInformation'] = None
 
 
 class FinancialSummary(BaseModel):
@@ -162,6 +163,7 @@ class CommitteeSummary(BaseModel):
     party: Optional[str] = None
     state: Optional[str] = None
     candidate_ids: Optional[List[str]] = None
+    contact_info: Optional['ContactInformation'] = None
 
 
 class CommitteeFinancials(BaseModel):
@@ -180,4 +182,22 @@ class CommitteeTransfer(BaseModel):
     amount: float = 0.0
     date: Optional[str] = None
     purpose: Optional[str] = None
+
+
+class ContactInformation(BaseModel):
+    """Contact information for candidates and committees"""
+    street_address: Optional[str] = None
+    street_address_2: Optional[str] = None  # Only for committees
+    city: Optional[str] = None
+    state: Optional[str] = None
+    zip: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+    treasurer_name: Optional[str] = None  # Only for committees
+
+
+# Update forward references
+CandidateSummary.model_rebuild()
+CommitteeSummary.model_rebuild()
 

@@ -79,6 +79,13 @@ class Candidate(Base):
     district = Column(String)
     election_years = Column(JSON)  # List of years
     active_through = Column(Integer)
+    # Contact information fields
+    street_address = Column(String)
+    city = Column(String)
+    zip = Column(String)
+    email = Column(String)
+    phone = Column(String)
+    website = Column(String)
     raw_data = Column(JSON)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -101,6 +108,15 @@ class Committee(Base):
     candidate_ids = Column(JSON)  # List of candidate IDs
     party = Column(String)
     state = Column(String)
+    # Contact information fields
+    street_address = Column(String)
+    street_address_2 = Column(String)
+    city = Column(String)
+    zip = Column(String)
+    email = Column(String)
+    phone = Column(String)
+    website = Column(String)
+    treasurer_name = Column(String)
     raw_data = Column(JSON)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -324,6 +340,23 @@ class CommunicationCost(Base):
     )
 
 
+class SavedSearch(Base):
+    """Saved search queries"""
+    __tablename__ = "saved_searches"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    search_type = Column(String, index=True)  # 'candidate', 'committee', 'contribution', etc.
+    search_params = Column(JSON)  # Store search parameters as JSON
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_saved_search_type', 'search_type'),
+        Index('idx_saved_search_created', 'created_at'),
+    )
+
+
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./fec_data.db")
 if DATABASE_URL.startswith("sqlite"):
@@ -338,7 +371,7 @@ if DATABASE_URL.startswith("sqlite"):
         pool_size=5,  # Limit concurrent connections
         max_overflow=10,  # Allow overflow connections
         connect_args={
-            "timeout": 30.0,  # 30 second timeout for database operations
+            "timeout": 60.0,  # 60 second timeout for database operations
         }
     )
 else:
@@ -354,6 +387,12 @@ async def get_db():
     async with AsyncSessionLocal() as session:
         try:
             yield session
+        except Exception as e:
+            await session.rollback()
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Database session error: {e}", exc_info=True)
+            raise
         finally:
             await session.close()
 
@@ -369,9 +408,13 @@ async def init_db():
             if DATABASE_URL.startswith("sqlite"):
                 try:
                     await conn.execute(text("PRAGMA journal_mode=WAL"))
-                    logger.info("SQLite WAL mode enabled for better concurrency")
+                    # Set WAL checkpoint settings for better performance
+                    await conn.execute(text("PRAGMA wal_autocheckpoint=1000"))  # Checkpoint every 1000 pages
+                    await conn.execute(text("PRAGMA synchronous=NORMAL"))  # Balance between safety and speed
+                    await conn.execute(text("PRAGMA busy_timeout=60000"))  # 60 second timeout
+                    logger.info("SQLite WAL mode enabled with optimized settings")
                 except Exception as e:
-                    logger.warning(f"Could not enable WAL mode: {e}")
+                    logger.warning(f"Could not configure WAL mode: {e}")
             
             await conn.run_sync(Base.metadata.create_all)
         logger.info("Database tables initialized successfully")

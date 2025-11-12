@@ -5,6 +5,12 @@
 echo "Starting FEC Campaign Finance Analysis Tool..."
 echo ""
 
+# Kill any existing processes on ports 8000 and 3000
+echo "Checking for existing processes..."
+pkill -f "uvicorn app.main:app" 2>/dev/null
+pkill -f "vite" 2>/dev/null
+sleep 1
+
 # Check if .env exists in backend
 if [ ! -f "backend/.env" ]; then
     echo "⚠️  Warning: backend/.env not found!"
@@ -57,7 +63,34 @@ echo "   API Docs: http://localhost:8000/docs"
 echo ""
 echo "Press Ctrl+C to stop both servers"
 
+# Function to cleanup processes
+cleanup() {
+    echo ""
+    echo "Shutting down servers..."
+    
+    # Kill backend process and all its children (uvicorn spawns workers)
+    if [ ! -z "$BACKEND_PID" ]; then
+        pkill -P $BACKEND_PID 2>/dev/null
+        kill $BACKEND_PID 2>/dev/null
+    fi
+    
+    # Kill frontend process and all its children
+    if [ ! -z "$FRONTEND_PID" ]; then
+        pkill -P $FRONTEND_PID 2>/dev/null
+        kill $FRONTEND_PID 2>/dev/null
+    fi
+    
+    # Also kill any remaining uvicorn or vite processes
+    pkill -f "uvicorn app.main:app" 2>/dev/null
+    pkill -f "vite" 2>/dev/null
+    
+    echo "Servers stopped."
+    exit 0
+}
+
+# Set up signal handlers
+trap cleanup INT TERM
+
 # Wait for user interrupt
-trap "kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; exit" INT TERM
 wait
 

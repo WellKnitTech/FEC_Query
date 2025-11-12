@@ -69,6 +69,34 @@ async def startup_event():
     """Initialize database on startup"""
     await init_db()
     
+    # Periodic WAL checkpoint to prevent I/O errors
+    async def periodic_wal_checkpoint():
+        """Periodically checkpoint WAL file to prevent I/O errors"""
+        import asyncio
+        from app.db.database import engine
+        from sqlalchemy import text
+        logger = logging.getLogger(__name__)
+        
+        while True:
+            try:
+                await asyncio.sleep(300)  # Every 5 minutes
+                async with engine.begin() as conn:
+                    result = await conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+                    checkpoint_info = result.fetchone()
+                    if checkpoint_info and checkpoint_info[0] == 0:  # 0 = success
+                        logger.debug("WAL checkpoint completed successfully")
+                    else:
+                        logger.warning(f"WAL checkpoint returned: {checkpoint_info}")
+            except Exception as e:
+                logger.warning(f"Error during WAL checkpoint: {e}")
+            except asyncio.CancelledError:
+                logger.debug("WAL checkpoint task cancelled")
+                break
+    
+    # Start WAL checkpoint task
+    checkpoint_task = asyncio.create_task(periodic_wal_checkpoint())
+    _running_tasks.add(checkpoint_task)
+    
     # Start contact updater service
     from app.services.contact_updater import ContactUpdaterService
     global _contact_updater_service
@@ -100,10 +128,22 @@ async def shutdown_event():
     logger = logging.getLogger(__name__)
     logger.info("Application shutting down, cancelling all running jobs...")
     
+    # Cancel all running tasks first
+    for task in list(_running_tasks):
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                logger.debug(f"Task {task} cancelled")
+    
     # Stop contact updater service
     global _contact_updater_service
     if _contact_updater_service:
-        await _contact_updater_service.stop_background_updates()
+        try:
+            await _contact_updater_service.stop_background_updates()
+        except Exception as e:
+            logger.warning(f"Error stopping contact updater: {e}")
     
     # Get all running jobs from database and mark them as cancelled
     from app.services.bulk_data import BulkDataService

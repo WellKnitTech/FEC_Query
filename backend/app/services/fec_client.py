@@ -461,10 +461,25 @@ class FECClient:
                             existing.district = candidate_data.get("district")
                             existing.election_years = candidate_data.get("election_years")
                             existing.active_through = candidate_data.get("active_through")
+                            # Update contact info if available
+                            contact_info = self._extract_candidate_contact_info(candidate_data)
+                            if contact_info.get("street_address"):
+                                existing.street_address = contact_info["street_address"]
+                            if contact_info.get("city"):
+                                existing.city = contact_info["city"]
+                            if contact_info.get("zip"):
+                                existing.zip = contact_info["zip"]
+                            if contact_info.get("email"):
+                                existing.email = contact_info["email"]
+                            if contact_info.get("phone"):
+                                existing.phone = contact_info["phone"]
+                            if contact_info.get("website"):
+                                existing.website = contact_info["website"]
                             existing.raw_data = candidate_data
                             existing.updated_at = datetime.utcnow()
                         else:
                             # Create new
+                            contact_info = self._extract_candidate_contact_info(candidate_data)
                             candidate = Candidate(
                                 candidate_id=candidate_id,
                                 name=candidate_data.get("name") or candidate_data.get("candidate_name", ""),
@@ -474,6 +489,12 @@ class FECClient:
                                 district=candidate_data.get("district"),
                                 election_years=candidate_data.get("election_years"),
                                 active_through=candidate_data.get("active_through"),
+                                street_address=contact_info.get("street_address"),
+                                city=contact_info.get("city"),
+                                zip=contact_info.get("zip"),
+                                email=contact_info.get("email"),
+                                phone=contact_info.get("phone"),
+                                website=contact_info.get("website"),
                                 raw_data=candidate_data
                             )
                             session.add(candidate)
@@ -1186,12 +1207,31 @@ class FECClient:
                             existing.candidate_ids = committee_data.get("candidate_ids") or []
                             existing.party = committee_data.get("party")
                             existing.state = committee_data.get("state")
+                            # Update contact info if available
+                            contact_info = self._extract_committee_contact_info(committee_data)
+                            if contact_info.get("street_address"):
+                                existing.street_address = contact_info["street_address"]
+                            if contact_info.get("street_address_2"):
+                                existing.street_address_2 = contact_info["street_address_2"]
+                            if contact_info.get("city"):
+                                existing.city = contact_info["city"]
+                            if contact_info.get("zip"):
+                                existing.zip = contact_info["zip"]
+                            if contact_info.get("email"):
+                                existing.email = contact_info["email"]
+                            if contact_info.get("phone"):
+                                existing.phone = contact_info["phone"]
+                            if contact_info.get("website"):
+                                existing.website = contact_info["website"]
+                            if contact_info.get("treasurer_name"):
+                                existing.treasurer_name = contact_info["treasurer_name"]
                             existing.raw_data = committee_data
                             existing.updated_at = datetime.utcnow()
                             await session.commit()
                         else:
                             # Create new - handle race condition where another task might have inserted it
                             try:
+                                contact_info = self._extract_committee_contact_info(committee_data)
                                 committee = Committee(
                                     committee_id=committee_id,
                                     name=committee_data.get("name", ""),
@@ -1200,6 +1240,14 @@ class FECClient:
                                     candidate_ids=committee_data.get("candidate_ids") or [],
                                     party=committee_data.get("party"),
                                     state=committee_data.get("state"),
+                                    street_address=contact_info.get("street_address"),
+                                    street_address_2=contact_info.get("street_address_2"),
+                                    city=contact_info.get("city"),
+                                    zip=contact_info.get("zip"),
+                                    email=contact_info.get("email"),
+                                    phone=contact_info.get("phone"),
+                                    website=contact_info.get("website"),
+                                    treasurer_name=contact_info.get("treasurer_name"),
                                     raw_data=committee_data
                                 )
                                 session.add(committee)
@@ -1219,6 +1267,24 @@ class FECClient:
                                     existing.candidate_ids = committee_data.get("candidate_ids") or []
                                     existing.party = committee_data.get("party")
                                     existing.state = committee_data.get("state")
+                                    # Update contact info if available
+                                    contact_info = self._extract_committee_contact_info(committee_data)
+                                    if contact_info.get("street_address"):
+                                        existing.street_address = contact_info["street_address"]
+                                    if contact_info.get("street_address_2"):
+                                        existing.street_address_2 = contact_info["street_address_2"]
+                                    if contact_info.get("city"):
+                                        existing.city = contact_info["city"]
+                                    if contact_info.get("zip"):
+                                        existing.zip = contact_info["zip"]
+                                    if contact_info.get("email"):
+                                        existing.email = contact_info["email"]
+                                    if contact_info.get("phone"):
+                                        existing.phone = contact_info["phone"]
+                                    if contact_info.get("website"):
+                                        existing.website = contact_info["website"]
+                                    if contact_info.get("treasurer_name"):
+                                        existing.treasurer_name = contact_info["treasurer_name"]
                                     existing.raw_data = committee_data
                                     existing.updated_at = datetime.utcnow()
                                     await session.commit()
@@ -1378,6 +1444,169 @@ class FECClient:
         data = await self._make_request("schedules/schedule_e", params)
         results = data.get("results", [])
         return results[:limit]
+    
+    def _extract_candidate_contact_info(self, candidate_data: Dict) -> Dict:
+        """Extract contact information from candidate API response"""
+        contact_info = {}
+        
+        # Try principal committee fields first (most reliable)
+        contact_info["street_address"] = (
+            candidate_data.get("principal_committee_street_1") or 
+            candidate_data.get("mailing_address") or
+            candidate_data.get("street_address")
+        )
+        contact_info["city"] = (
+            candidate_data.get("principal_committee_city") or
+            candidate_data.get("city")
+        )
+        contact_info["zip"] = (
+            candidate_data.get("principal_committee_zip") or
+            candidate_data.get("zip")
+        )
+        contact_info["email"] = candidate_data.get("email")
+        contact_info["phone"] = candidate_data.get("phone")
+        contact_info["website"] = candidate_data.get("website")
+        
+        return contact_info
+    
+    def _extract_committee_contact_info(self, committee_data: Dict) -> Dict:
+        """Extract contact information from committee API response"""
+        contact_info = {}
+        
+        contact_info["street_address"] = committee_data.get("street_1") or committee_data.get("street_address")
+        contact_info["street_address_2"] = committee_data.get("street_2")
+        contact_info["city"] = committee_data.get("city")
+        contact_info["zip"] = committee_data.get("zip")
+        contact_info["email"] = committee_data.get("email")
+        contact_info["phone"] = committee_data.get("phone")
+        contact_info["website"] = committee_data.get("website")
+        contact_info["treasurer_name"] = committee_data.get("treasurer_name")
+        
+        return contact_info
+    
+    async def refresh_candidate_contact_info_if_needed(
+        self,
+        candidate_id: str,
+        stale_threshold_days: int = 30
+    ) -> bool:
+        """Refresh candidate contact info from API if missing or stale"""
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(Candidate).where(Candidate.candidate_id == candidate_id)
+                )
+                candidate = result.scalar_one_or_none()
+                
+                if not candidate:
+                    return False
+                
+                # Check if contact info is missing or stale
+                has_contact_info = any([
+                    candidate.street_address,
+                    candidate.city,
+                    candidate.zip,
+                    candidate.email,
+                    candidate.phone,
+                    candidate.website
+                ])
+                
+                is_stale = False
+                if candidate.updated_at:
+                    cutoff_date = datetime.utcnow() - timedelta(days=stale_threshold_days)
+                    is_stale = candidate.updated_at < cutoff_date
+                
+                if has_contact_info and not is_stale:
+                    return False  # Already has fresh contact info
+                
+                # Fetch from API
+                params = {}
+                data = await self._make_request(f"candidate/{candidate_id}", params, use_cache=False)
+                result_data = data.get("results", [{}])[0] if data.get("results") else None
+                
+                if not result_data:
+                    return False
+                
+                # Extract and update contact info
+                contact_info = self._extract_candidate_contact_info(result_data)
+                
+                candidate.street_address = contact_info.get("street_address")
+                candidate.city = contact_info.get("city")
+                candidate.zip = contact_info.get("zip")
+                candidate.email = contact_info.get("email")
+                candidate.phone = contact_info.get("phone")
+                candidate.website = contact_info.get("website")
+                candidate.updated_at = datetime.utcnow()
+                
+                await session.commit()
+                logger.info(f"Refreshed contact info for candidate {candidate_id}")
+                return True
+                
+        except Exception as e:
+            logger.warning(f"Error refreshing contact info for candidate {candidate_id}: {e}")
+            return False
+    
+    async def refresh_committee_contact_info_if_needed(
+        self,
+        committee_id: str,
+        stale_threshold_days: int = 30
+    ) -> bool:
+        """Refresh committee contact info from API if missing or stale"""
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(Committee).where(Committee.committee_id == committee_id)
+                )
+                committee = result.scalar_one_or_none()
+                
+                if not committee:
+                    return False
+                
+                # Check if contact info is missing or stale
+                has_contact_info = any([
+                    committee.street_address,
+                    committee.city,
+                    committee.zip,
+                    committee.email,
+                    committee.phone,
+                    committee.website
+                ])
+                
+                is_stale = False
+                if committee.updated_at:
+                    cutoff_date = datetime.utcnow() - timedelta(days=stale_threshold_days)
+                    is_stale = committee.updated_at < cutoff_date
+                
+                if has_contact_info and not is_stale:
+                    return False  # Already has fresh contact info
+                
+                # Fetch from API
+                params = {}
+                data = await self._make_request(f"committee/{committee_id}", params, use_cache=False)
+                result_data = data.get("results", [{}])[0] if data.get("results") else None
+                
+                if not result_data:
+                    return False
+                
+                # Extract and update contact info
+                contact_info = self._extract_committee_contact_info(result_data)
+                
+                committee.street_address = contact_info.get("street_address")
+                committee.street_address_2 = contact_info.get("street_address_2")
+                committee.city = contact_info.get("city")
+                committee.zip = contact_info.get("zip")
+                committee.email = contact_info.get("email")
+                committee.phone = contact_info.get("phone")
+                committee.website = contact_info.get("website")
+                committee.treasurer_name = contact_info.get("treasurer_name")
+                committee.updated_at = datetime.utcnow()
+                
+                await session.commit()
+                logger.info(f"Refreshed contact info for committee {committee_id}")
+                return True
+                
+        except Exception as e:
+            logger.warning(f"Error refreshing contact info for committee {committee_id}: {e}")
+            return False
     
     async def close(self):
         """Close HTTP client"""
