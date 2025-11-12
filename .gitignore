@@ -9,6 +9,8 @@ env/
 ENV/
 .venv
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 
