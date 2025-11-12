@@ -1,0 +1,71 @@
+import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
+import Dashboard from './pages/Dashboard';
+import CandidateDetail from './pages/CandidateDetail';
+import DonorAnalysis from './pages/DonorAnalysis';
+import RaceAnalysis from './pages/RaceAnalysis';
+import BulkDataManagement from './pages/BulkDataManagement';
+import IndependentExpenditures from './pages/IndependentExpenditures';
+import './App.css';
+
+function App() {
+  return (
+    <Router>
+      <div className="min-h-screen bg-gray-50">
+        <nav className="bg-white shadow-sm">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex justify-between h-16">
+              <div className="flex items-center space-x-8">
+                <Link to="/" className="text-xl font-bold text-gray-900 hover:text-blue-600">
+                  FEC Campaign Finance Analysis
+                </Link>
+                <div className="flex space-x-4">
+                  <Link
+                    to="/"
+                    className="text-gray-600 hover:text-gray-900 px-3 py-2 rounded-md text-sm font-medium"
+                  >
+                    Search
+                  </Link>
+                  <Link
+                    to="/race"
+                    className="text-gray-600 hover:text-gray-900 px-3 py-2 rounded-md text-sm font-medium"
+                  >
+                    Race Analysis
+                  </Link>
+                  <Link
+                    to="/donor-analysis"
+                    className="text-gray-600 hover:text-gray-900 px-3 py-2 rounded-md text-sm font-medium"
+                  >
+                    Donor Analysis
+                  </Link>
+                  <Link
+                    to="/bulk-data"
+                    className="text-gray-600 hover:text-gray-900 px-3 py-2 rounded-md text-sm font-medium"
+                  >
+                    Bulk Data
+                  </Link>
+                  <Link
+                    to="/independent-expenditures"
+                    className="text-gray-600 hover:text-gray-900 px-3 py-2 rounded-md text-sm font-medium"
+                  >
+                    Independent Expenditures
+                  </Link>
+                </div>
+              </div>
+            </div>
+          </div>
+        </nav>
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/candidate/:candidateId" element={<CandidateDetail />} />
+          <Route path="/race" element={<RaceAnalysis />} />
+          <Route path="/donor-analysis" element={<DonorAnalysis />} />
+          <Route path="/bulk-data" element={<BulkDataManagement />} />
+          <Route path="/independent-expenditures" element={<IndependentExpenditures />} />
+        </Routes>
+      </div>
+    </Router>
+  );
+}
+
+export default App;
+
