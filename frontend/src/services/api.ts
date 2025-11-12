@@ -561,7 +561,7 @@ export const bulkDataApi = {
       };
       
       ws.onclose = () => {
-        console.log('WebSocket closed');
+        // WebSocket closed
       };
       
       return ws;
@@ -570,6 +570,118 @@ export const bulkDataApi = {
       if (onError) onError(error as Event);
       return null;
     }
+  },
+};
+
+export interface TrendAnalysis {
+  candidate_id: string;
+  trends: Array<{
+    cycle: number;
+    total_receipts: number;
+    total_disbursements: number;
+    cash_on_hand: number;
+    total_contributions: number;
+    individual_contributions: number;
+    pac_contributions: number;
+    party_contributions?: number;
+    loan_contributions?: number;
+    receipts_growth?: number;
+  }>;
+  total_cycles: number;
+}
+
+export interface SavedSearch {
+  id: number;
+  name: string;
+  search_type: string;
+  search_params: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export const trendApi = {
+  getCandidateTrends: async (
+    candidateId: string,
+    minCycle?: number,
+    maxCycle?: number
+  ): Promise<TrendAnalysis> => {
+    const response = await api.get(`/api/trends/candidate/${candidateId}`, {
+      params: {
+        ...(minCycle ? { min_cycle: minCycle } : {}),
+        ...(maxCycle ? { max_cycle: maxCycle } : {}),
+      },
+    });
+    return response.data;
+  },
+
+  getRaceTrends: async (
+    candidateIds: string[],
+    minCycle?: number,
+    maxCycle?: number
+  ): Promise<any> => {
+    const response = await api.post('/api/trends/race', {
+      candidate_ids: candidateIds,
+      ...(minCycle ? { min_cycle: minCycle } : {}),
+      ...(maxCycle ? { max_cycle: maxCycle } : {}),
+    });
+    return response.data;
+  },
+
+  getContributionTrends: async (
+    candidateId: string,
+    minCycle?: number,
+    maxCycle?: number
+  ): Promise<any> => {
+    const response = await api.get(`/api/trends/contribution-velocity/${candidateId}`, {
+      params: {
+        ...(minCycle ? { min_cycle: minCycle } : {}),
+        ...(maxCycle ? { max_cycle: maxCycle } : {}),
+      },
+    });
+    return response.data;
+  },
+};
+
+export const savedSearchApi = {
+  list: async (searchType?: string): Promise<SavedSearch[]> => {
+    const response = await api.get('/api/saved-searches/', {
+      params: searchType ? { search_type: searchType } : {},
+    });
+    return response.data;
+  },
+
+  create: async (
+    name: string,
+    searchType: string,
+    searchParams: Record<string, any>
+  ): Promise<SavedSearch> => {
+    const response = await api.post('/api/saved-searches/', {
+      name,
+      search_type: searchType,
+      search_params: searchParams,
+    });
+    return response.data;
+  },
+
+  get: async (searchId: number): Promise<SavedSearch> => {
+    const response = await api.get(`/api/saved-searches/${searchId}`);
+    return response.data;
+  },
+
+  update: async (
+    searchId: number,
+    name?: string,
+    searchParams?: Record<string, any>
+  ): Promise<SavedSearch> => {
+    const response = await api.put(`/api/saved-searches/${searchId}`, {
+      ...(name ? { name } : {}),
+      ...(searchParams ? { search_params: searchParams } : {}),
+    });
+    return response.data;
+  },
+
+  delete: async (searchId: number): Promise<void> => {
+    await api.delete(`/api/saved-searches/${searchId}`);
   },
 };
 

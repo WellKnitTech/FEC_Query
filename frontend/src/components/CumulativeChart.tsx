@@ -52,9 +52,8 @@ export default function CumulativeChart({
           limit: 10000,
         });
         setContributions(data);
-      } catch (err) {
-        setError('Failed to load contributions');
-        console.error(err);
+      } catch (err: any) {
+        setError(err?.response?.data?.detail || err?.message || 'Failed to load contributions');
       } finally {
         setLoading(false);
       }

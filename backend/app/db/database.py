@@ -280,6 +280,50 @@ class BulkDataImportStatus(Base):
     )
 
 
+class ElectioneeringComm(Base):
+    """Electioneering communications data"""
+    __tablename__ = "electioneering_comm"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    cycle = Column(Integer, index=True)
+    committee_id = Column(String, index=True)
+    candidate_id = Column(String, index=True)
+    candidate_name = Column(String)
+    communication_date = Column(DateTime)
+    communication_amount = Column(Float)
+    raw_data = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    data_age_days = Column(Integer, default=0)
+    
+    __table_args__ = (
+        Index('idx_electioneering_cycle_committee', 'cycle', 'committee_id'),
+        Index('idx_electioneering_date', 'communication_date'),
+    )
+
+
+class CommunicationCost(Base):
+    """Communication costs data"""
+    __tablename__ = "communication_costs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    cycle = Column(Integer, index=True)
+    committee_id = Column(String, index=True)
+    candidate_id = Column(String, index=True)
+    candidate_name = Column(String)
+    communication_date = Column(DateTime)
+    communication_amount = Column(Float)
+    raw_data = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    data_age_days = Column(Integer, default=0)
+    
+    __table_args__ = (
+        Index('idx_comm_cost_cycle_committee', 'cycle', 'committee_id'),
+        Index('idx_comm_cost_date', 'communication_date'),
+    )
+
+
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./fec_data.db")
 if DATABASE_URL.startswith("sqlite"):

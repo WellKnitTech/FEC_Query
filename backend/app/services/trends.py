@@ -57,6 +57,14 @@ class TrendAnalysisService:
                     "total_contributions": float(total.get("contributions", 0)),
                     "individual_contributions": float(total.get("individual_contributions", 0)),
                     "pac_contributions": float(total.get("pac_contributions", 0)),
+                    "party_contributions": float(total.get("party_contributions", 0)),
+                    "loan_contributions": float(total.get("loan_contributions", 0) or total.get("loans_received", 0) or 0),
+                    "loan_repayments": float(total.get("loan_repayments", 0) or total.get("loans_repaid", 0) or 0),
+                    "debts_owed_by": float(total.get("debts_owed_by", 0) or total.get("debts_owed", 0) or 0),
+                    "transfers_from_auth": float(total.get("transfers_from_auth", 0) or total.get("transfers_from_authorized", 0) or 0),
+                    "transfers_to_auth": float(total.get("transfers_to_auth", 0) or total.get("transfers_to_authorized", 0) or 0),
+                    "candidate_self_contributions": float(total.get("candidate_self_contributions", 0) or total.get("candidate_contribution", 0) or 0),
+                    "refunds_issued": float(total.get("refunds_issued", 0) or total.get("refunds", 0) or 0),
                 })
         else:
             financials = [
@@ -68,6 +76,14 @@ class TrendAnalysisService:
                     "total_contributions": f.total_contributions,
                     "individual_contributions": f.individual_contributions,
                     "pac_contributions": f.pac_contributions,
+                    "party_contributions": getattr(f, 'party_contributions', 0.0),
+                    "loan_contributions": getattr(f, 'loan_contributions', 0.0),
+                    "loan_repayments": getattr(f, 'loan_repayments', 0.0),
+                    "debts_owed_by": getattr(f, 'debts_owed_by', 0.0),
+                    "transfers_from_auth": getattr(f, 'transfers_from_auth', 0.0),
+                    "transfers_to_auth": getattr(f, 'transfers_to_auth', 0.0),
+                    "candidate_self_contributions": getattr(f, 'candidate_self_contributions', 0.0),
+                    "refunds_issued": getattr(f, 'refunds_issued', 0.0),
                 }
                 for f in financials
             ]
@@ -83,6 +99,14 @@ class TrendAnalysisService:
                 "total_contributions": fin["total_contributions"],
                 "individual_contributions": fin["individual_contributions"],
                 "pac_contributions": fin["pac_contributions"],
+                "party_contributions": fin.get("party_contributions", 0.0),
+                "loan_contributions": fin.get("loan_contributions", 0.0),
+                "loan_repayments": fin.get("loan_repayments", 0.0),
+                "debts_owed_by": fin.get("debts_owed_by", 0.0),
+                "transfers_from_auth": fin.get("transfers_from_auth", 0.0),
+                "transfers_to_auth": fin.get("transfers_to_auth", 0.0),
+                "candidate_self_contributions": fin.get("candidate_self_contributions", 0.0),
+                "refunds_issued": fin.get("refunds_issued", 0.0),
             }
             
             # Calculate growth from previous cycle
@@ -139,6 +163,8 @@ class TrendAnalysisService:
                 "total_contributions": trend["total_contributions"],
                 "individual_contributions": trend["individual_contributions"],
                 "pac_contributions": trend["pac_contributions"],
+                "party_contributions": trend.get("party_contributions", 0.0),
+                "loan_contributions": trend.get("loan_contributions", 0.0),
             })
         
         return {

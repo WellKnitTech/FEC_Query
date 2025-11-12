@@ -28,9 +28,8 @@ export default function CandidateDetail() {
       try {
         const data = await candidateApi.getById(candidateId);
         setCandidate(data);
-      } catch (err) {
-        setError('Failed to load candidate data');
-        console.error(err);
+      } catch (err: any) {
+        setError(err?.response?.data?.detail || err?.message || 'Failed to load candidate data');
       } finally {
         setLoading(false);
       }

@@ -163,6 +163,26 @@ DATA_TYPE_CONFIGS: Dict[DataType, DataTypeConfig] = {
         min_cycle=2010,
         description="Communication costs"
     ),
+    DataType.OTHER_TRANSACTIONS: DataTypeConfig(
+        data_type=DataType.OTHER_TRANSACTIONS,
+        url_pattern="{YEAR}/oth{YY}.zip",
+        file_format=FileFormat.ZIP,
+        zip_internal_file="oth.txt",
+        header_file_url="data_dictionaries/oth_header_file.csv",
+        priority=5,
+        min_cycle=1980,
+        description="Other transactions"
+    ),
+    DataType.PAS2: DataTypeConfig(
+        data_type=DataType.PAS2,
+        url_pattern="{YEAR}/pas2{YY}.zip",
+        file_format=FileFormat.ZIP,
+        zip_internal_file="pas2.txt",
+        header_file_url="data_dictionaries/pas2_header_file.csv",
+        priority=5,
+        min_cycle=1980,
+        description="PAS2 data"
+    ),
 }
 
 

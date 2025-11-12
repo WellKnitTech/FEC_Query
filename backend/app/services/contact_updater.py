@@ -215,7 +215,7 @@ class ContactUpdaterService:
             try:
                 await self._task
             except asyncio.CancelledError:
-                pass
+                logger.debug("Contact updater task was cancelled")
         logger.info("Background contact info updater stopped")
     
     async def _update_loop(self):

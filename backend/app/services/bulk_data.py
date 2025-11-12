@@ -503,8 +503,8 @@ class BulkDataService:
             try:
                 parsed_mmddyyyy = pd.to_datetime(valid_dates, format='%m%d%Y', errors='coerce')
                 result[valid_mask] = parsed_mmddyyyy
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Date parsing failed for MMDDYYYY format, trying next: {e}")
             
             # For any that failed, try YYYYMMDD
             failed_mask = valid_mask & result.isna()
@@ -513,8 +513,8 @@ class BulkDataService:
                     failed_dates = date_strs[failed_mask]
                     parsed_yyyymmdd = pd.to_datetime(failed_dates, format='%Y%m%d', errors='coerce')
                     result[failed_mask] = parsed_yyyymmdd
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Date parsing failed for YYYYMMDD format: {e}")
         
         return result
 

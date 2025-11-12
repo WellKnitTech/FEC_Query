@@ -820,11 +820,11 @@ async def websocket_job_status(websocket: WebSocket, job_id: str):
                 "type": "error",
                 "message": str(e)
             })
-        except:
-            pass
+        except Exception as ws_err:
+            logger.debug(f"Error sending WebSocket message: {ws_err}")
     finally:
         try:
             await websocket.close()
-        except:
-            pass
+        except Exception as close_err:
+            logger.debug(f"Error closing WebSocket: {close_err}")
 

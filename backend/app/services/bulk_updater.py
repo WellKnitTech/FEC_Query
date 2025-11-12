@@ -158,7 +158,7 @@ class BulkUpdaterService:
             try:
                 await self._task
             except asyncio.CancelledError:
-                pass
+                logger.debug("Bulk updater task was cancelled")
         logger.info("Background bulk data updater stopped")
     
     async def _update_loop(self):

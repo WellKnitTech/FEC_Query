@@ -21,7 +21,6 @@ export default function SavedSearches() {
       setSearches(data);
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Failed to load saved searches');
-      console.error(err);
     } finally {
       setLoading(false);
     }
@@ -35,7 +34,6 @@ export default function SavedSearches() {
       await loadSearches();
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Failed to delete saved search');
-      console.error(err);
     }
   };
 

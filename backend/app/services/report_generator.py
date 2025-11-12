@@ -1,6 +1,7 @@
 import io
 import os
 import csv
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from io import BytesIO, StringIO
@@ -37,6 +38,8 @@ from app.models.schemas import (
     ExpenditureBreakdown, EmployerAnalysis, ContributionVelocity,
     FraudAnalysis, MoneyFlowGraph
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ReportGenerator:
@@ -116,7 +119,7 @@ class ReportGenerator:
             )
         except Exception as e:
             # Continue with partial data
-            pass
+            logger.warning(f"Error processing data section: {e}")
         
         return data
     
@@ -424,8 +427,8 @@ class ReportGenerator:
                         img = Image(chart_buf, width=6*inch, height=3.6*inch)
                         story.append(img)
                         story.append(Spacer(1, 12))
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Error adding image to report: {e}")
         else:
             candidate = data.get('candidate')
             if candidate:
@@ -490,8 +493,8 @@ class ReportGenerator:
                 img = Image(chart_buf, width=6*inch, height=3.6*inch)
                 story.append(img)
                 story.append(Spacer(1, 12))
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Error adding contribution chart to report: {e}")
             
             # Top donors table
             if contrib_analysis.top_donors:
@@ -530,8 +533,8 @@ class ReportGenerator:
                 img = Image(chart_buf, width=6*inch, height=3.6*inch)
                 story.append(img)
                 story.append(Spacer(1, 12))
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Error adding expenditure chart to report: {e}")
         
         # Fraud Analysis
         fraud = data.get('fraud_analysis')
@@ -549,8 +552,8 @@ class ReportGenerator:
                 img = Image(chart_buf, width=6*inch, height=3.6*inch)
                 story.append(img)
                 story.append(Spacer(1, 12))
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Error adding fraud chart to report: {e}")
             
             # Fraud patterns table
             pattern_data = [['Pattern Type', 'Severity', 'Amount', 'Confidence']]
@@ -651,8 +654,8 @@ class ReportGenerator:
                     try:
                         chart_buf = self.generate_comparison_chart(comparison_data, 'receipts', 'Total Receipts Comparison')
                         doc.add_picture(chart_buf, width=Inches(6))
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Error adding comparison chart to report: {e}")
         else:
             candidate = data.get('candidate')
             if candidate:
@@ -701,8 +704,8 @@ class ReportGenerator:
             try:
                 chart_buf = self.generate_contribution_chart(contrib_analysis)
                 doc.add_picture(chart_buf, width=Inches(6))
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Error adding contribution chart to report: {e}")
             
             # Top donors
             if contrib_analysis.top_donors:
@@ -733,8 +736,8 @@ class ReportGenerator:
             try:
                 chart_buf = self.generate_expenditure_category_chart(expenditure)
                 doc.add_picture(chart_buf, width=Inches(6))
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Error adding expenditure chart to report: {e}")
         
         # Fraud Analysis
         fraud = data.get('fraud_analysis')
@@ -748,8 +751,8 @@ class ReportGenerator:
             try:
                 chart_buf = self.generate_fraud_radar_chart(fraud)
                 doc.add_picture(chart_buf, width=Inches(6))
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Error adding fraud chart to report: {e}")
             
             # Fraud patterns table
             pattern_table = doc.add_table(rows=1, cols=4)
@@ -1256,8 +1259,8 @@ class ReportGenerator:
                 try:
                     if len(str(cell.value)) > max_length:
                         max_length = len(str(cell.value))
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Error reading cell value for column width calculation: {e}")
             adjusted_width = min(max_length + 2, 50)
             ws.column_dimensions[column_letter].width = adjusted_width
         

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import candidates, contributions, analysis, fraud, bulk_data, export, independent_expenditures, committees
+from app.api.routes import candidates, contributions, analysis, fraud, bulk_data, export, independent_expenditures, committees, saved_searches, trends
 from app.db.database import init_db
 from app.services.bulk_data import _cancelled_jobs, _running_tasks
 import os
@@ -8,6 +8,9 @@ import logging
 import asyncio
 import signal
 from dotenv import load_dotenv
+
+# Global contact updater service
+_contact_updater_service = None
 
 load_dotenv()
 
@@ -57,12 +60,20 @@ app.include_router(bulk_data.router, prefix="/api/bulk-data", tags=["bulk-data"]
 app.include_router(export.router, prefix="/api/export", tags=["export"])
 app.include_router(independent_expenditures.router, prefix="/api/independent-expenditures", tags=["independent-expenditures"])
 app.include_router(committees.router, prefix="/api/committees", tags=["committees"])
+app.include_router(saved_searches.router, prefix="/api/saved-searches", tags=["saved-searches"])
+app.include_router(trends.router, prefix="/api/trends", tags=["trends"])
 
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup"""
     await init_db()
+    
+    # Start contact updater service
+    from app.services.contact_updater import ContactUpdaterService
+    global _contact_updater_service
+    _contact_updater_service = ContactUpdaterService()
+    await _contact_updater_service.start_background_updates()
     
     # Set up signal handlers for graceful shutdown
     def signal_handler(signum, frame):
@@ -88,6 +99,11 @@ async def shutdown_event():
     """Cleanup on shutdown"""
     logger = logging.getLogger(__name__)
     logger.info("Application shutting down, cancelling all running jobs...")
+    
+    # Stop contact updater service
+    global _contact_updater_service
+    if _contact_updater_service:
+        await _contact_updater_service.stop_background_updates()
     
     # Get all running jobs from database and mark them as cancelled
     from app.services.bulk_data import BulkDataService

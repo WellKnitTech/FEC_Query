@@ -53,7 +53,6 @@ export default function TrendAnalysis() {
       setTrends(trendsData);
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Failed to load trends');
-      console.error(err);
     } finally {
       setLoading(false);
     }
@@ -71,7 +70,6 @@ export default function TrendAnalysis() {
       setRaceTrends(raceData);
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Failed to load race trends');
-      console.error(err);
     } finally {
       setLoading(false);
     }

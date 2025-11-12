@@ -17,9 +17,8 @@ export default function FinancialSummaryComponent({ candidateId }: FinancialSumm
       try {
         const data = await candidateApi.getFinancials(candidateId);
         setFinancials(data);
-      } catch (err) {
-        setError('Failed to load financial data');
-        console.error(err);
+      } catch (err: any) {
+        setError(err?.response?.data?.detail || err?.message || 'Failed to load financial data');
       } finally {
         setLoading(false);
       }

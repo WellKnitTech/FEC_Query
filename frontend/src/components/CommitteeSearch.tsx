@@ -26,7 +26,6 @@ export default function CommitteeSearch() {
       setCommittees(results);
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Failed to search committees');
-      console.error(err);
     } finally {
       setLoading(false);
     }

@@ -84,14 +84,14 @@ class IndependentExpenditureService:
                     try:
                         min_date_obj = datetime.strptime(min_date, "%Y-%m-%d")
                         conditions.append(IndependentExpenditure.expenditure_date >= min_date_obj)
-                    except ValueError:
-                        pass
-                if max_date:
-                    try:
-                        max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
-                        conditions.append(IndependentExpenditure.expenditure_date <= max_date_obj)
-                    except ValueError:
-                        pass
+                    except ValueError as e:
+                        logger.debug(f"Invalid min_date format '{min_date}': {e}")
+                    if max_date:
+                        try:
+                            max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
+                            conditions.append(IndependentExpenditure.expenditure_date <= max_date_obj)
+                        except ValueError as e:
+                            logger.debug(f"Invalid max_date format '{max_date}': {e}")
                 
                 if conditions:
                     query = query.where(and_(*conditions))

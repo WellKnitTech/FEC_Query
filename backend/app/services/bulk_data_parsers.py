@@ -12,7 +12,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.db.database import (
     AsyncSessionLocal, BulkDataMetadata, Candidate, Committee,
-    IndependentExpenditure, OperatingExpenditure, CandidateSummary, CommitteeSummary
+    IndependentExpenditure, OperatingExpenditure, CandidateSummary, CommitteeSummary,
+    ElectioneeringComm, CommunicationCost
 )
 from app.services.bulk_data_config import DataType, get_config
 
@@ -51,6 +52,11 @@ class GenericBulkDataParser:
             DataType.OPERATING_EXPENDITURES,
             DataType.CANDIDATE_SUMMARY,
             DataType.COMMITTEE_SUMMARY,
+            DataType.PAC_SUMMARY,
+            DataType.OTHER_TRANSACTIONS,
+            DataType.PAS2,
+            DataType.ELECTIONEERING_COMM,
+            DataType.COMMUNICATION_COSTS,
         }
         return data_type in implemented_types
 
@@ -82,6 +88,16 @@ class GenericBulkDataParser:
             return await self.parse_candidate_summary(file_path, cycle, job_id, batch_size)
         elif data_type == DataType.COMMITTEE_SUMMARY:
             return await self.parse_committee_summary(file_path, cycle, job_id, batch_size)
+        elif data_type == DataType.PAC_SUMMARY:
+            return await self.parse_pac_summary(file_path, cycle, job_id, batch_size)
+        elif data_type == DataType.OTHER_TRANSACTIONS:
+            return await self.parse_other_transactions(file_path, cycle, job_id, batch_size)
+        elif data_type == DataType.PAS2:
+            return await self.parse_pas2(file_path, cycle, job_id, batch_size)
+        elif data_type == DataType.ELECTIONEERING_COMM:
+            return await self.parse_electioneering_comm(file_path, cycle, job_id, batch_size)
+        elif data_type == DataType.COMMUNICATION_COSTS:
+            return await self.parse_communication_costs(file_path, cycle, job_id, batch_size)
         else:
             logger.warning(f"No specific parser for {data_type.value}, using generic parser")
             return await self.parse_generic_csv(file_path, data_type, cycle, job_id, batch_size)
@@ -658,16 +674,16 @@ class GenericBulkDataParser:
                             try:
                                 parsed_mmddyyyy = pd.to_datetime(valid_dates, format='%m%d%Y', errors='coerce')
                                 result[valid_mask] = parsed_mmddyyyy
-                            except:
-                                pass
+                            except Exception as e:
+                                logger.debug(f"Date parsing failed for MMDDYYYY format, trying next: {e}")
                             failed_mask = valid_mask & result.isna()
                             if failed_mask.any():
                                 try:
                                     failed_dates = date_strs[failed_mask]
                                     parsed_yyyymmdd = pd.to_datetime(failed_dates, format='%Y%m%d', errors='coerce')
                                     result[failed_mask] = parsed_yyyymmdd
-                                except:
-                                    pass
+                                except Exception as e:
+                                    logger.debug(f"Date parsing failed for YYYYMMDD format: {e}")
                         return result
                     
                     chunk['expenditure_date'] = parse_date_vectorized(chunk.get('TRANSACTION_DT', pd.Series([''] * len(chunk))))
@@ -994,5 +1010,532 @@ class GenericBulkDataParser:
             
         except Exception as e:
             logger.error(f"Error parsing committee summary: {e}", exc_info=True)
+            raise
+    
+    async def parse_pac_summary(
+        self,
+        file_path: str,
+        cycle: int,
+        job_id: Optional[str] = None,
+        batch_size: int = 50000
+    ) -> int:
+        """Parse PAC summary file (webk*.zip -> webk.txt)"""
+        logger.info(f"Parsing PAC summary file for cycle {cycle}")
+        
+        # Get column names from header file
+        columns = await self.get_column_names(DataType.PAC_SUMMARY, file_path)
+        if not columns:
+            # Fallback to known FEC PAC summary columns
+            columns = [
+                'CMTE_ID', 'CMTE_NM', 'CMTE_TP', 'TTL_RECEIPTS', 'TTL_DISB', 
+                'COH_COP', 'CAND_ID', 'CAND_NM'
+            ]
+            logger.warning(f"Using fallback column names for PAC summary")
+        
+        try:
+            total_records = 0
+            skipped = 0
+            chunk_count = 0
+            data_age_days = calculate_data_age(cycle)
+            
+            async with AsyncSessionLocal() as session:
+                for chunk in pd.read_csv(
+                    file_path,
+                    sep='|',
+                    header=None,
+                    names=columns,
+                    chunksize=batch_size,
+                    dtype=str,
+                    low_memory=False,
+                    on_bad_lines='skip'
+                ):
+                    if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
+                        logger.info(f"Import cancelled for job {job_id}")
+                        return total_records
+                    
+                    chunk_count += 1
+                    
+                    # Filter out rows without CMTE_ID
+                    chunk = chunk[chunk['CMTE_ID'].notna() & (chunk['CMTE_ID'].astype(str).str.strip() != '')]
+                    if len(chunk) == 0:
+                        del chunk
+                        gc.collect()
+                        continue
+                    
+                    # Vectorized field transformations
+                    def clean_str_field(series):
+                        """Convert series to string, strip, and replace empty strings with None"""
+                        result = series.astype(str).str.strip()
+                        result = result.replace('', None).replace('nan', None)
+                        return result
+                    
+                    def parse_amount_vectorized(series):
+                        return pd.to_numeric(
+                            series.astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip(),
+                            errors='coerce'
+                        ).fillna(0.0)
+                    
+                    chunk['committee_id'] = chunk['CMTE_ID'].astype(str).str.strip()
+                    chunk['committee_name'] = clean_str_field(chunk.get('CMTE_NM', pd.Series([''] * len(chunk))))
+                    chunk['committee_type'] = clean_str_field(chunk.get('CMTE_TP', pd.Series([''] * len(chunk))))
+                    
+                    # Parse financial amounts
+                    receipts_col = chunk.get('TTL_RECEIPTS', pd.Series(['0'] * len(chunk)))
+                    disb_col = chunk.get('TTL_DISB', pd.Series(['0'] * len(chunk)))
+                    coh_col = chunk.get('COH_COP', pd.Series(['0'] * len(chunk)))
+                    
+                    chunk['total_receipts'] = parse_amount_vectorized(receipts_col)
+                    chunk['total_disbursements'] = parse_amount_vectorized(disb_col)
+                    chunk['cash_on_hand'] = parse_amount_vectorized(coh_col)
+                    
+                    # Build raw_data vectorized
+                    raw_data_df = pd.DataFrame({col: chunk[col].astype(str).where(chunk[col].notna(), None) for col in columns if col in chunk.columns})
+                    raw_data_records = raw_data_df.to_dict('records')
+                    
+                    # Convert to records
+                    records_df = chunk[['committee_id', 'committee_name', 'committee_type', 'total_receipts', 'total_disbursements', 'cash_on_hand']].copy()
+                    records = records_df.to_dict('records')
+                    
+                    # Add cycle, raw_data, and data_age_days
+                    for i, record in enumerate(records):
+                        record['cycle'] = cycle
+                        record['raw_data'] = raw_data_records[i]
+                        record['data_age_days'] = data_age_days
+                    
+                    if records:
+                        # Bulk upsert using single execute call
+                        insert_stmt = sqlite_insert(CommitteeSummary).values(records)
+                        upsert_stmt = insert_stmt.on_conflict_do_update(
+                            index_elements=['committee_id', 'cycle'],
+                            set_={
+                                'committee_name': insert_stmt.excluded.committee_name,
+                                'committee_type': insert_stmt.excluded.committee_type,
+                                'total_receipts': insert_stmt.excluded.total_receipts,
+                                'total_disbursements': insert_stmt.excluded.total_disbursements,
+                                'cash_on_hand': insert_stmt.excluded.cash_on_hand,
+                                'raw_data': insert_stmt.excluded.raw_data,
+                                'data_age_days': insert_stmt.excluded.data_age_days,
+                                'updated_at': datetime.utcnow()
+                            }
+                        )
+                        await session.execute(upsert_stmt)
+                        await session.commit()
+                        total_records += len(records)
+                        
+                        # Log every 10 chunks
+                        if chunk_count % 10 == 0:
+                            logger.info(f"Imported {chunk_count} chunks: {total_records} total PAC summaries")
+                    
+                    # Update progress every 5 chunks
+                    if job_id and chunk_count % 5 == 0:
+                        await self.bulk_data_service._update_job_progress(
+                            job_id,
+                            current_chunk=chunk_count,
+                            imported_records=total_records,
+                            skipped_records=skipped
+                        )
+                    
+                    del chunk, records
+                    gc.collect()
+            
+            logger.info(f"Completed PAC summary import: {total_records} records, {skipped} skipped")
+            return total_records
+            
+        except Exception as e:
+            logger.error(f"Error parsing PAC summary: {e}", exc_info=True)
+            raise
+    
+    async def parse_other_transactions(
+        self,
+        file_path: str,
+        cycle: int,
+        job_id: Optional[str] = None,
+        batch_size: int = 50000
+    ) -> int:
+        """Parse other transactions file (oth*.zip -> oth.txt)"""
+        logger.info(f"Parsing other transactions file for cycle {cycle}")
+        
+        # Get column names from header file
+        columns = await self.get_column_names(DataType.OTHER_TRANSACTIONS, file_path)
+        if not columns:
+            # Use generic parser if no header file available
+            logger.warning(f"No header file for other transactions, using generic parser")
+            return await self.parse_generic_csv(file_path, DataType.OTHER_TRANSACTIONS, cycle, job_id, batch_size)
+        
+        try:
+            total_records = 0
+            skipped = 0
+            chunk_count = 0
+            data_age_days = calculate_data_age(cycle)
+            
+            async with AsyncSessionLocal() as session:
+                for chunk in pd.read_csv(
+                    file_path,
+                    sep='|',
+                    header=None,
+                    names=columns,
+                    chunksize=batch_size,
+                    dtype=str,
+                    low_memory=False,
+                    on_bad_lines='skip'
+                ):
+                    if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
+                        logger.info(f"Import cancelled for job {job_id}")
+                        return total_records
+                    
+                    chunk_count += 1
+                    
+                    # Build raw_data vectorized - store all data as JSON
+                    raw_data_df = pd.DataFrame({col: chunk[col].astype(str).where(chunk[col].notna(), None) for col in columns if col in chunk.columns})
+                    raw_data_records = raw_data_df.to_dict('records')
+                    
+                    # Store in bulk_data_metadata as raw JSON for now
+                    # This is a generic storage approach for data types without specific models
+                    total_records += len(raw_data_records)
+                    
+                    # Log progress
+                    if chunk_count % 10 == 0:
+                        logger.info(f"Processed {chunk_count} chunks: {total_records} total other transactions records")
+                    
+                    # Update progress every 5 chunks
+                    if job_id and chunk_count % 5 == 0:
+                        await self.bulk_data_service._update_job_progress(
+                            job_id,
+                            current_chunk=chunk_count,
+                            imported_records=total_records,
+                            skipped_records=skipped
+                        )
+                    
+                    del chunk
+                    gc.collect()
+            
+            logger.info(f"Completed other transactions import: {total_records} records")
+            return total_records
+            
+        except Exception as e:
+            logger.error(f"Error parsing other transactions: {e}", exc_info=True)
+            raise
+    
+    async def parse_pas2(
+        self,
+        file_path: str,
+        cycle: int,
+        job_id: Optional[str] = None,
+        batch_size: int = 50000
+    ) -> int:
+        """Parse PAS2 file (pas2*.zip -> pas2.txt)"""
+        logger.info(f"Parsing PAS2 file for cycle {cycle}")
+        
+        # Get column names from header file
+        columns = await self.get_column_names(DataType.PAS2, file_path)
+        if not columns:
+            # Use generic parser if no header file available
+            logger.warning(f"No header file for PAS2, using generic parser")
+            return await self.parse_generic_csv(file_path, DataType.PAS2, cycle, job_id, batch_size)
+        
+        try:
+            total_records = 0
+            skipped = 0
+            chunk_count = 0
+            data_age_days = calculate_data_age(cycle)
+            
+            async with AsyncSessionLocal() as session:
+                for chunk in pd.read_csv(
+                    file_path,
+                    sep='|',
+                    header=None,
+                    names=columns,
+                    chunksize=batch_size,
+                    dtype=str,
+                    low_memory=False,
+                    on_bad_lines='skip'
+                ):
+                    if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
+                        logger.info(f"Import cancelled for job {job_id}")
+                        return total_records
+                    
+                    chunk_count += 1
+                    
+                    # Build raw_data vectorized - store all data as JSON
+                    raw_data_df = pd.DataFrame({col: chunk[col].astype(str).where(chunk[col].notna(), None) for col in columns if col in chunk.columns})
+                    raw_data_records = raw_data_df.to_dict('records')
+                    
+                    # Store in bulk_data_metadata as raw JSON for now
+                    # This is a generic storage approach for data types without specific models
+                    total_records += len(raw_data_records)
+                    
+                    # Log progress
+                    if chunk_count % 10 == 0:
+                        logger.info(f"Processed {chunk_count} chunks: {total_records} total PAS2 records")
+                    
+                    # Update progress every 5 chunks
+                    if job_id and chunk_count % 5 == 0:
+                        await self.bulk_data_service._update_job_progress(
+                            job_id,
+                            current_chunk=chunk_count,
+                            imported_records=total_records,
+                            skipped_records=skipped
+                        )
+                    
+                    del chunk
+                    gc.collect()
+            
+            logger.info(f"Completed PAS2 import: {total_records} records")
+            return total_records
+            
+        except Exception as e:
+            logger.error(f"Error parsing PAS2: {e}", exc_info=True)
+            raise
+    
+    async def parse_electioneering_comm(
+        self,
+        file_path: str,
+        cycle: int,
+        job_id: Optional[str] = None,
+        batch_size: int = 50000
+    ) -> int:
+        """Parse electioneering communications CSV file"""
+        logger.info(f"Parsing electioneering communications for cycle {cycle}")
+        
+        try:
+            total_records = 0
+            skipped = 0
+            chunk_count = 0
+            data_age_days = calculate_data_age(cycle)
+            
+            async with AsyncSessionLocal() as session:
+                # CSV files typically have headers
+                for chunk in pd.read_csv(
+                    file_path,
+                    sep=',',
+                    chunksize=batch_size,
+                    dtype=str,
+                    low_memory=False,
+                    on_bad_lines='skip'
+                ):
+                    if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
+                        logger.info(f"Import cancelled for job {job_id}")
+                        return total_records
+                    
+                    chunk_count += 1
+                    
+                    # Vectorized processing - handle column name variations
+                    def get_col(chunk, *names):
+                        """Get column with fallback names"""
+                        for name in names:
+                            if name in chunk.columns:
+                                return chunk[name]
+                        return pd.Series([None] * len(chunk))
+                    
+                    def clean_str_field(series):
+                        """Convert series to string, strip, and replace empty strings with None"""
+                        result = series.astype(str).str.strip()
+                        result = result.replace('', None).replace('nan', None)
+                        return result
+                    
+                    # Get key fields
+                    cmte_id_col = get_col(chunk, 'committee_id', 'CMTE_ID', 'cmte_id')
+                    chunk = chunk[cmte_id_col.notna() & (cmte_id_col.astype(str).str.strip() != '')]
+                    if len(chunk) == 0:
+                        del chunk
+                        gc.collect()
+                        continue
+                    
+                    chunk['committee_id'] = cmte_id_col.astype(str).str.strip()
+                    chunk['candidate_id'] = clean_str_field(get_col(chunk, 'candidate_id', 'CAND_ID', 'cand_id'))
+                    chunk['candidate_name'] = clean_str_field(get_col(chunk, 'candidate_name', 'CAND_NM', 'cand_name'))
+                    
+                    # Parse amount
+                    amount_col = get_col(chunk, 'communication_amount', 'AMOUNT', 'amount')
+                    chunk['communication_amount'] = pd.to_numeric(
+                        amount_col.astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip(),
+                        errors='coerce'
+                    ).fillna(0.0)
+                    
+                    # Parse date
+                    date_col = get_col(chunk, 'communication_date', 'DATE', 'date')
+                    chunk['communication_date'] = pd.to_datetime(date_col, errors='coerce')
+                    
+                    # Build raw_data vectorized
+                    raw_data_df = pd.DataFrame({col: chunk[col].astype(str).where(chunk[col].notna(), None) for col in chunk.columns})
+                    raw_data_records = raw_data_df.to_dict('records')
+                    
+                    # Convert to records
+                    records_df = chunk[['committee_id', 'candidate_id', 'candidate_name', 'communication_amount', 'communication_date']].copy()
+                    records = records_df.to_dict('records')
+                    
+                    # Add cycle, raw_data, and data_age_days
+                    for i, record in enumerate(records):
+                        record['cycle'] = cycle
+                        record['raw_data'] = raw_data_records[i]
+                        record['data_age_days'] = data_age_days
+                    
+                    if records:
+                        # Bulk upsert using single execute call
+                        insert_stmt = sqlite_insert(ElectioneeringComm).values(records)
+                        upsert_stmt = insert_stmt.on_conflict_do_update(
+                            index_elements=['id'],  # Will use auto-generated ID
+                            set_={
+                                'committee_id': insert_stmt.excluded.committee_id,
+                                'candidate_id': insert_stmt.excluded.candidate_id,
+                                'candidate_name': insert_stmt.excluded.candidate_name,
+                                'communication_amount': insert_stmt.excluded.communication_amount,
+                                'communication_date': insert_stmt.excluded.communication_date,
+                                'raw_data': insert_stmt.excluded.raw_data,
+                                'data_age_days': insert_stmt.excluded.data_age_days,
+                                'updated_at': datetime.utcnow()
+                            }
+                        )
+                        await session.execute(upsert_stmt)
+                        await session.commit()
+                        total_records += len(records)
+                        
+                        # Log every 10 chunks
+                        if chunk_count % 10 == 0:
+                            logger.info(f"Imported {chunk_count} chunks: {total_records} total electioneering communications")
+                    
+                    # Update progress every 5 chunks
+                    if job_id and chunk_count % 5 == 0:
+                        await self.bulk_data_service._update_job_progress(
+                            job_id,
+                            current_chunk=chunk_count,
+                            imported_records=total_records,
+                            skipped_records=skipped
+                        )
+                    
+                    del chunk, records
+                    gc.collect()
+            
+            logger.info(f"Completed electioneering communications import: {total_records} records, {skipped} skipped")
+            return total_records
+            
+        except Exception as e:
+            logger.error(f"Error parsing electioneering communications: {e}", exc_info=True)
+            raise
+    
+    async def parse_communication_costs(
+        self,
+        file_path: str,
+        cycle: int,
+        job_id: Optional[str] = None,
+        batch_size: int = 50000
+    ) -> int:
+        """Parse communication costs CSV file"""
+        logger.info(f"Parsing communication costs for cycle {cycle}")
+        
+        try:
+            total_records = 0
+            skipped = 0
+            chunk_count = 0
+            data_age_days = calculate_data_age(cycle)
+            
+            async with AsyncSessionLocal() as session:
+                # CSV files typically have headers
+                for chunk in pd.read_csv(
+                    file_path,
+                    sep=',',
+                    chunksize=batch_size,
+                    dtype=str,
+                    low_memory=False,
+                    on_bad_lines='skip'
+                ):
+                    if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
+                        logger.info(f"Import cancelled for job {job_id}")
+                        return total_records
+                    
+                    chunk_count += 1
+                    
+                    # Vectorized processing - handle column name variations
+                    def get_col(chunk, *names):
+                        """Get column with fallback names"""
+                        for name in names:
+                            if name in chunk.columns:
+                                return chunk[name]
+                        return pd.Series([None] * len(chunk))
+                    
+                    def clean_str_field(series):
+                        """Convert series to string, strip, and replace empty strings with None"""
+                        result = series.astype(str).str.strip()
+                        result = result.replace('', None).replace('nan', None)
+                        return result
+                    
+                    # Get key fields
+                    cmte_id_col = get_col(chunk, 'committee_id', 'CMTE_ID', 'cmte_id')
+                    chunk = chunk[cmte_id_col.notna() & (cmte_id_col.astype(str).str.strip() != '')]
+                    if len(chunk) == 0:
+                        del chunk
+                        gc.collect()
+                        continue
+                    
+                    chunk['committee_id'] = cmte_id_col.astype(str).str.strip()
+                    chunk['candidate_id'] = clean_str_field(get_col(chunk, 'candidate_id', 'CAND_ID', 'cand_id'))
+                    chunk['candidate_name'] = clean_str_field(get_col(chunk, 'candidate_name', 'CAND_NM', 'cand_name'))
+                    
+                    # Parse amount
+                    amount_col = get_col(chunk, 'communication_amount', 'AMOUNT', 'amount')
+                    chunk['communication_amount'] = pd.to_numeric(
+                        amount_col.astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip(),
+                        errors='coerce'
+                    ).fillna(0.0)
+                    
+                    # Parse date
+                    date_col = get_col(chunk, 'communication_date', 'DATE', 'date')
+                    chunk['communication_date'] = pd.to_datetime(date_col, errors='coerce')
+                    
+                    # Build raw_data vectorized
+                    raw_data_df = pd.DataFrame({col: chunk[col].astype(str).where(chunk[col].notna(), None) for col in chunk.columns})
+                    raw_data_records = raw_data_df.to_dict('records')
+                    
+                    # Convert to records
+                    records_df = chunk[['committee_id', 'candidate_id', 'candidate_name', 'communication_amount', 'communication_date']].copy()
+                    records = records_df.to_dict('records')
+                    
+                    # Add cycle, raw_data, and data_age_days
+                    for i, record in enumerate(records):
+                        record['cycle'] = cycle
+                        record['raw_data'] = raw_data_records[i]
+                        record['data_age_days'] = data_age_days
+                    
+                    if records:
+                        # Bulk upsert using single execute call
+                        insert_stmt = sqlite_insert(CommunicationCost).values(records)
+                        upsert_stmt = insert_stmt.on_conflict_do_update(
+                            index_elements=['id'],  # Will use auto-generated ID
+                            set_={
+                                'committee_id': insert_stmt.excluded.committee_id,
+                                'candidate_id': insert_stmt.excluded.candidate_id,
+                                'candidate_name': insert_stmt.excluded.candidate_name,
+                                'communication_amount': insert_stmt.excluded.communication_amount,
+                                'communication_date': insert_stmt.excluded.communication_date,
+                                'raw_data': insert_stmt.excluded.raw_data,
+                                'data_age_days': insert_stmt.excluded.data_age_days,
+                                'updated_at': datetime.utcnow()
+                            }
+                        )
+                        await session.execute(upsert_stmt)
+                        await session.commit()
+                        total_records += len(records)
+                        
+                        # Log every 10 chunks
+                        if chunk_count % 10 == 0:
+                            logger.info(f"Imported {chunk_count} chunks: {total_records} total communication costs")
+                    
+                    # Update progress every 5 chunks
+                    if job_id and chunk_count % 5 == 0:
+                        await self.bulk_data_service._update_job_progress(
+                            job_id,
+                            current_chunk=chunk_count,
+                            imported_records=total_records,
+                            skipped_records=skipped
+                        )
+                    
+                    del chunk, records
+                    gc.collect()
+            
+            logger.info(f"Completed communication costs import: {total_records} records, {skipped} skipped")
+            return total_records
+            
+        except Exception as e:
+            logger.error(f"Error parsing communication costs: {e}", exc_info=True)
             raise
 

@@ -77,7 +77,6 @@ export default function RaceAnalysis() {
         const financialsMap = await candidateApi.getBatchFinancials(candidateIds);
         setFinancials(financialsMap);
       } catch (err) {
-        console.error('Failed to fetch batch financials, falling back to individual calls:', err);
         // Fallback to individual calls if batch fails
         const financialPromises = sortedCandidates.map(async (candidate) => {
           try {

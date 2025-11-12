@@ -5,6 +5,10 @@ import DonorAnalysis from './pages/DonorAnalysis';
 import RaceAnalysis from './pages/RaceAnalysis';
 import BulkDataManagement from './pages/BulkDataManagement';
 import IndependentExpenditures from './pages/IndependentExpenditures';
+import SavedSearches from './pages/SavedSearches';
+import TrendAnalysis from './pages/TrendAnalysis';
+import CommitteeDetail from './pages/CommitteeDetail';
+import Committees from './pages/Committees';
 import './App.css';
 
 function App() {
@@ -49,6 +53,24 @@ function App() {
                   >
                     Independent Expenditures
                   </Link>
+                  <Link
+                    to="/trends"
+                    className="text-gray-600 hover:text-gray-900 px-3 py-2 rounded-md text-sm font-medium"
+                  >
+                    Trends
+                  </Link>
+                  <Link
+                    to="/saved-searches"
+                    className="text-gray-600 hover:text-gray-900 px-3 py-2 rounded-md text-sm font-medium"
+                  >
+                    Saved Searches
+                  </Link>
+                  <Link
+                    to="/committees"
+                    className="text-gray-600 hover:text-gray-900 px-3 py-2 rounded-md text-sm font-medium"
+                  >
+                    Committees
+                  </Link>
                 </div>
               </div>
             </div>
@@ -61,6 +83,10 @@ function App() {
           <Route path="/donor-analysis" element={<DonorAnalysis />} />
           <Route path="/bulk-data" element={<BulkDataManagement />} />
           <Route path="/independent-expenditures" element={<IndependentExpenditures />} />
+          <Route path="/trends" element={<TrendAnalysis />} />
+          <Route path="/saved-searches" element={<SavedSearches />} />
+          <Route path="/committee/:committeeId" element={<CommitteeDetail />} />
+          <Route path="/committees" element={<Committees />} />
         </Routes>
       </div>
     </Router>

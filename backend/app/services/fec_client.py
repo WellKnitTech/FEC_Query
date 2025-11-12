@@ -213,8 +213,8 @@ class FECClient:
                                             error_detail = error_data["message"]
                                         elif "error" in error_data:
                                             error_detail = error_data["error"]
-                                except:
-                                    pass
+                                except Exception as e:
+                                    logger.debug(f"Could not parse error response: {e}")
                                 raise Exception(f"FEC API error: {error_detail}")
                         
                         response.raise_for_status()
@@ -270,8 +270,8 @@ class FECClient:
                             error_data = last_exception.response.json()
                             if isinstance(error_data, dict) and "message" in error_data:
                                 error_detail = error_data["message"]
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Could not parse error response: {e}")
                     raise Exception(f"FEC API error: {error_detail}")
                 
                 # This should never be reached
