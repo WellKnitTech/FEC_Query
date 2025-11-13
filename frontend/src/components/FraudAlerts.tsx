@@ -12,13 +12,16 @@ export default function FraudAlerts({ candidateId, minDate, maxDate }: FraudAler
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedPattern, setExpandedPattern] = useState<string | null>(null);
+  const [useAggregation, setUseAggregation] = useState<boolean>(true);
 
   useEffect(() => {
     const fetchAnalysis = async () => {
       setLoading(true);
       setError(null);
       try {
-        const data = await fraudApi.analyze(candidateId, minDate, maxDate);
+        const data = useAggregation
+          ? await fraudApi.analyzeWithAggregation(candidateId, minDate, maxDate, true)
+          : await fraudApi.analyze(candidateId, minDate, maxDate);
         setAnalysis(data);
       } catch (err) {
         setError('Failed to load fraud analysis');
@@ -31,7 +34,7 @@ export default function FraudAlerts({ candidateId, minDate, maxDate }: FraudAler
     if (candidateId) {
       fetchAnalysis();
     }
-  }, [candidateId, minDate, maxDate]);
+  }, [candidateId, minDate, maxDate, useAggregation]);
 
   if (loading) {
     return (
@@ -80,6 +83,15 @@ export default function FraudAlerts({ candidateId, minDate, maxDate }: FraudAler
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-xl font-semibold">Fraud Detection Analysis</h2>
         <div className="flex items-center gap-4">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={useAggregation}
+              onChange={(e) => setUseAggregation(e.target.checked)}
+              className="rounded"
+            />
+            <span className="text-sm text-gray-600">Use Aggregated Donors</span>
+          </label>
           <div>
             <div className="text-sm text-gray-600">Risk Score</div>
             <div className="flex items-center gap-2">
@@ -95,8 +107,21 @@ export default function FraudAlerts({ candidateId, minDate, maxDate }: FraudAler
         </div>
       </div>
 
+      {analysis.aggregation_enabled && (
+        <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+          <div className="flex items-center gap-2 text-sm text-blue-800">
+            <span className="font-semibold">✓ Aggregated Analysis Enabled</span>
+            {analysis.aggregated_donors_count !== undefined && (
+              <span className="text-blue-600">
+                ({analysis.aggregated_donors_count} unique donors identified)
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="mb-4 p-4 bg-gray-50 rounded-lg">
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <div>
             <div className="text-sm text-gray-600">Total Suspicious Amount</div>
             <div className="text-2xl font-bold">
@@ -107,6 +132,12 @@ export default function FraudAlerts({ candidateId, minDate, maxDate }: FraudAler
             <div className="text-sm text-gray-600">Patterns Detected</div>
             <div className="text-2xl font-bold">{analysis.patterns.length}</div>
           </div>
+          {analysis.aggregated_donors_count !== undefined && (
+            <div>
+              <div className="text-sm text-gray-600">Unique Donors</div>
+              <div className="text-2xl font-bold">{analysis.aggregated_donors_count}</div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -129,8 +160,16 @@ export default function FraudAlerts({ candidateId, minDate, maxDate }: FraudAler
                       {pattern.severity}
                     </span>
                     <span className="px-2 py-1 bg-white rounded text-xs font-semibold">
-                      {pattern.pattern_type.replace('_', ' ').toUpperCase()}
+                      {pattern.pattern_type.replace(/_/g, ' ').toUpperCase()}
                     </span>
+                    {(pattern.pattern_type.includes('aggregate') || 
+                      pattern.pattern_type === 'name_variation_fraud' ||
+                      pattern.pattern_type === 'coordinated_contributions' ||
+                      pattern.pattern_type === 'rapid_sequential') && (
+                      <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-semibold">
+                        AGGREGATED
+                      </span>
+                    )}
                     <span className="text-sm">
                       Confidence: {(pattern.confidence_score * 100).toFixed(0)}%
                     </span>

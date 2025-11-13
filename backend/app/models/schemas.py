@@ -25,6 +25,7 @@ class FinancialSummary(BaseModel):
     individual_contributions: float = 0.0
     pac_contributions: float = 0.0
     party_contributions: float = 0.0
+    loan_contributions: float = 0.0
 
 
 class Contribution(BaseModel):
@@ -80,6 +81,8 @@ class FraudAnalysis(BaseModel):
     patterns: List[FraudPattern]
     risk_score: float
     total_suspicious_amount: float
+    aggregated_donors_count: Optional[int] = None  # Number of unique donors after aggregation
+    aggregation_enabled: bool = False  # Whether aggregation was used
 
 
 class MoneyFlowNode(BaseModel):
@@ -195,6 +198,23 @@ class ContactInformation(BaseModel):
     phone: Optional[str] = None
     website: Optional[str] = None
     treasurer_name: Optional[str] = None  # Only for committees
+
+
+class AggregatedDonor(BaseModel):
+    """Aggregated donor information combining contributions from same person"""
+    donor_key: str
+    canonical_name: str
+    canonical_state: Optional[str] = None
+    canonical_city: Optional[str] = None
+    canonical_employer: Optional[str] = None
+    canonical_occupation: Optional[str] = None
+    total_amount: float
+    contribution_count: int
+    first_contribution_date: Optional[str] = None
+    last_contribution_date: Optional[str] = None
+    contribution_ids: List[str]
+    all_names: List[str]  # All name variations found
+    match_confidence: float  # 0.0-1.0
 
 
 # Update forward references

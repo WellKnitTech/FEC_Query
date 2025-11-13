@@ -560,39 +560,48 @@ class FECClient:
         """Search for candidates - queries local DB first, falls back to API"""
         # Try local database first
         if self.bulk_data_enabled:
-            local_data = await self._query_local_candidates(
-                name=name, office=office, state=state, party=party, year=year, district=district, limit=limit
-            )
-            if local_data and len(local_data) > 0:
-                return local_data
+            try:
+                local_data = await self._query_local_candidates(
+                    name=name, office=office, state=state, party=party, year=year, district=district, limit=limit
+                )
+                if local_data and len(local_data) > 0:
+                    logger.debug(f"Found {len(local_data)} candidates in local database")
+                    return local_data
+            except Exception as e:
+                logger.warning(f"Error querying local candidates, falling back to API: {e}")
         
         # Fall back to API
-        params = {
-            "per_page": limit,
-            "sort": "-election_years"
-        }
-        if name:
-            params["q"] = name
-        if office:
-            params["office"] = office
-        if state:
-            params["state"] = state
-        if party:
-            params["party"] = party
-        if year:
-            params["election_year"] = year
-        if district:
-            params["district"] = district
-        
-        data = await self._make_request("candidates", params)
-        results = data.get("results", [])
-        
-        # Store results in local DB
-        if self.bulk_data_enabled:
-            for candidate in results:
-                asyncio.create_task(self._store_candidate(candidate))
-        
-        return results
+        logger.debug(f"Querying FEC API for candidates: name={name}, office={office}, state={state}")
+        try:
+            params = {
+                "per_page": limit,
+                "sort": "-election_years"
+            }
+            if name:
+                params["q"] = name
+            if office:
+                params["office"] = office
+            if state:
+                params["state"] = state
+            if party:
+                params["party"] = party
+            if year:
+                params["election_year"] = year
+            if district:
+                params["district"] = district
+            
+            data = await self._make_request("candidates", params)
+            results = data.get("results", [])
+            
+            # Store results in local DB
+            if results and self.bulk_data_enabled:
+                for candidate in results:
+                    asyncio.create_task(self._store_candidate(candidate))
+            
+            return results
+        except Exception as e:
+            logger.error(f"API fallback failed for candidate search: {e}")
+            return []
     
     async def get_race_candidates(
         self,
@@ -652,20 +661,29 @@ class FECClient:
         """Get candidate details by ID - queries local DB first, falls back to API"""
         # Try local database first
         if self.bulk_data_enabled:
-            local_data = await self._query_local_candidate(candidate_id)
-            if local_data:
-                return local_data
+            try:
+                local_data = await self._query_local_candidate(candidate_id)
+                if local_data:
+                    logger.debug(f"Found candidate {candidate_id} in local database")
+                    return local_data
+            except Exception as e:
+                logger.warning(f"Error querying local candidate {candidate_id}, falling back to API: {e}")
         
         # Fall back to API
-        params = {}
-        data = await self._make_request(f"candidate/{candidate_id}", params)
-        result = data.get("results", [{}])[0] if data.get("results") else None
-        
-        # Store in local DB
-        if result and self.bulk_data_enabled:
-            asyncio.create_task(self._store_candidate(result))
-        
-        return result
+        logger.debug(f"Querying FEC API for candidate {candidate_id}")
+        try:
+            params = {}
+            data = await self._make_request(f"candidate/{candidate_id}", params)
+            result = data.get("results", [{}])[0] if data.get("results") else None
+            
+            # Store in local DB
+            if result and self.bulk_data_enabled:
+                asyncio.create_task(self._store_candidate(result))
+            
+            return result
+        except Exception as e:
+            logger.error(f"API fallback failed for candidate {candidate_id}: {e}")
+            return None
     
     async def _query_local_financial_totals(
         self,
@@ -702,7 +720,8 @@ class FECClient:
                             "contributions": f.total_contributions,
                             "individual_contributions": f.individual_contributions,
                             "pac_contributions": f.pac_contributions,
-                            "party_contributions": f.party_contributions
+                            "party_contributions": f.party_contributions,
+                            "loan_contributions": getattr(f, 'loan_contributions', 0.0)
                         }
                         if f.raw_data:
                             financial_dict.update(f.raw_data)
@@ -746,6 +765,7 @@ class FECClient:
                             existing.individual_contributions = float(financial_data.get("individual_contributions", 0))
                             existing.pac_contributions = float(financial_data.get("pac_contributions", 0))
                             existing.party_contributions = float(financial_data.get("party_contributions", 0))
+                            existing.loan_contributions = float(financial_data.get("loan_contributions", 0) or financial_data.get("loans_received", 0) or 0)
                             existing.raw_data = financial_data
                             existing.updated_at = datetime.utcnow()
                         else:
@@ -760,6 +780,7 @@ class FECClient:
                                 individual_contributions=float(financial_data.get("individual_contributions", 0)),
                                 pac_contributions=float(financial_data.get("pac_contributions", 0)),
                                 party_contributions=float(financial_data.get("party_contributions", 0)),
+                                loan_contributions=float(financial_data.get("loan_contributions", 0) or financial_data.get("loans_received", 0) or 0),
                                 raw_data=financial_data
                             )
                             session.add(financial)
@@ -792,24 +813,80 @@ class FECClient:
         """Get candidate financial totals - queries local DB first, falls back to API"""
         # Try local database first
         if self.bulk_data_enabled:
-            local_data = await self._query_local_financial_totals(candidate_id, cycle)
-            if local_data:
-                return local_data
+            try:
+                local_data = await self._query_local_financial_totals(candidate_id, cycle)
+                if local_data and len(local_data) > 0:
+                    logger.debug(f"Found financial totals for candidate {candidate_id} (cycle {cycle}) in local database")
+                    return local_data
+            except Exception as e:
+                logger.warning(f"Error querying local financial totals for {candidate_id}, falling back to API: {e}")
         
         # Fall back to API
-        params = {}
-        if cycle:
-            params["cycle"] = cycle
+        logger.debug(f"Querying FEC API for financial totals: candidate {candidate_id}, cycle {cycle}")
+        try:
+            params = {}
+            if cycle:
+                params["cycle"] = cycle
+            
+            data = await self._make_request(f"candidate/{candidate_id}/totals", params)
+            results = data.get("results", [])
+            
+            # Store results in local DB
+            if results and self.bulk_data_enabled:
+                for financial in results:
+                    asyncio.create_task(self._store_financial_total(candidate_id, financial))
+            
+            return results
+        except Exception as e:
+            logger.error(f"API fallback failed for financial totals (candidate {candidate_id}, cycle {cycle}): {e}")
+            return []
+    
+    async def _get_latest_contribution_date(
+        self,
+        candidate_id: Optional[str] = None,
+        committee_id: Optional[str] = None,
+        contributor_name: Optional[str] = None
+    ) -> Optional[datetime]:
+        """
+        Get the latest contribution date from database for a given query to determine what's new.
         
-        data = await self._make_request(f"candidate/{candidate_id}/totals", params)
-        results = data.get("results", [])
+        This method queries the contributions table which includes:
+        - Contributions imported from bulk CSV files
+        - Contributions fetched from the FEC API
+        - Any other contributions stored in the database
         
-        # Store results in local DB
-        if self.bulk_data_enabled:
-            for financial in results:
-                asyncio.create_task(self._store_financial_total(candidate_id, financial))
-        
-        return results
+        Returns the most recent contribution_date for the given filters, which is used
+        to determine what new contributions need to be fetched from the API.
+        """
+        try:
+            async with AsyncSessionLocal() as session:
+                query = select(func.max(Contribution.contribution_date))
+                conditions = []
+                
+                if candidate_id:
+                    conditions.append(Contribution.candidate_id == candidate_id)
+                if committee_id:
+                    conditions.append(Contribution.committee_id == committee_id)
+                if contributor_name:
+                    conditions.append(
+                        Contribution.contributor_name.ilike(f"%{contributor_name}%")
+                    )
+                
+                if conditions:
+                    query = query.where(and_(*conditions))
+                
+                result = await session.execute(query)
+                latest_date = result.scalar_one_or_none()
+                
+                if latest_date:
+                    logger.debug(f"Latest contribution date in DB: {latest_date.strftime('%Y-%m-%d')} "
+                              f"(candidate_id={candidate_id}, committee_id={committee_id}, "
+                              f"contributor_name={contributor_name})")
+                
+                return latest_date
+        except Exception as e:
+            logger.debug(f"Error getting latest contribution date: {e}")
+            return None
     
     async def _query_local_contributions(
         self,
@@ -936,32 +1013,74 @@ class FECClient:
         min_date: Optional[str] = None,
         max_date: Optional[str] = None,
         limit: int = 100,
-        two_year_transaction_period: Optional[int] = None
+        two_year_transaction_period: Optional[int] = None,
+        fetch_new_only: bool = True
     ) -> List[Dict]:
-        """Get contributions/schedules/schedule_a - queries local DB first, falls back to API"""
+        """Get contributions/schedules/schedule_a - queries local DB first, falls back to API for new data only"""
+        local_data = []
+        latest_db_date = None
+        
         # Try local database first if bulk data is enabled
         if self.bulk_data_enabled:
-            local_data = await self._query_local_contributions(
-                candidate_id=candidate_id,
-                committee_id=committee_id,
-                contributor_name=contributor_name,
-                min_amount=min_amount,
-                max_amount=max_amount,
-                min_date=min_date,
-                max_date=max_date,
-                limit=limit,
-                two_year_transaction_period=two_year_transaction_period
-            )
-            if local_data:
-                return local_data
+            try:
+                local_data = await self._query_local_contributions(
+                    candidate_id=candidate_id,
+                    committee_id=committee_id,
+                    contributor_name=contributor_name,
+                    min_amount=min_amount,
+                    max_amount=max_amount,
+                    min_date=min_date,
+                    max_date=max_date,
+                    limit=limit,
+                    two_year_transaction_period=two_year_transaction_period
+                ) or []
+                
+                if local_data:
+                    logger.debug(f"Found {len(local_data)} contributions in local database")
+                    
+                    # If we have local data and fetch_new_only is True, determine latest date
+                    # to only fetch new contributions from API
+                    if fetch_new_only:
+                        latest_db_date = await self._get_latest_contribution_date(
+                            candidate_id=candidate_id,
+                            committee_id=committee_id,
+                            contributor_name=contributor_name
+                        )
+                        
+                        if latest_db_date:
+                            # Fetch contributions from the latest date (inclusive) to catch any we might have missed
+                            # The database's unique constraint on contribution_id will handle deduplication
+                            # This ensures we catch all contributions from the latest date, even if someone
+                            # contributed multiple times that day
+                            new_min_date = latest_db_date.strftime("%Y-%m-%d")
+                            if not min_date or new_min_date >= min_date:
+                                min_date = new_min_date
+                                logger.info(f"Fetching contributions from {min_date} onwards (latest in DB: {latest_db_date.strftime('%Y-%m-%d')}) "
+                                          f"- duplicates will be automatically skipped via contribution_id")
+                            else:
+                                logger.debug(f"User-specified min_date {min_date} is earlier than latest DB date, fetching all requested data")
+                        else:
+                            logger.debug("No latest date found in database, will fetch all contributions")
+                    
+                    # If we have enough local data and fetch_new_only is False, we can return early
+                    # Otherwise, we'll fetch new data and merge
+                    if len(local_data) >= limit and not fetch_new_only:
+                        logger.debug(f"Have enough local data ({len(local_data)}), returning without API call")
+                        return local_data[:limit]
+            except Exception as e:
+                logger.warning(f"Error querying local contributions, falling back to API: {e}")
         
-        # Fall back to API
-        # If only candidate_id is provided, we need to get committees first
-        # or provide two_year_transaction_period
-        if candidate_id and not committee_id and not two_year_transaction_period:
-            # Get committees for the candidate to use committee_id filter
-            committees = await self.get_committees(candidate_id=candidate_id, limit=100)
-            if committees:
+        # Fetch new contributions from API (if any)
+        logger.debug(f"Querying FEC API for contributions: candidate_id={candidate_id}, committee_id={committee_id}, min_date={min_date}")
+        try:
+            committees = None
+            # If only candidate_id is provided, we need to get committees first
+            # or provide two_year_transaction_period
+            if candidate_id and not committee_id and not two_year_transaction_period:
+                # Get committees for the candidate to use committee_id filter
+                committees = await self.get_committees(candidate_id=candidate_id, limit=100)
+            
+            if committees and len(committees) > 0:
                 # Query contributions for each committee and combine
                 all_contributions = []
                 # Get current election cycle for two_year_transaction_period (must be even year)
@@ -991,12 +1110,48 @@ class FECClient:
                         
                         try:
                             data = await self._make_request("schedules/schedule_a", params)
-                            all_contributions.extend(data.get("results", []))
+                            committee_contribs = data.get("results", [])
+                            
+                            # Store contributions in database for caching
+                            if committee_contribs:
+                                logger.debug(f"Storing {len(committee_contribs)} contributions from committee {comm_id} in database")
+                                for contrib in committee_contribs:
+                                    asyncio.create_task(self._store_contribution(contrib))
+                            
+                            # Merge with local data, avoiding duplicates
+                            existing_ids = {c.get('contribution_id') or c.get('sub_id') for c in all_contributions}
+                            for contrib in committee_contribs:
+                                contrib_id = contrib.get('contribution_id') or contrib.get('sub_id')
+                                if contrib_id and contrib_id not in existing_ids:
+                                    all_contributions.append(contrib)
+                                    existing_ids.add(contrib_id)
+                            
                             if len(all_contributions) >= limit:
                                 break
                         except Exception:
                             continue  # Skip if this committee fails
                 
+                # Merge with local data
+                if local_data:
+                    existing_ids = {c.get('contribution_id') or c.get('sub_id') for c in all_contributions}
+                    for contrib in local_data:
+                        contrib_id = contrib.get('contribution_id') or contrib.get('sub_id')
+                        if contrib_id and contrib_id not in existing_ids:
+                            all_contributions.append(contrib)
+                            existing_ids.add(contrib_id)
+                
+                # Sort by date descending
+                all_contributions.sort(
+                    key=lambda x: (
+                        datetime.strptime(x.get('contribution_date') or x.get('contribution_receipt_date') or '1900-01-01', '%Y-%m-%d')
+                        if isinstance(x.get('contribution_date') or x.get('contribution_receipt_date'), str)
+                        else (x.get('contribution_date') or x.get('contribution_receipt_date') or datetime(1900, 1, 1))
+                    ),
+                    reverse=True
+                )
+                
+                new_count = len(all_contributions) - len(local_data) if local_data else len(all_contributions)
+                logger.info(f"Returning {len(all_contributions)} total contributions ({len(local_data)} from DB, {new_count} new from API)")
                 return all_contributions[:limit]
             else:
                 # No committees found, try with two_year_transaction_period
@@ -1004,42 +1159,77 @@ class FECClient:
                 current_year = datetime.now().year
                 # Round down to nearest even year
                 two_year_transaction_period = (current_year // 2) * 2
-        
-        params = {
-            "per_page": 100,  # FEC API max is 100, pagination will handle more
-            "sort": "-contribution_receipt_date",
-            "_original_limit": limit  # Store original limit for pagination
-        }
-        
-        # Always add two_year_transaction_period if not provided (must be even year)
-        current_year = datetime.now().year
-        # Round down to nearest even year
-        default_cycle = (current_year // 2) * 2
-        if not two_year_transaction_period:
-            two_year_transaction_period = default_cycle
-        
-        # Add two_year_transaction_period - API requires it for schedule_a
-        params["two_year_transaction_period"] = two_year_transaction_period
-        
-        if candidate_id:
-            params["candidate_id"] = candidate_id
-        if committee_id:
-            params["committee_id"] = committee_id
-        if contributor_name:
-            params["contributor_name"] = contributor_name
-        if min_amount:
-            params["min_amount"] = min_amount
-        if max_amount:
-            params["max_amount"] = max_amount
-        if min_date:
-            params["min_date"] = min_date
-        if max_date:
-            params["max_date"] = max_date
-        
-        data = await self._make_request("schedules/schedule_a", params)
-        results = data.get("results", [])
-        # Limit results to requested limit
-        return results[:limit]
+            
+            params = {
+                "per_page": 100,  # FEC API max is 100, pagination will handle more
+                "sort": "-contribution_receipt_date",
+                "_original_limit": limit  # Store original limit for pagination
+            }
+            
+            # Always add two_year_transaction_period if not provided (must be even year)
+            current_year = datetime.now().year
+            # Round down to nearest even year
+            default_cycle = (current_year // 2) * 2
+            if not two_year_transaction_period:
+                two_year_transaction_period = default_cycle
+            
+            # Add two_year_transaction_period - API requires it for schedule_a
+            params["two_year_transaction_period"] = two_year_transaction_period
+            
+            if candidate_id:
+                params["candidate_id"] = candidate_id
+            if committee_id:
+                params["committee_id"] = committee_id
+            if contributor_name:
+                params["contributor_name"] = contributor_name
+            if min_amount:
+                params["min_amount"] = min_amount
+            if max_amount:
+                params["max_amount"] = max_amount
+            if min_date:
+                params["min_date"] = min_date
+            if max_date:
+                params["max_date"] = max_date
+            
+            data = await self._make_request("schedules/schedule_a", params)
+            api_results = data.get("results", [])
+            
+            # Store new contributions in database for caching
+            if api_results:
+                logger.info(f"Storing {len(api_results)} new contributions from API in database")
+                # Store contributions asynchronously to avoid blocking
+                for contrib in api_results:
+                    asyncio.create_task(self._store_contribution(contrib))
+            
+            # Merge local and API results, avoiding duplicates
+            all_results = local_data.copy() if local_data else []
+            existing_ids = {c.get('contribution_id') or c.get('sub_id') for c in all_results}
+            
+            for contrib in api_results:
+                contrib_id = contrib.get('contribution_id') or contrib.get('sub_id')
+                if contrib_id and contrib_id not in existing_ids:
+                    all_results.append(contrib)
+                    existing_ids.add(contrib_id)
+            
+            # Sort by date descending and limit
+            all_results.sort(
+                key=lambda x: (
+                    datetime.strptime(x.get('contribution_date') or x.get('contribution_receipt_date') or '1900-01-01', '%Y-%m-%d')
+                    if isinstance(x.get('contribution_date') or x.get('contribution_receipt_date'), str)
+                    else (x.get('contribution_date') or x.get('contribution_receipt_date') or datetime(1900, 1, 1))
+                ),
+                reverse=True
+            )
+            
+            logger.info(f"Returning {len(all_results)} total contributions ({len(local_data)} from DB, {len(api_results)} new from API)")
+            return all_results[:limit]
+        except Exception as e:
+            logger.error(f"API fallback failed for contributions: {e}")
+            # If we have local data, return it even if API failed
+            if local_data:
+                logger.info(f"Returning {len(local_data)} contributions from database cache (API failed)")
+                return local_data[:limit]
+            return []
     
     async def get_expenditures(
         self,
@@ -1052,84 +1242,91 @@ class FECClient:
         limit: int = 100,
         two_year_transaction_period: Optional[int] = None
     ) -> List[Dict]:
-        """Get expenditures/schedules/schedule_b"""
-        # If only candidate_id is provided, get committees first
-        if candidate_id and not committee_id and not two_year_transaction_period:
-            committees = await self.get_committees(candidate_id=candidate_id, limit=100)
-            if committees:
-                all_expenditures = []
-                # Get current election cycle for two_year_transaction_period (must be even year)
-                current_year = datetime.now().year
-                # Round down to nearest even year
-                default_cycle = (current_year // 2) * 2
-                
-                for committee in committees[:10]:
-                    comm_id = committee.get('committee_id')
-                    if comm_id:
-                        params = {
-                            "per_page": min(limit, 1000),
-                            "sort": "-disbursement_date",
-                            "committee_id": comm_id,
-                            "two_year_transaction_period": two_year_transaction_period or default_cycle
-                        }
-                        if min_amount:
-                            params["min_amount"] = min_amount
-                        if max_amount:
-                            params["max_amount"] = max_amount
-                        if min_date:
-                            params["min_date"] = min_date
-                        if max_date:
-                            params["max_date"] = max_date
-                        
-                        try:
-                            data = await self._make_request("schedules/schedule_b", params)
-                            all_expenditures.extend(data.get("results", []))
-                            if len(all_expenditures) >= limit:
-                                break
-                        except Exception:
-                            continue
-                
-                return all_expenditures[:limit]
-            else:
-                # No committees found, try with two_year_transaction_period
-                # Use current election cycle (must be even year)
-                current_year = datetime.now().year
-                # Round down to nearest even year
-                two_year_transaction_period = (current_year // 2) * 2
-        
-        params = {
-            "per_page": 100,  # FEC API max is 100, pagination will handle more
-            "sort": "-disbursement_date",  # Fixed: use disbursement_date not expenditure_date
-            "_original_limit": limit  # Store original limit for pagination
-        }
-        
-        # Always add two_year_transaction_period if not provided (must be even year)
-        current_year = datetime.now().year
-        # Round down to nearest even year
-        default_cycle = (current_year // 2) * 2
-        if not two_year_transaction_period:
-            two_year_transaction_period = default_cycle
-        
-        # Add two_year_transaction_period - API requires it for schedule_b
-        params["two_year_transaction_period"] = two_year_transaction_period
-        
-        if candidate_id:
-            params["candidate_id"] = candidate_id
-        if committee_id:
-            params["committee_id"] = committee_id
-        if min_amount:
-            params["min_amount"] = min_amount
-        if max_amount:
-            params["max_amount"] = max_amount
-        if min_date:
-            params["min_date"] = min_date
-        if max_date:
-            params["max_date"] = max_date
-        
-        data = await self._make_request("schedules/schedule_b", params)
-        results = data.get("results", [])
-        # Limit results to requested limit
-        return results[:limit]
+        """Get expenditures/schedules/schedule_b - queries local DB first, falls back to API"""
+        # Note: Local query for expenditures not yet implemented, will add if needed
+        # For now, always query API
+        logger.debug(f"Querying FEC API for expenditures: candidate_id={candidate_id}, committee_id={committee_id}")
+        try:
+            # If only candidate_id is provided, get committees first
+            if candidate_id and not committee_id and not two_year_transaction_period:
+                committees = await self.get_committees(candidate_id=candidate_id, limit=100)
+                if committees:
+                    all_expenditures = []
+                    # Get current election cycle for two_year_transaction_period (must be even year)
+                    current_year = datetime.now().year
+                    # Round down to nearest even year
+                    default_cycle = (current_year // 2) * 2
+                    
+                    for committee in committees[:10]:
+                        comm_id = committee.get('committee_id')
+                        if comm_id:
+                            params = {
+                                "per_page": min(limit, 1000),
+                                "sort": "-disbursement_date",
+                                "committee_id": comm_id,
+                                "two_year_transaction_period": two_year_transaction_period or default_cycle
+                            }
+                            if min_amount:
+                                params["min_amount"] = min_amount
+                            if max_amount:
+                                params["max_amount"] = max_amount
+                            if min_date:
+                                params["min_date"] = min_date
+                            if max_date:
+                                params["max_date"] = max_date
+                            
+                            try:
+                                data = await self._make_request("schedules/schedule_b", params)
+                                all_expenditures.extend(data.get("results", []))
+                                if len(all_expenditures) >= limit:
+                                    break
+                            except Exception:
+                                continue
+                    
+                    return all_expenditures[:limit]
+                else:
+                    # No committees found, try with two_year_transaction_period
+                    # Use current election cycle (must be even year)
+                    current_year = datetime.now().year
+                    # Round down to nearest even year
+                    two_year_transaction_period = (current_year // 2) * 2
+            
+            params = {
+                "per_page": 100,  # FEC API max is 100, pagination will handle more
+                "sort": "-disbursement_date",  # Fixed: use disbursement_date not expenditure_date
+                "_original_limit": limit  # Store original limit for pagination
+            }
+            
+            # Always add two_year_transaction_period if not provided (must be even year)
+            current_year = datetime.now().year
+            # Round down to nearest even year
+            default_cycle = (current_year // 2) * 2
+            if not two_year_transaction_period:
+                two_year_transaction_period = default_cycle
+            
+            # Add two_year_transaction_period - API requires it for schedule_b
+            params["two_year_transaction_period"] = two_year_transaction_period
+            
+            if candidate_id:
+                params["candidate_id"] = candidate_id
+            if committee_id:
+                params["committee_id"] = committee_id
+            if min_amount:
+                params["min_amount"] = min_amount
+            if max_amount:
+                params["max_amount"] = max_amount
+            if min_date:
+                params["min_date"] = min_date
+            if max_date:
+                params["max_date"] = max_date
+            
+            data = await self._make_request("schedules/schedule_b", params)
+            results = data.get("results", [])
+            # Limit results to requested limit
+            return results[:limit]
+        except Exception as e:
+            logger.error(f"API query failed for expenditures: {e}")
+            return []
     
     async def _query_local_committees(
         self,
@@ -1179,6 +1376,145 @@ class FECClient:
         except Exception as e:
             logger.warning(f"Error querying local committees: {e}")
             return None
+    
+    async def _store_contribution(self, contribution_data: Dict):
+        """Store contribution in local database with retry logic for database locks"""
+        max_retries = 3
+        retry_delay = 0.1
+        
+        for attempt in range(max_retries):
+            try:
+                async with self._db_write_semaphore:
+                    async with AsyncSessionLocal() as session:
+                        # Extract contribution ID - FEC API uses 'sub_id' as unique identifier
+                        contrib_id = (
+                            contribution_data.get('sub_id') or 
+                            contribution_data.get('contribution_id') or
+                            contribution_data.get('transaction_id')
+                        )
+                        
+                        if not contrib_id:
+                            logger.debug(f"Skipping contribution without ID")
+                            return
+                        
+                        # Check if contribution already exists
+                        existing = await session.execute(
+                            select(Contribution).where(Contribution.contribution_id == contrib_id)
+                        )
+                        existing_contrib = existing.scalar_one_or_none()
+                        
+                        # Extract amount from multiple possible fields
+                        amount = 0.0
+                        for amt_key in ['contb_receipt_amt', 'contribution_amount', 'contribution_receipt_amount', 'amount', 'contribution_receipt_amt']:
+                            amt_val = contribution_data.get(amt_key)
+                            if amt_val is not None:
+                                try:
+                                    amount = float(amt_val)
+                                    if amount > 0:
+                                        break
+                                except (ValueError, TypeError):
+                                    continue
+                        
+                        # Extract contributor name from multiple fields
+                        contrib_name = (
+                            contribution_data.get('contributor_name') or 
+                            contribution_data.get('contributor') or 
+                            contribution_data.get('name') or
+                            contribution_data.get('contributor_name_1')
+                        )
+                        
+                        # Parse contribution date
+                        contrib_date = None
+                        date_str = (
+                            contribution_data.get('contribution_receipt_date') or 
+                            contribution_data.get('contribution_date') or 
+                            contribution_data.get('receipt_date')
+                        )
+                        if date_str:
+                            try:
+                                # Try parsing various date formats
+                                if isinstance(date_str, str):
+                                    if 'T' in date_str:
+                                        contrib_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                                    else:
+                                        contrib_date = datetime.strptime(date_str, '%Y-%m-%d')
+                                else:
+                                    contrib_date = date_str
+                            except (ValueError, TypeError):
+                                pass
+                        
+                        if existing_contrib:
+                            # Update existing contribution if data is newer or more complete
+                            if contrib_name:
+                                existing_contrib.contributor_name = contrib_name
+                            if amount > 0:
+                                existing_contrib.contribution_amount = amount
+                            if contrib_date:
+                                existing_contrib.contribution_date = contrib_date
+                            
+                            # Update other fields if they're missing
+                            if not existing_contrib.contributor_city and contribution_data.get('contributor_city'):
+                                existing_contrib.contributor_city = contribution_data.get('contributor_city')
+                            if not existing_contrib.contributor_state and contribution_data.get('contributor_state'):
+                                existing_contrib.contributor_state = contribution_data.get('contributor_state')
+                            if not existing_contrib.contributor_zip and contribution_data.get('contributor_zip'):
+                                existing_contrib.contributor_zip = contribution_data.get('contributor_zip')
+                            if not existing_contrib.contributor_employer and contribution_data.get('contributor_employer'):
+                                existing_contrib.contributor_employer = contribution_data.get('contributor_employer')
+                            if not existing_contrib.contributor_occupation and contribution_data.get('contributor_occupation'):
+                                existing_contrib.contributor_occupation = contribution_data.get('contributor_occupation')
+                            if not existing_contrib.candidate_id and contribution_data.get('candidate_id'):
+                                existing_contrib.candidate_id = contribution_data.get('candidate_id')
+                            if not existing_contrib.committee_id and contribution_data.get('committee_id'):
+                                existing_contrib.committee_id = contribution_data.get('committee_id')
+                            
+                            # Update raw_data to preserve all original fields
+                            if contribution_data:
+                                existing_contrib.raw_data = contribution_data
+                        else:
+                            # Create new contribution
+                            contribution = Contribution(
+                                contribution_id=contrib_id,
+                                candidate_id=contribution_data.get('candidate_id'),
+                                committee_id=contribution_data.get('committee_id'),
+                                contributor_name=contrib_name,
+                                contributor_city=contribution_data.get('contributor_city'),
+                                contributor_state=contribution_data.get('contributor_state'),
+                                contributor_zip=contribution_data.get('contributor_zip'),
+                                contributor_employer=contribution_data.get('contributor_employer'),
+                                contributor_occupation=contribution_data.get('contributor_occupation'),
+                                contribution_amount=amount,
+                                contribution_date=contrib_date,
+                                contribution_type=contribution_data.get('contribution_type') or contribution_data.get('transaction_type'),
+                                raw_data=contribution_data
+                            )
+                            session.add(contribution)
+                        
+                        await session.commit()
+                        return  # Success, exit retry loop
+                        
+            except Exception as e:
+                error_str = str(e).lower()
+                # Check if it's a database locked error
+                if "database is locked" in error_str or "locked" in error_str:
+                    if attempt < max_retries - 1:
+                        # Exponential backoff
+                        wait_time = retry_delay * (2 ** attempt)
+                        logger.debug(f"Database locked storing contribution, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        logger.warning(f"Failed to store contribution after {max_retries} attempts due to database lock")
+                elif "unique constraint" in error_str or "UNIQUE constraint" in error_str:
+                    # Another task already inserted it, that's fine
+                    logger.debug(f"Contribution {contrib_id} already exists, skipping")
+                    return
+                else:
+                    if attempt < max_retries - 1:
+                        logger.debug(f"Retry {attempt + 1}/{max_retries} for storing contribution: {e}")
+                        await asyncio.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
+                    else:
+                        logger.warning(f"Failed to store contribution after {max_retries} attempts: {e}")
     
     async def _store_committee(self, committee_data: Dict):
         """Store committee in local database - handles race conditions with retry logic"""
@@ -1348,43 +1684,52 @@ class FECClient:
         """Get committees - queries local DB first, falls back to API"""
         # Try local database first
         if self.bulk_data_enabled:
-            local_data = await self._query_local_committees(
-                candidate_id=candidate_id, committee_id=committee_id, limit=limit
-            )
-            if local_data:
-                # Filter by name/type/state if provided
-                filtered = local_data
-                if name:
-                    filtered = [c for c in filtered if name.lower() in (c.get('name', '') or '').lower()]
-                if committee_type:
-                    filtered = [c for c in filtered if c.get('committee_type') == committee_type]
-                if state:
-                    filtered = [c for c in filtered if c.get('state') == state]
-                if filtered:
-                    return filtered[:limit]
+            try:
+                local_data = await self._query_local_committees(
+                    candidate_id=candidate_id, committee_id=committee_id, limit=limit
+                )
+                if local_data and len(local_data) > 0:
+                    # Filter by name/type/state if provided
+                    filtered = local_data
+                    if name:
+                        filtered = [c for c in filtered if name.lower() in (c.get('name', '') or '').lower()]
+                    if committee_type:
+                        filtered = [c for c in filtered if c.get('committee_type') == committee_type]
+                    if state:
+                        filtered = [c for c in filtered if c.get('state') == state]
+                    if filtered and len(filtered) > 0:
+                        logger.debug(f"Found {len(filtered)} committees in local database")
+                        return filtered[:limit]
+            except Exception as e:
+                logger.warning(f"Error querying local committees, falling back to API: {e}")
         
         # Fall back to API
-        params = {"per_page": limit}
-        if candidate_id:
-            params["candidate_id"] = candidate_id
-        if committee_id:
-            params["committee_id"] = committee_id
-        if name:
-            params["q"] = name
-        if committee_type:
-            params["committee_type"] = committee_type
-        if state:
-            params["state"] = state
-        
-        data = await self._make_request("committees", params)
-        results = data.get("results", [])
-        
-        # Store results in local DB
-        if self.bulk_data_enabled:
-            for committee in results:
-                asyncio.create_task(self._store_committee(committee))
-        
-        return results
+        logger.debug(f"Querying FEC API for committees: candidate_id={candidate_id}, committee_id={committee_id}")
+        try:
+            params = {"per_page": limit}
+            if candidate_id:
+                params["candidate_id"] = candidate_id
+            if committee_id:
+                params["committee_id"] = committee_id
+            if name:
+                params["q"] = name
+            if committee_type:
+                params["committee_type"] = committee_type
+            if state:
+                params["state"] = state
+            
+            data = await self._make_request("committees", params)
+            results = data.get("results", [])
+            
+            # Store results in local DB
+            if results and self.bulk_data_enabled:
+                for committee in results:
+                    asyncio.create_task(self._store_committee(committee))
+            
+            return results
+        except Exception as e:
+            logger.error(f"API fallback failed for committees: {e}")
+            return []
     
     async def get_committee_totals(
         self,

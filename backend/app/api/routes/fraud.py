@@ -46,3 +46,33 @@ async def analyze_fraud(
         logger.error(f"Error analyzing fraud for {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to analyze fraud: {str(e)}")
 
+
+@router.get("/analyze-donors", response_model=FraudAnalysis)
+async def analyze_fraud_by_donors(
+    candidate_id: str = Query(..., description="Candidate ID"),
+    min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    use_aggregation: bool = Query(True, description="Use donor aggregation for analysis")
+):
+    """Analyze fraud using donor aggregation for more accurate detection"""
+    try:
+        fraud_service = get_fraud_service()
+        if use_aggregation:
+            analysis = await fraud_service.analyze_candidate_with_aggregation(
+                candidate_id=candidate_id,
+                min_date=min_date,
+                max_date=max_date
+            )
+        else:
+            analysis = await fraud_service.analyze_candidate(
+                candidate_id=candidate_id,
+                min_date=min_date,
+                max_date=max_date
+            )
+        return analysis
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error analyzing fraud with aggregation for {candidate_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to analyze fraud: {str(e)}")
+

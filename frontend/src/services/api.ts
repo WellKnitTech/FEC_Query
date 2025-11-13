@@ -30,6 +30,7 @@ export interface FinancialSummary {
   individual_contributions: number;
   pac_contributions: number;
   party_contributions: number;
+  loan_contributions?: number;
 }
 
 export interface Contribution {
@@ -72,6 +73,8 @@ export interface FraudAnalysis {
   patterns: FraudPattern[];
   risk_score: number;
   total_suspicious_amount: number;
+  aggregated_donors_count?: number;
+  aggregation_enabled?: boolean;
 }
 
 export interface MoneyFlowNode {
@@ -138,6 +141,28 @@ export const candidateApi = {
   },
 };
 
+export interface UniqueContributor {
+  name: string;
+  total_amount: number;
+  contribution_count: number;
+}
+
+export interface AggregatedDonor {
+  donor_key: string;
+  canonical_name: string;
+  canonical_state?: string;
+  canonical_city?: string;
+  canonical_employer?: string;
+  canonical_occupation?: string;
+  total_amount: number;
+  contribution_count: number;
+  first_contribution_date?: string;
+  last_contribution_date?: string;
+  contribution_ids: string[];
+  all_names: string[];
+  match_confidence: number;
+}
+
 export const contributionApi = {
   get: async (params: {
     candidate_id?: string;
@@ -150,6 +175,27 @@ export const contributionApi = {
     limit?: number;
   }): Promise<Contribution[]> => {
     const response = await api.get('/api/contributions/', { params });
+    return response.data;
+  },
+
+  getUniqueContributors: async (searchTerm: string, limit?: number): Promise<UniqueContributor[]> => {
+    const response = await api.get('/api/contributions/unique-contributors', {
+      params: { search_term: searchTerm, limit },
+    });
+    return response.data;
+  },
+
+  getAggregatedDonors: async (params: {
+    candidate_id?: string;
+    committee_id?: string;
+    contributor_name?: string;
+    min_amount?: number;
+    max_amount?: number;
+    min_date?: string;
+    max_date?: string;
+    limit?: number;
+  }): Promise<AggregatedDonor[]> => {
+    const response = await api.get('/api/contributions/aggregated-donors', { params });
     return response.data;
   },
 
@@ -238,6 +284,23 @@ export const fraudApi = {
         candidate_id: candidateId,
         min_date: minDate,
         max_date: maxDate,
+      },
+    });
+    return response.data;
+  },
+
+  analyzeWithAggregation: async (
+    candidateId: string,
+    minDate?: string,
+    maxDate?: string,
+    useAggregation: boolean = true
+  ): Promise<FraudAnalysis> => {
+    const response = await api.get('/api/fraud/analyze-donors', {
+      params: {
+        candidate_id: candidateId,
+        min_date: minDate,
+        max_date: maxDate,
+        use_aggregation: useAggregation,
       },
     });
     return response.data;
