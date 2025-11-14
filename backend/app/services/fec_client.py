@@ -1970,26 +1970,78 @@ class FECClient:
         return results[:limit]
     
     def _extract_candidate_contact_info(self, candidate_data: Dict) -> Dict:
-        """Extract contact information from candidate API response"""
+        """Extract contact information from candidate API response
+        
+        FEC API may return contact info in various field names:
+        - Direct candidate fields: street_address, city, zip, email, phone, website
+        - Principal committee fields: principal_committee_street_1, principal_committee_city, etc.
+        - Mailing address fields: mailing_address, mailing_city, mailing_zip
+        - Generic fields: street_1, address, telephone, web_site, url
+        """
         contact_info = {}
         
-        # Try principal committee fields first (most reliable)
+        # Street address - try multiple variations
         contact_info["street_address"] = (
+            candidate_data.get("street_address") or
             candidate_data.get("principal_committee_street_1") or 
+            candidate_data.get("principal_committee_street_address") or
             candidate_data.get("mailing_address") or
-            candidate_data.get("street_address")
+            candidate_data.get("street_1") or
+            candidate_data.get("address") or
+            candidate_data.get("principal_committee_street") or
+            candidate_data.get("candidate_street_1")
         )
+        
+        # City - try multiple variations
         contact_info["city"] = (
+            candidate_data.get("city") or
             candidate_data.get("principal_committee_city") or
-            candidate_data.get("city")
+            candidate_data.get("mailing_city") or
+            candidate_data.get("candidate_city")
         )
+        
+        # State - try multiple variations
+        contact_info["state"] = (
+            candidate_data.get("state") or
+            candidate_data.get("principal_committee_state") or
+            candidate_data.get("mailing_state")
+        )
+        
+        # ZIP - try multiple variations
         contact_info["zip"] = (
+            candidate_data.get("zip") or
             candidate_data.get("principal_committee_zip") or
-            candidate_data.get("zip")
+            candidate_data.get("mailing_zip") or
+            candidate_data.get("zip_code") or
+            candidate_data.get("candidate_zip")
         )
-        contact_info["email"] = candidate_data.get("email")
-        contact_info["phone"] = candidate_data.get("phone")
-        contact_info["website"] = candidate_data.get("website")
+        
+        # Email - try multiple variations
+        contact_info["email"] = (
+            candidate_data.get("email") or
+            candidate_data.get("principal_committee_email") or
+            candidate_data.get("candidate_email") or
+            candidate_data.get("e_mail")
+        )
+        
+        # Phone - try multiple variations
+        contact_info["phone"] = (
+            candidate_data.get("phone") or
+            candidate_data.get("principal_committee_phone") or
+            candidate_data.get("telephone") or
+            candidate_data.get("candidate_phone") or
+            candidate_data.get("phone_number")
+        )
+        
+        # Website - try multiple variations
+        contact_info["website"] = (
+            candidate_data.get("website") or
+            candidate_data.get("principal_committee_website") or
+            candidate_data.get("web_site") or
+            candidate_data.get("url") or
+            candidate_data.get("candidate_website") or
+            candidate_data.get("web_url")
+        )
         
         return contact_info
     
@@ -2001,16 +2053,68 @@ class FECClient:
         - city, state, zip: Location
         - email, phone, website: Contact methods
         - treasurer_name: Committee treasurer
+        
+        Also handles variations like street_address, mailing_address, etc.
         """
         contact_info = {}
         
-        contact_info["street_address"] = committee_data.get("street_1") or committee_data.get("street_address")
-        contact_info["street_address_2"] = committee_data.get("street_2")
-        contact_info["city"] = committee_data.get("city")
-        contact_info["zip"] = committee_data.get("zip")
-        contact_info["email"] = committee_data.get("email")
-        contact_info["phone"] = committee_data.get("phone")
-        contact_info["website"] = committee_data.get("website")
+        # Street address - try multiple variations
+        contact_info["street_address"] = (
+            committee_data.get("street_1") or
+            committee_data.get("street_address") or
+            committee_data.get("mailing_address") or
+            committee_data.get("address") or
+            committee_data.get("street")
+        )
+        
+        # Street address line 2
+        contact_info["street_address_2"] = (
+            committee_data.get("street_2") or
+            committee_data.get("street_address_2") or
+            committee_data.get("mailing_address_2")
+        )
+        
+        # City - try multiple variations
+        contact_info["city"] = (
+            committee_data.get("city") or
+            committee_data.get("mailing_city")
+        )
+        
+        # State
+        contact_info["state"] = committee_data.get("state")
+        
+        # ZIP - try multiple variations
+        contact_info["zip"] = (
+            committee_data.get("zip") or
+            committee_data.get("zip_code") or
+            committee_data.get("mailing_zip")
+        )
+        
+        # Email - try multiple variations
+        contact_info["email"] = (
+            committee_data.get("email") or
+            committee_data.get("e_mail") or
+            committee_data.get("committee_email")
+        )
+        
+        # Phone - try multiple variations
+        contact_info["phone"] = (
+            committee_data.get("phone") or
+            committee_data.get("telephone") or
+            committee_data.get("phone_number") or
+            committee_data.get("committee_phone")
+        )
+        
+        # Website - try multiple variations
+        contact_info["website"] = (
+            committee_data.get("website") or
+            committee_data.get("web_site") or
+            committee_data.get("url") or
+            committee_data.get("web_url") or
+            committee_data.get("committee_website")
+        )
+        
+        # Treasurer name
         contact_info["treasurer_name"] = committee_data.get("treasurer_name")
         
         # Log what we found for debugging
@@ -2127,7 +2231,21 @@ class FECClient:
                     logger.warning(f"No candidate data returned from API for {candidate_id}")
                     return False
                 
-                logger.debug(f"Received candidate data from API for {candidate_id}, keys: {list(result_data.keys())[:20]}")
+                # Log all keys to help debug what fields are available
+                all_keys = list(result_data.keys())
+                logger.debug(f"Received candidate data from API for {candidate_id}, total keys: {len(all_keys)}")
+                logger.debug(f"API response keys (first 50): {all_keys[:50]}")
+                
+                # Log any contact-related keys found
+                contact_related_keys = [k for k in all_keys if any(term in k.lower() for term in 
+                    ['street', 'address', 'city', 'zip', 'email', 'phone', 'website', 'mailing', 'telephone', 'web'])]
+                if contact_related_keys:
+                    logger.debug(f"Contact-related keys in API response: {contact_related_keys}")
+                    # Log values for these keys
+                    for key in contact_related_keys[:10]:  # Log first 10
+                        value = result_data.get(key)
+                        if value:
+                            logger.debug(f"  {key} = {str(value)[:100]}")
                 
                 # Extract and update contact info from candidate response
                 contact_info = self._extract_candidate_contact_info(result_data)
@@ -2150,9 +2268,37 @@ class FECClient:
                             logger.info(f"Found {len(all_committees)} committees for candidate {candidate_id}, checking for contact info")
                             
                             # Try each committee until we find one with contact info
+                            # First try the list response, then fetch individual committee details if needed
                             for committee_data in all_committees:
+                                committee_id = committee_data.get("committee_id")
+                                if not committee_id:
+                                    continue
+                                
+                                # Extract from list response first
                                 committee_contact = self._extract_committee_contact_info(committee_data)
-                                logger.debug(f"Committee {committee_data.get('committee_id', 'unknown')} contact info: {committee_contact}")
+                                logger.debug(f"Committee {committee_id} contact info from list: {committee_contact}")
+                                
+                                # If list response doesn't have contact info, fetch individual committee details
+                                if not any([
+                                    committee_contact.get("street_address"),
+                                    committee_contact.get("city"),
+                                    committee_contact.get("zip"),
+                                    committee_contact.get("email"),
+                                    committee_contact.get("phone"),
+                                    committee_contact.get("website")
+                                ]):
+                                    logger.debug(f"Committee {committee_id} list response has no contact info, fetching individual details")
+                                    try:
+                                        # Fetch individual committee details which may have more complete contact info
+                                        params = {}
+                                        committee_detail_data = await self._make_request(f"committee/{committee_id}", params, use_cache=False)
+                                        committee_detail = committee_detail_data.get("results", [{}])[0] if committee_detail_data.get("results") else None
+                                        if committee_detail:
+                                            committee_contact = self._extract_committee_contact_info(committee_detail)
+                                            logger.debug(f"Committee {committee_id} contact info from detail: {committee_contact}")
+                                    except Exception as detail_error:
+                                        logger.warning(f"Error fetching committee {committee_id} details: {detail_error}")
+                                        # Continue with list response data
                                 
                                 # Use committee contact info if available
                                 if any([
@@ -2171,7 +2317,6 @@ class FECClient:
                                         "phone": committee_contact.get("phone"),
                                         "website": committee_contact.get("website")
                                     }
-                                    committee_id = committee_data.get("committee_id", "unknown")
                                     logger.info(f"Found contact info from committee {committee_id} for candidate {candidate_id}")
                                     break  # Found contact info, stop searching
                             else:
@@ -2181,6 +2326,7 @@ class FECClient:
                     except Exception as e:
                         logger.error(f"Error fetching committees contact info for candidate {candidate_id}: {e}", exc_info=True)
                 
+                # Update candidate with contact info
                 candidate.street_address = contact_info.get("street_address")
                 candidate.city = contact_info.get("city")
                 candidate.zip = contact_info.get("zip")
@@ -2188,6 +2334,26 @@ class FECClient:
                 candidate.phone = contact_info.get("phone")
                 candidate.website = contact_info.get("website")
                 candidate.updated_at = datetime.utcnow()
+                
+                # Log what we're saving
+                saved_fields = []
+                if candidate.street_address:
+                    saved_fields.append(f"address={candidate.street_address[:50]}")
+                if candidate.city:
+                    saved_fields.append(f"city={candidate.city}")
+                if candidate.zip:
+                    saved_fields.append(f"zip={candidate.zip}")
+                if candidate.email:
+                    saved_fields.append(f"email={candidate.email}")
+                if candidate.phone:
+                    saved_fields.append(f"phone={candidate.phone}")
+                if candidate.website:
+                    saved_fields.append(f"website={candidate.website}")
+                
+                if saved_fields:
+                    logger.info(f"Saving contact info to database for candidate {candidate_id}: {', '.join(saved_fields)}")
+                else:
+                    logger.warning(f"No contact info to save for candidate {candidate_id} after extraction")
                 
                 await session.commit()
                 

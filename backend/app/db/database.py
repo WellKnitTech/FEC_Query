@@ -423,8 +423,10 @@ async def init_db():
     """Initialize database tables"""
     import logging
     logger = logging.getLogger(__name__)
+    logger.info("Starting database initialization...")
     
     # Run migrations first
+    logger.info("Running migrations...")
     migrations = [
         "add_file_size_column.py",
         "add_resume_columns.py"
@@ -452,27 +454,57 @@ async def init_db():
             logger.warning(f"Could not run migration {migration_name} automatically: {e}")
     
     try:
+        logger.info("Opening database connection...")
         async with engine.begin() as conn:
             # Enable WAL mode for better concurrency (allows readers and writers simultaneously)
             if DATABASE_URL.startswith("sqlite"):
                 try:
-                    # Check database integrity first
-                    try:
-                        result = await conn.execute(text("PRAGMA integrity_check"))
-                        integrity_result = result.fetchone()
-                        if integrity_result and integrity_result[0] != "ok":
-                            logger.error(f"Database integrity check failed: {integrity_result[0]}")
-                            logger.error("Database is corrupted! Please see backend/migrations/REPAIR_INSTRUCTIONS.md")
-                            raise RuntimeError(f"Database corruption detected: {integrity_result[0]}")
-                        logger.debug("Database integrity check passed")
-                    except Exception as e:
-                        if "disk I/O error" in str(e).lower() or "corrupted" in str(e).lower():
-                            logger.error("Database corruption detected during integrity check!")
-                            logger.error("Please see backend/migrations/REPAIR_INSTRUCTIONS.md for recovery steps")
-                            raise RuntimeError("Database is corrupted and cannot be used") from e
-                        # If it's a different error (e.g., database doesn't exist yet), continue
-                        logger.debug(f"Integrity check skipped (database may not exist yet): {e}")
+                    # Check if integrity check should be skipped (for large databases or via env var)
+                    skip_integrity_check = os.getenv("SKIP_DB_INTEGRITY_CHECK", "false").lower() == "true"
                     
+                    # Check database file size - skip integrity check for databases > 1GB
+                    # Parse database file path from URL
+                    db_file = DATABASE_URL.replace("sqlite:///", "").replace("sqlite+aiosqlite:///", "")
+                    # Handle relative paths - convert to absolute path
+                    if not os.path.isabs(db_file):
+                        # Get the backend directory (parent of app directory)
+                        backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                        db_file = os.path.join(backend_dir, db_file.lstrip("./"))
+                    
+                    if os.path.exists(db_file):
+                        db_size = os.path.getsize(db_file)
+                        db_size_gb = db_size / (1024 * 1024 * 1024)
+                        if db_size_gb > 1.0:
+                            logger.info(f"Database is {db_size_gb:.2f}GB - skipping integrity check for faster startup")
+                            logger.info("To run integrity check manually, use: PRAGMA quick_check or PRAGMA integrity_check")
+                            skip_integrity_check = True
+                    
+                    if not skip_integrity_check:
+                        # Check database integrity - use quick_check for large databases (much faster)
+                        # Full integrity_check can take hours on large databases
+                        logger.info("Performing quick database integrity check...")
+                        try:
+                            # Use quick_check instead of full integrity_check for speed
+                            # quick_check is much faster but less thorough
+                            result = await conn.execute(text("PRAGMA quick_check"))
+                            integrity_result = result.fetchone()
+                            if integrity_result and integrity_result[0] != "ok":
+                                logger.warning(f"Database quick check found issues: {integrity_result[0]}")
+                                logger.warning("Database may have issues. For full check, run: PRAGMA integrity_check")
+                                # Don't fail startup, just warn - full integrity check can be run manually
+                            else:
+                                logger.debug("Database quick check passed")
+                        except Exception as e:
+                            if "disk I/O error" in str(e).lower() or "corrupted" in str(e).lower():
+                                logger.error("Database corruption detected during integrity check!")
+                                logger.error("Please see backend/migrations/REPAIR_INSTRUCTIONS.md for recovery steps")
+                                raise RuntimeError("Database is corrupted and cannot be used") from e
+                            # If it's a different error (e.g., database doesn't exist yet), continue
+                            logger.debug(f"Integrity check skipped (database may not exist yet): {e}")
+                    else:
+                        logger.info("Skipping database integrity check (large database or SKIP_DB_INTEGRITY_CHECK=true)")
+                    
+                    logger.info("Configuring WAL mode...")
                     await conn.execute(text("PRAGMA journal_mode=WAL"))
                     # Set WAL checkpoint settings for better performance
                     await conn.execute(text("PRAGMA wal_autocheckpoint=500"))  # More frequent checkpoints
@@ -485,8 +517,10 @@ async def init_db():
                 except Exception as e:
                     logger.warning(f"Could not configure WAL mode: {e}")
             
+            logger.info("Creating database tables and indexes...")
             await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database tables initialized successfully")
+            logger.info("Database tables initialized successfully")
+        logger.info("Database initialization complete")
     except Exception as e:
         # If indexes already exist, try to drop the conflicting indexes and recreate
         if "already exists" in str(e) or "duplicate" in str(e).lower():

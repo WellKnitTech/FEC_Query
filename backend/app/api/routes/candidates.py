@@ -32,46 +32,60 @@ def extract_candidate_contact_info(candidate: Dict) -> Optional[ContactInformati
     This handles both local DB format (already extracted) and API format (needs extraction).
     The FEC API may return contact info in fields like principal_committee_street_1,
     principal_committee_city, etc., rather than street_address, city, etc.
+    
+    Matches the extraction logic in fec_client._extract_candidate_contact_info()
     """
     # Try multiple field name variations to find contact info
+    # This matches the logic in fec_client._extract_candidate_contact_info()
     extracted_contact = {
         "street_address": (
             candidate.get("street_address") or
             candidate.get("principal_committee_street_1") or 
+            candidate.get("principal_committee_street_address") or
             candidate.get("mailing_address") or
             candidate.get("street_1") or
             candidate.get("address") or
-            candidate.get("principal_committee_street_address")
+            candidate.get("principal_committee_street") or
+            candidate.get("candidate_street_1")
         ),
         "city": (
             candidate.get("city") or
             candidate.get("principal_committee_city") or
-            candidate.get("mailing_city")
+            candidate.get("mailing_city") or
+            candidate.get("candidate_city")
         ),
         "state": (
             candidate.get("state") or
-            candidate.get("principal_committee_state")
+            candidate.get("principal_committee_state") or
+            candidate.get("mailing_state")
         ),
         "zip": (
             candidate.get("zip") or
             candidate.get("principal_committee_zip") or
             candidate.get("mailing_zip") or
-            candidate.get("zip_code")
+            candidate.get("zip_code") or
+            candidate.get("candidate_zip")
         ),
         "email": (
             candidate.get("email") or
-            candidate.get("principal_committee_email")
+            candidate.get("principal_committee_email") or
+            candidate.get("candidate_email") or
+            candidate.get("e_mail")
         ),
         "phone": (
             candidate.get("phone") or
             candidate.get("principal_committee_phone") or
-            candidate.get("telephone")
+            candidate.get("telephone") or
+            candidate.get("candidate_phone") or
+            candidate.get("phone_number")
         ),
         "website": (
             candidate.get("website") or
             candidate.get("principal_committee_website") or
             candidate.get("web_site") or
-            candidate.get("url")
+            candidate.get("url") or
+            candidate.get("candidate_website") or
+            candidate.get("web_url")
         )
     }
     
@@ -263,6 +277,85 @@ async def get_candidate(candidate_id: str):
     except Exception as e:
         logger.error(f"Error getting candidate {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get candidate: {str(e)}")
+
+
+@router.get("/{candidate_id}/debug-contact")
+async def debug_candidate_contact_info(candidate_id: str):
+    """Debug endpoint to inspect contact information sources"""
+    try:
+        from app.db.database import AsyncSessionLocal, Candidate
+        from sqlalchemy import select
+        
+        fec_client = get_fec_client()
+        
+        # Get candidate from database
+        db_contact_info = None
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Candidate).where(Candidate.candidate_id == candidate_id)
+            )
+            db_candidate = result.scalar_one_or_none()
+            if db_candidate:
+                db_contact_info = {
+                    "street_address": db_candidate.street_address,
+                    "city": db_candidate.city,
+                    "zip": db_candidate.zip,
+                    "email": db_candidate.email,
+                    "phone": db_candidate.phone,
+                    "website": db_candidate.website,
+                    "updated_at": db_candidate.updated_at.isoformat() if db_candidate.updated_at else None
+                }
+        
+        # Get candidate from API
+        api_candidate = await fec_client.get_candidate(candidate_id)
+        api_keys = list(api_candidate.keys()) if api_candidate else []
+        api_contact_fields = {}
+        if api_candidate:
+            for field in ["street_address", "city", "zip", "email", "phone", "website",
+                         "principal_committee_street_1", "principal_committee_city", 
+                         "principal_committee_zip", "principal_committee_email",
+                         "principal_committee_phone", "principal_committee_website",
+                         "mailing_address", "street_1", "address"]:
+                if field in api_candidate and api_candidate[field]:
+                    api_contact_fields[field] = api_candidate[field]
+        
+        # Extract contact info using our function
+        extracted_contact = extract_candidate_contact_info(api_candidate) if api_candidate else None
+        
+        # Get committees
+        committees = await fec_client.get_committees(candidate_id=candidate_id, limit=10)
+        committee_contact_info = []
+        for committee in committees:
+            committee_id = committee.get("committee_id")
+            committee_contact = fec_client._extract_committee_contact_info(committee)
+            committee_contact_info.append({
+                "committee_id": committee_id,
+                "committee_name": committee.get("name"),
+                "contact_info": committee_contact
+            })
+        
+        # Convert ContactInformation to dict (compatible with both Pydantic v1 and v2)
+        extracted_contact_dict = None
+        if extracted_contact:
+            try:
+                # Try Pydantic v2 method first
+                extracted_contact_dict = extracted_contact.model_dump()
+            except AttributeError:
+                # Fall back to Pydantic v1 method
+                extracted_contact_dict = extracted_contact.dict()
+        
+        return {
+            "candidate_id": candidate_id,
+            "database_contact_info": db_contact_info,
+            "api_response_keys": api_keys[:50],  # First 50 keys
+            "api_contact_fields_found": api_contact_fields,
+            "extracted_contact_info": extracted_contact_dict,
+            "committees_found": len(committees),
+            "committee_contact_info": committee_contact_info
+        }
+    except Exception as e:
+        logger.error(f"Error in debug endpoint for candidate {candidate_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Debug failed: {str(e)}")
 
 
 @router.post("/{candidate_id}/refresh-contact-info")

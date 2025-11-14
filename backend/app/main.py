@@ -96,10 +96,13 @@ app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup"""
+    logger.info("Starting application startup...")
     await init_db()
+    logger.info("Database initialization complete")
     
     # Check for incomplete import jobs and log them
     try:
+        logger.info("Checking for incomplete import jobs...")
         from app.services.bulk_data import BulkDataService
         bulk_data_service = BulkDataService()
         incomplete_jobs = await bulk_data_service.get_incomplete_jobs()
@@ -112,10 +115,13 @@ async def startup_event():
                     f"file_position={job.file_position}"
                 )
                 logger.info(f"    To resume: Use the resume endpoint with job_id={job.id}")
+        else:
+            logger.info("No incomplete import jobs found")
     except Exception as e:
         logger.warning(f"Could not check for incomplete jobs on startup: {e}")
     
     # Periodic WAL checkpoint to prevent I/O errors
+    logger.info("Setting up WAL checkpoint task...")
     async def periodic_wal_checkpoint():
         """Periodically checkpoint WAL file to prevent I/O errors"""
         import asyncio
@@ -163,12 +169,15 @@ async def startup_event():
     _running_tasks.add(checkpoint_task)
     
     # Start contact updater service
+    logger.info("Starting contact updater service...")
     from app.services.contact_updater import ContactUpdaterService
     global _contact_updater_service
     _contact_updater_service = ContactUpdaterService()
     await _contact_updater_service.start_background_updates()
+    logger.info("Contact updater service started")
     
     # Set up signal handlers for graceful shutdown
+    logger.info("Setting up signal handlers...")
     _shutdown_initiated = False
     
     def signal_handler(signum, frame):
@@ -189,6 +198,7 @@ async def startup_event():
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    logger.info("Application startup complete - ready to accept requests")
 
 
 @app.on_event("shutdown")
