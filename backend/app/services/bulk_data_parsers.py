@@ -7,7 +7,7 @@ import logging
 import gc
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta
-from sqlalchemy import select, and_, update
+from sqlalchemy import select, and_, update, func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.db.database import (
@@ -326,7 +326,7 @@ class GenericBulkDataParser:
                                     'district': insert_stmt.excluded.district,
                                     'election_years': insert_stmt.excluded.election_years,
                                     'raw_data': insert_stmt.excluded.raw_data,
-                                    'updated_at': datetime.utcnow()
+                                    'updated_at': func.datetime('now')
                                 }
                             )
                             await session.execute(upsert_stmt)
@@ -452,7 +452,7 @@ class GenericBulkDataParser:
                                     'state': insert_stmt.excluded.state,
                                     'candidate_ids': insert_stmt.excluded.candidate_ids,
                                     'raw_data': insert_stmt.excluded.raw_data,
-                                    'updated_at': datetime.utcnow()
+                                    'updated_at': func.datetime('now')
                                 }
                             )
                             await session.execute(upsert_stmt)
@@ -803,7 +803,7 @@ class GenericBulkDataParser:
                                     'expenditure_purpose': insert_stmt.excluded.expenditure_purpose,
                                     'raw_data': insert_stmt.excluded.raw_data,
                                     'data_age_days': insert_stmt.excluded.data_age_days,
-                                    'updated_at': datetime.utcnow()
+                                    'updated_at': func.datetime('now')
                                 }
                             )
                             await session.execute(upsert_stmt)
@@ -980,7 +980,7 @@ class GenericBulkDataParser:
                                     'expenditure_purpose': insert_stmt.excluded.expenditure_purpose,
                                     'raw_data': insert_stmt.excluded.raw_data,
                                     'data_age_days': insert_stmt.excluded.data_age_days,
-                                    'updated_at': datetime.utcnow()
+                                    'updated_at': func.datetime('now', 'utc')
                                 }
                             )
                             await session.execute(upsert_stmt)
@@ -1127,7 +1127,7 @@ class GenericBulkDataParser:
                                     'cash_on_hand': insert_stmt.excluded.cash_on_hand,
                                     'raw_data': insert_stmt.excluded.raw_data,
                                     'data_age_days': insert_stmt.excluded.data_age_days,
-                                    'updated_at': datetime.utcnow()
+                                    'updated_at': func.datetime('now')
                                 }
                             )
                             await session.execute(upsert_stmt)
@@ -1268,7 +1268,7 @@ class GenericBulkDataParser:
                                     'cash_on_hand': insert_stmt.excluded.cash_on_hand,
                                     'raw_data': insert_stmt.excluded.raw_data,
                                     'data_age_days': insert_stmt.excluded.data_age_days,
-                                    'updated_at': datetime.utcnow()
+                                    'updated_at': func.datetime('now')
                                 }
                             )
                             await session.execute(upsert_stmt)
@@ -1447,7 +1447,7 @@ class GenericBulkDataParser:
                                     'cash_on_hand': insert_stmt.excluded.cash_on_hand,
                                     'raw_data': insert_stmt.excluded.raw_data,
                                     'data_age_days': insert_stmt.excluded.data_age_days,
-                                    'updated_at': datetime.utcnow()
+                                    'updated_at': func.datetime('now')
                                 }
                             )
                             await session.execute(upsert_stmt)
@@ -1737,7 +1737,7 @@ class GenericBulkDataParser:
                                     'communication_date': insert_stmt.excluded.communication_date,
                                     'raw_data': insert_stmt.excluded.raw_data,
                                     'data_age_days': insert_stmt.excluded.data_age_days,
-                                    'updated_at': datetime.utcnow()
+                                    'updated_at': func.datetime('now')
                                 }
                             )
                             await session.execute(upsert_stmt)
@@ -1885,7 +1885,7 @@ class GenericBulkDataParser:
                                     'communication_date': insert_stmt.excluded.communication_date,
                                     'raw_data': insert_stmt.excluded.raw_data,
                                     'data_age_days': insert_stmt.excluded.data_age_days,
-                                    'updated_at': datetime.utcnow()
+                                    'updated_at': func.datetime('now')
                                 }
                             )
                             await session.execute(upsert_stmt)
