@@ -26,6 +26,77 @@ def get_analysis_service():
     return AnalysisService(get_fec_client())
 
 
+def extract_candidate_contact_info(candidate: Dict) -> Optional[ContactInformation]:
+    """Extract contact information from candidate data.
+    
+    This handles both local DB format (already extracted) and API format (needs extraction).
+    The FEC API may return contact info in fields like principal_committee_street_1,
+    principal_committee_city, etc., rather than street_address, city, etc.
+    """
+    # Try multiple field name variations to find contact info
+    extracted_contact = {
+        "street_address": (
+            candidate.get("street_address") or
+            candidate.get("principal_committee_street_1") or 
+            candidate.get("mailing_address") or
+            candidate.get("street_1") or
+            candidate.get("address") or
+            candidate.get("principal_committee_street_address")
+        ),
+        "city": (
+            candidate.get("city") or
+            candidate.get("principal_committee_city") or
+            candidate.get("mailing_city")
+        ),
+        "state": (
+            candidate.get("state") or
+            candidate.get("principal_committee_state")
+        ),
+        "zip": (
+            candidate.get("zip") or
+            candidate.get("principal_committee_zip") or
+            candidate.get("mailing_zip") or
+            candidate.get("zip_code")
+        ),
+        "email": (
+            candidate.get("email") or
+            candidate.get("principal_committee_email")
+        ),
+        "phone": (
+            candidate.get("phone") or
+            candidate.get("principal_committee_phone") or
+            candidate.get("telephone")
+        ),
+        "website": (
+            candidate.get("website") or
+            candidate.get("principal_committee_website") or
+            candidate.get("web_site") or
+            candidate.get("url")
+        )
+    }
+    
+    # Only create ContactInformation if at least one field is present
+    if any([
+        extracted_contact.get("street_address"),
+        extracted_contact.get("city"),
+        extracted_contact.get("zip"),
+        extracted_contact.get("email"),
+        extracted_contact.get("phone"),
+        extracted_contact.get("website")
+    ]):
+        return ContactInformation(
+            street_address=extracted_contact.get("street_address"),
+            city=extracted_contact.get("city"),
+            state=extracted_contact.get("state"),
+            zip=extracted_contact.get("zip"),
+            email=extracted_contact.get("email"),
+            phone=extracted_contact.get("phone"),
+            website=extracted_contact.get("website")
+        )
+    
+    return None
+
+
 @router.get("/search", response_model=List[CandidateSummary])
 async def search_candidates(
     name: Optional[str] = Query(None, description="Candidate name to search"),
@@ -51,25 +122,8 @@ async def search_candidates(
         candidates = []
         for candidate in results:
             try:
-                # Build contact information if available
-                contact_info = None
-                if any([
-                    candidate.get("street_address"),
-                    candidate.get("city"),
-                    candidate.get("zip"),
-                    candidate.get("email"),
-                    candidate.get("phone"),
-                    candidate.get("website")
-                ]):
-                    contact_info = ContactInformation(
-                        street_address=candidate.get("street_address"),
-                        city=candidate.get("city"),
-                        state=candidate.get("state"),
-                        zip=candidate.get("zip"),
-                        email=candidate.get("email"),
-                        phone=candidate.get("phone"),
-                        website=candidate.get("website")
-                    )
+                # Extract contact information
+                contact_info = extract_candidate_contact_info(candidate)
                 
                 # Map API fields to our schema
                 candidate_data = {
@@ -119,25 +173,8 @@ async def get_race_candidates(
         candidates = []
         for candidate in results:
             try:
-                # Build contact information if available
-                contact_info = None
-                if any([
-                    candidate.get("street_address"),
-                    candidate.get("city"),
-                    candidate.get("zip"),
-                    candidate.get("email"),
-                    candidate.get("phone"),
-                    candidate.get("website")
-                ]):
-                    contact_info = ContactInformation(
-                        street_address=candidate.get("street_address"),
-                        city=candidate.get("city"),
-                        state=candidate.get("state"),
-                        zip=candidate.get("zip"),
-                        email=candidate.get("email"),
-                        phone=candidate.get("phone"),
-                        website=candidate.get("website")
-                    )
+                # Extract contact information
+                contact_info = extract_candidate_contact_info(candidate)
                 
                 candidate_data = {
                     "candidate_id": candidate.get("candidate_id", ""),
@@ -173,25 +210,39 @@ async def get_candidate(candidate_id: str):
         if not candidate:
             raise HTTPException(status_code=404, detail="Candidate not found")
         
-        # Build contact information if available
-        contact_info = None
-        if any([
-            candidate.get("street_address"),
-            candidate.get("city"),
-            candidate.get("zip"),
-            candidate.get("email"),
-            candidate.get("phone"),
-            candidate.get("website")
-        ]):
-            contact_info = ContactInformation(
-                street_address=candidate.get("street_address"),
-                city=candidate.get("city"),
-                state=candidate.get("state"),
-                zip=candidate.get("zip"),
-                email=candidate.get("email"),
-                phone=candidate.get("phone"),
-                website=candidate.get("website")
-            )
+        # Extract contact information
+        contact_info = extract_candidate_contact_info(candidate)
+        
+        # If contact info is missing, trigger on-demand fetch in background
+        if not contact_info:
+            # Check if contact info is truly missing (not just empty fields)
+            has_any_contact = any([
+                candidate.get("street_address"),
+                candidate.get("city"),
+                candidate.get("zip"),
+                candidate.get("email"),
+                candidate.get("phone"),
+                candidate.get("website"),
+                candidate.get("principal_committee_street_1"),
+                candidate.get("principal_committee_city"),
+                candidate.get("principal_committee_zip"),
+            ])
+            
+            if not has_any_contact:
+                # Trigger background refresh (non-blocking)
+                async def background_refresh():
+                    try:
+                        await fec_client.refresh_candidate_contact_info_if_needed(
+                            candidate_id,
+                            force_refresh=True  # Force refresh to ensure it actually runs
+                        )
+                        logger.info(f"Background contact info refresh completed for candidate {candidate_id}")
+                    except Exception as e:
+                        logger.warning(f"Error in background contact info refresh for candidate {candidate_id}: {e}")
+                
+                # Schedule background task (fire and forget)
+                asyncio.create_task(background_refresh())
+                logger.debug(f"Triggered on-demand contact info fetch for candidate {candidate_id}")
         
         # Map API response to our schema
         candidate_data = {
@@ -229,25 +280,8 @@ async def refresh_candidate_contact_info(candidate_id: str):
             # Get updated candidate data
             candidate = await fec_client.get_candidate(candidate_id)
             if candidate:
-                # Build contact information if available
-                contact_info = None
-                if any([
-                    candidate.get("street_address"),
-                    candidate.get("city"),
-                    candidate.get("zip"),
-                    candidate.get("email"),
-                    candidate.get("phone"),
-                    candidate.get("website")
-                ]):
-                    contact_info = ContactInformation(
-                        street_address=candidate.get("street_address"),
-                        city=candidate.get("city"),
-                        state=candidate.get("state"),
-                        zip=candidate.get("zip"),
-                        email=candidate.get("email"),
-                        phone=candidate.get("phone"),
-                        website=candidate.get("website")
-                    )
+                # Extract contact information
+                contact_info = extract_candidate_contact_info(candidate)
                 
                 return {
                     "success": True,

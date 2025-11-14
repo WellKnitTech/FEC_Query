@@ -1994,7 +1994,14 @@ class FECClient:
         return contact_info
     
     def _extract_committee_contact_info(self, committee_data: Dict) -> Dict:
-        """Extract contact information from committee API response"""
+        """Extract contact information from committee API response
+        
+        FEC API committee endpoints return contact info in these fields:
+        - street_1, street_2: Address lines
+        - city, state, zip: Location
+        - email, phone, website: Contact methods
+        - treasurer_name: Committee treasurer
+        """
         contact_info = {}
         
         contact_info["street_address"] = committee_data.get("street_1") or committee_data.get("street_address")
@@ -2005,6 +2012,11 @@ class FECClient:
         contact_info["phone"] = committee_data.get("phone")
         contact_info["website"] = committee_data.get("website")
         contact_info["treasurer_name"] = committee_data.get("treasurer_name")
+        
+        # Log what we found for debugging
+        found_fields = [k for k, v in contact_info.items() if v]
+        if found_fields:
+            logger.debug(f"Extracted committee contact fields: {found_fields}")
         
         return contact_info
     
@@ -2048,10 +2060,34 @@ class FECClient:
                 candidate = result.scalar_one_or_none()
                 
                 if not candidate:
-                    # Cache the negative result
-                    async with _contact_info_check_cache_lock:
-                        _contact_info_check_cache[candidate_id] = (False, now)
-                    return False
+                    # Candidate doesn't exist in database - fetch and create it first
+                    logger.info(f"Candidate {candidate_id} not found in database, fetching from API to create record")
+                    params = {}
+                    data = await self._make_request(f"candidate/{candidate_id}", params, use_cache=False)
+                    result_data = data.get("results", [{}])[0] if data.get("results") else None
+                    
+                    if not result_data:
+                        logger.warning(f"Could not fetch candidate {candidate_id} from API")
+                        async with _contact_info_check_cache_lock:
+                            _contact_info_check_cache[candidate_id] = (False, now)
+                        return False
+                    
+                    # Store candidate in database
+                    await self._store_candidate(result_data)
+                    
+                    # Re-fetch the candidate from database
+                    result = await session.execute(
+                        select(Candidate).where(Candidate.candidate_id == candidate_id)
+                    )
+                    candidate = result.scalar_one_or_none()
+                    
+                    if not candidate:
+                        logger.error(f"Failed to create candidate {candidate_id} in database")
+                        async with _contact_info_check_cache_lock:
+                            _contact_info_check_cache[candidate_id] = (False, now)
+                        return False
+                    
+                    logger.info(f"Created candidate {candidate_id} in database, proceeding with contact info refresh")
                 
                 # Check if contact info already exists (from bulk import or previous API call)
                 # Only refresh if contact info is completely missing
@@ -2081,16 +2117,69 @@ class FECClient:
                 async with _contact_info_check_cache_lock:
                     _contact_info_check_cache[candidate_id] = (False, now)
                 
+                logger.info(f"Fetching candidate {candidate_id} from FEC API to refresh contact info (force_refresh={force_refresh})")
                 # Fetch from API
                 params = {}
                 data = await self._make_request(f"candidate/{candidate_id}", params, use_cache=False)
                 result_data = data.get("results", [{}])[0] if data.get("results") else None
                 
                 if not result_data:
+                    logger.warning(f"No candidate data returned from API for {candidate_id}")
                     return False
                 
-                # Extract and update contact info
+                logger.debug(f"Received candidate data from API for {candidate_id}, keys: {list(result_data.keys())[:20]}")
+                
+                # Extract and update contact info from candidate response
                 contact_info = self._extract_candidate_contact_info(result_data)
+                logger.debug(f"Extracted contact info from candidate response for {candidate_id}: {contact_info}")
+                
+                # If no contact info found in candidate response, fetch from committees directly
+                if not any([
+                    contact_info.get("street_address"),
+                    contact_info.get("city"),
+                    contact_info.get("zip"),
+                    contact_info.get("email"),
+                    contact_info.get("phone"),
+                    contact_info.get("website")
+                ]):
+                    logger.info(f"No contact info in candidate response for {candidate_id}, fetching from committees")
+                    try:
+                        # Fetch all committees for this candidate directly
+                        all_committees = await self.get_committees(candidate_id=candidate_id, limit=100)
+                        if all_committees:
+                            logger.info(f"Found {len(all_committees)} committees for candidate {candidate_id}, checking for contact info")
+                            
+                            # Try each committee until we find one with contact info
+                            for committee_data in all_committees:
+                                committee_contact = self._extract_committee_contact_info(committee_data)
+                                logger.debug(f"Committee {committee_data.get('committee_id', 'unknown')} contact info: {committee_contact}")
+                                
+                                # Use committee contact info if available
+                                if any([
+                                    committee_contact.get("street_address"),
+                                    committee_contact.get("city"),
+                                    committee_contact.get("zip"),
+                                    committee_contact.get("email"),
+                                    committee_contact.get("phone"),
+                                    committee_contact.get("website")
+                                ]):
+                                    contact_info = {
+                                        "street_address": committee_contact.get("street_address"),
+                                        "city": committee_contact.get("city"),
+                                        "zip": committee_contact.get("zip"),
+                                        "email": committee_contact.get("email"),
+                                        "phone": committee_contact.get("phone"),
+                                        "website": committee_contact.get("website")
+                                    }
+                                    committee_id = committee_data.get("committee_id", "unknown")
+                                    logger.info(f"Found contact info from committee {committee_id} for candidate {candidate_id}")
+                                    break  # Found contact info, stop searching
+                            else:
+                                logger.warning(f"No contact info found in any of the {len(all_committees)} committees for candidate {candidate_id}")
+                        else:
+                            logger.warning(f"No committees found for candidate {candidate_id}")
+                    except Exception as e:
+                        logger.error(f"Error fetching committees contact info for candidate {candidate_id}: {e}", exc_info=True)
                 
                 candidate.street_address = contact_info.get("street_address")
                 candidate.city = contact_info.get("city")
@@ -2114,7 +2203,15 @@ class FECClient:
                 async with _contact_info_check_cache_lock:
                     _contact_info_check_cache[candidate_id] = (has_contact_after_refresh, now)
                 
-                logger.info(f"Refreshed contact info for candidate {candidate_id}")
+                if has_contact_after_refresh:
+                    logger.info(
+                        f"Successfully refreshed contact info for candidate {candidate_id}: "
+                        f"address={bool(candidate.street_address)}, city={bool(candidate.city)}, "
+                        f"zip={bool(candidate.zip)}, email={bool(candidate.email)}, "
+                        f"phone={bool(candidate.phone)}, website={bool(candidate.website)}"
+                    )
+                else:
+                    logger.warning(f"No contact info found for candidate {candidate_id} after checking candidate API and all committees")
                 return True
                 
         except Exception as e:

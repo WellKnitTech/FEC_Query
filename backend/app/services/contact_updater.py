@@ -15,8 +15,11 @@ class ContactUpdaterService:
     
     def __init__(self):
         self.fec_client = FECClient()
-        self.update_interval_hours = int(os.getenv("CONTACT_INFO_UPDATE_INTERVAL_HOURS", "168"))  # 7 days default
+        # Quarterly update interval (90 days = 2160 hours)
+        self.update_interval_hours = int(os.getenv("CONTACT_INFO_UPDATE_INTERVAL_HOURS", "2160"))  # 90 days (quarterly) default
         self.stale_threshold_days = int(os.getenv("CONTACT_INFO_STALE_THRESHOLD_DAYS", "14"))  # 14 days (2 weeks) default
+        # Quarterly threshold for aging out contact info (90 days)
+        self.quarterly_threshold_days = int(os.getenv("CONTACT_INFO_QUARTERLY_THRESHOLD_DAYS", "90"))  # 90 days (quarterly) default
         # Only refresh contact info if it's very old (1 year) - contact info doesn't change much
         self.very_old_threshold_days = int(os.getenv("CONTACT_INFO_VERY_OLD_THRESHOLD_DAYS", "365"))  # 1 year default
         # Only run on startup if explicitly enabled (default: False)
@@ -65,7 +68,7 @@ class ContactUpdaterService:
         return results
     
     async def _refresh_candidate_contact_info(self, max_records: Optional[int] = None) -> Dict:
-        """Refresh contact info for candidates that need it"""
+        """Refresh contact info for candidates that need it - quarterly aging for all candidates"""
         results = {
             "checked": 0,
             "updated": 0,
@@ -74,31 +77,20 @@ class ContactUpdaterService:
         
         try:
             async with AsyncSessionLocal() as session:
-                # Find candidates with missing contact info that are very old
-                # Don't refresh if contact info exists (even if stale) - preserve bulk import data
-                # Only refresh if updated_at is very old (1+ year) - contact info doesn't change much
-                # If updated_at is None, only refresh if created_at is also very old (candidate was created long ago)
-                cutoff_date = datetime.utcnow() - timedelta(days=self.very_old_threshold_days)
+                # Quarterly aging: Refresh ALL candidates where updated_at is older than quarterly threshold (90 days)
+                # This ensures all contact info is refreshed quarterly regardless of whether it exists
+                cutoff_date = datetime.utcnow() - timedelta(days=self.quarterly_threshold_days)
                 query = select(Candidate).where(
-                    and_(
-                        Candidate.street_address.is_(None),
-                        Candidate.city.is_(None),
-                        Candidate.zip.is_(None),
-                        Candidate.email.is_(None),
-                        Candidate.phone.is_(None),
-                        Candidate.website.is_(None),
-                        # Only refresh if:
-                        # 1. updated_at exists and is very old (1+ year), OR
-                        # 2. updated_at is None AND created_at is very old (candidate was created long ago and never checked)
-                        or_(
-                            and_(
-                                Candidate.updated_at.isnot(None),
-                                Candidate.updated_at < cutoff_date
-                            ),
-                            and_(
-                                Candidate.updated_at.is_(None),
-                                Candidate.created_at < cutoff_date
-                            )
+                    or_(
+                        # Candidates with updated_at older than quarterly threshold
+                        and_(
+                            Candidate.updated_at.isnot(None),
+                            Candidate.updated_at < cutoff_date
+                        ),
+                        # Candidates with no updated_at but created_at older than quarterly threshold
+                        and_(
+                            Candidate.updated_at.is_(None),
+                            Candidate.created_at < cutoff_date
                         )
                     )
                 )
@@ -111,18 +103,19 @@ class ContactUpdaterService:
                 results["checked"] = len(candidates)
                 
                 if len(candidates) > 0:
-                    logger.info(f"Found {len(candidates)} candidates needing contact info refresh (missing contact info and not checked in {self.very_old_threshold_days} days)")
+                    logger.info(f"Found {len(candidates)} candidates needing quarterly contact info refresh (not updated in {self.quarterly_threshold_days} days)")
                 else:
-                    logger.debug("No candidates need contact info refresh (all have contact info or were recently checked)")
+                    logger.debug(f"No candidates need quarterly contact info refresh (all updated within {self.quarterly_threshold_days} days)")
                 
                 # Process in batches
                 for i in range(0, len(candidates), self.batch_size):
                     batch = candidates[i:i + self.batch_size]
                     for candidate in batch:
                         try:
-                            # Refresh contact info (only if missing)
+                            # Force refresh to update contact info (quarterly aging)
                             refreshed = await self.fec_client.refresh_candidate_contact_info_if_needed(
-                                candidate.candidate_id
+                                candidate.candidate_id,
+                                force_refresh=True
                             )
                             if refreshed:
                                 results["updated"] += 1
@@ -272,6 +265,7 @@ class ContactUpdaterService:
             "running": self._running,
             "update_interval_hours": self.update_interval_hours,
             "stale_threshold_days": self.stale_threshold_days,
+            "quarterly_threshold_days": self.quarterly_threshold_days,
             "batch_size": self.batch_size
         }
 
