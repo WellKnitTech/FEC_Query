@@ -256,6 +256,17 @@ class DonorAggregationService:
             else:
                 match_confidence = 1.0
             
+            # Calculate total amount, ensuring all values are converted to float
+            total_amount = 0.0
+            for c in contribs:
+                amt = c.get('contribution_amount')
+                if amt is not None:
+                    try:
+                        total_amount += float(amt)
+                    except (ValueError, TypeError):
+                        # Skip invalid amounts
+                        continue
+            
             aggregated.append({
                 'donor_key': key,
                 'canonical_name': canonical.get('contributor_name', ''),
@@ -263,7 +274,7 @@ class DonorAggregationService:
                 'canonical_city': canonical.get('contributor_city'),
                 'canonical_employer': canonical.get('contributor_employer'),
                 'canonical_occupation': canonical.get('contributor_occupation'),
-                'total_amount': sum(c.get('contribution_amount', 0) or 0 for c in contribs),
+                'total_amount': total_amount,
                 'contribution_count': len(contribs),
                 'first_contribution_date': first_date.isoformat() if isinstance(first_date, datetime) else (first_date if first_date else None),
                 'last_contribution_date': last_date.isoformat() if isinstance(last_date, datetime) else (last_date if last_date else None),

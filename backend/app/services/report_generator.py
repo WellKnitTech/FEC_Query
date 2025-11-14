@@ -95,7 +95,8 @@ class ReportGenerator:
                     total_contributions=float(total.get('contributions', 0)),
                     individual_contributions=float(total.get('individual_contributions', 0)),
                     pac_contributions=float(total.get('pac_contributions', 0)),
-                    party_contributions=float(total.get('party_contributions', 0))
+                    party_contributions=float(total.get('party_contributions', 0)),
+                    loan_contributions=float(total.get('loan_contributions', 0) or total.get('loans_received', 0) or 0)
                 ))
             
             # Get analysis data

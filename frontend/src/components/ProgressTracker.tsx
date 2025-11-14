@@ -29,6 +29,61 @@ export default function ProgressTracker({ jobStatus, onCancel }: ProgressTracker
     return new Date(isoString).toLocaleString();
   };
 
+  // Get current stage from progress_data
+  const getCurrentStage = () => {
+    const progressData = jobStatus.progress_data || {};
+    const status = progressData.status || 'starting';
+    
+    const stageMap: Record<string, { label: string; icon: string; color: string }> = {
+      'downloading': { label: 'Downloading', icon: '⬇️', color: 'text-blue-600' },
+      'extracting': { label: 'Extracting', icon: '📦', color: 'text-purple-600' },
+      'parsing': { label: 'Parsing', icon: '📄', color: 'text-indigo-600' },
+      'importing': { label: 'Importing', icon: '💾', color: 'text-green-600' },
+      'clearing': { label: 'Clearing', icon: '🗑️', color: 'text-red-600' },
+      'starting': { label: 'Starting', icon: '⏳', color: 'text-gray-600' },
+      'completed': { label: 'Completed', icon: '✅', color: 'text-green-600' },
+      'failed': { label: 'Failed', icon: '❌', color: 'text-red-600' },
+    };
+    
+    return stageMap[status] || { label: status, icon: '⏳', color: 'text-gray-600' };
+  };
+
+  const getStageProgress = () => {
+    const progressData = jobStatus.progress_data || {};
+    const status = progressData.status || 'starting';
+    
+    // Calculate stage-specific progress
+    if (status === 'downloading' && progressData.cycle_progress) {
+      const cycleProgress = progressData.cycle_progress[jobStatus.current_cycle || jobStatus.cycle];
+      if (cycleProgress && cycleProgress.total_mb) {
+        const pct = (cycleProgress.downloaded_mb / cycleProgress.total_mb) * 100;
+        return {
+          percentage: Math.min(100, pct),
+          details: `${(cycleProgress.downloaded_mb || 0).toFixed(1)} MB / ${cycleProgress.total_mb.toFixed(1)} MB`
+        };
+      }
+    }
+    
+    if (status === 'importing' || status === 'parsing') {
+      if (jobStatus.total_chunks > 0) {
+        const pct = (jobStatus.current_chunk / jobStatus.total_chunks) * 100;
+        return {
+          percentage: Math.min(100, pct),
+          details: `Chunk ${jobStatus.current_chunk} / ${jobStatus.total_chunks}`
+        };
+      }
+    }
+    
+    // Fallback to overall progress
+    return {
+      percentage: jobStatus.overall_progress || 0,
+      details: null
+    };
+  };
+
+  const currentStage = getCurrentStage();
+  const stageProgress = getStageProgress();
+
   return (
     <div className="bg-white border rounded-lg p-4 mb-4">
       <div className="flex items-center justify-between mb-2">
@@ -60,18 +115,62 @@ export default function ProgressTracker({ jobStatus, onCancel }: ProgressTracker
         </div>
       </div>
 
-      {/* Progress Bar */}
+      {/* Current Stage Indicator */}
       {jobStatus.status === 'running' && (
-        <div className="mb-2">
-          <div className="w-full bg-gray-200 rounded-full h-2.5">
+        <div className="mb-3">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-lg">{currentStage.icon}</span>
+            <span className={`text-sm font-medium ${currentStage.color}`}>
+              {currentStage.label}
+              {jobStatus.progress_data?.data_type && (
+                <span className="text-gray-500 ml-2">
+                  ({jobStatus.progress_data.data_type.replace(/_/g, ' ')})
+                </span>
+              )}
+            </span>
+          </div>
+          
+          {/* Stage Progress Bar */}
+          <div className="w-full bg-gray-200 rounded-full h-3 mb-1">
             <div
-              className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
-              style={{ width: `${Math.min(100, jobStatus.overall_progress)}%` }}
+              className="h-3 rounded-full transition-all duration-300"
+              style={{ 
+                width: `${Math.min(100, stageProgress.percentage)}%`,
+                backgroundColor: currentStage.color === 'text-blue-600' ? '#2563eb' :
+                                currentStage.color === 'text-purple-600' ? '#9333ea' :
+                                currentStage.color === 'text-indigo-600' ? '#4f46e5' :
+                                currentStage.color === 'text-green-600' ? '#16a34a' :
+                                currentStage.color === 'text-red-600' ? '#dc2626' :
+                                '#6b7280'
+              }}
             ></div>
           </div>
-          <div className="text-xs text-gray-500 mt-1">
-            {jobStatus.overall_progress.toFixed(1)}% complete
+          
+          {/* Progress Details */}
+          <div className="flex justify-between items-center text-xs text-gray-600">
+            <span>
+              {stageProgress.details || `${stageProgress.percentage.toFixed(1)}% complete`}
+            </span>
+            {jobStatus.progress_data?.resuming && (
+              <span className="text-orange-600 font-medium">Resuming from checkpoint...</span>
+            )}
           </div>
+          
+          {/* Overall Progress (if different from stage progress) */}
+          {jobStatus.overall_progress > 0 && Math.abs(jobStatus.overall_progress - stageProgress.percentage) > 5 && (
+            <div className="mt-2">
+              <div className="flex justify-between text-xs text-gray-500 mb-1">
+                <span>Overall Progress</span>
+                <span>{jobStatus.overall_progress.toFixed(1)}%</span>
+              </div>
+              <div className="w-full bg-gray-100 rounded-full h-2">
+                <div
+                  className="bg-gray-400 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${Math.min(100, jobStatus.overall_progress)}%` }}
+                ></div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -101,7 +200,39 @@ export default function ProgressTracker({ jobStatus, onCancel }: ProgressTracker
           <span className="text-gray-500">Records:</span>{' '}
           <span className="font-medium">{jobStatus.imported_records.toLocaleString()}</span>
         </div>
+        {jobStatus.progress_data?.file_position && jobStatus.progress_data.file_position > 0 && (
+          <div>
+            <span className="text-gray-500">File Position:</span>{' '}
+            <span className="font-medium">{(jobStatus.progress_data.file_position / 1000000).toFixed(1)}M rows</span>
+          </div>
+        )}
       </div>
+      
+      {/* Download Progress (if downloading) */}
+      {jobStatus.progress_data?.status === 'downloading' && jobStatus.progress_data.cycle_progress && (
+        <div className="mb-2 p-2 bg-blue-50 rounded text-xs">
+          {Object.entries(jobStatus.progress_data.cycle_progress).map(([cycle, progress]: [string, any]) => (
+            <div key={cycle} className="mb-1">
+              <div className="flex justify-between mb-1">
+                <span className="text-gray-700">Cycle {cycle}:</span>
+                <span className="font-medium text-blue-700">
+                  {progress.downloaded_mb?.toFixed(1) || 0} MB
+                  {progress.total_mb && ` / ${progress.total_mb.toFixed(1)} MB`}
+                  {progress.progress_pct && ` (${progress.progress_pct.toFixed(1)}%)`}
+                </span>
+              </div>
+              {progress.total_mb && (
+                <div className="w-full bg-blue-200 rounded-full h-1.5">
+                  <div
+                    className="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
+                    style={{ width: `${Math.min(100, (progress.downloaded_mb / progress.total_mb) * 100)}%` }}
+                  ></div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Expanded Details */}
       {expanded && (

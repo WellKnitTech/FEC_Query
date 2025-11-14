@@ -7,11 +7,11 @@ import logging
 import gc
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.db.database import (
-    AsyncSessionLocal, BulkDataMetadata, Candidate, Committee,
+    AsyncSessionLocal, BulkDataMetadata, Candidate, Committee, Contribution,
     IndependentExpenditure, OperatingExpenditure, CandidateSummary, CommitteeSummary,
     ElectioneeringComm, CommunicationCost
 )
@@ -38,8 +38,37 @@ def calculate_data_age(cycle: int) -> int:
 class GenericBulkDataParser:
     """Generic parser for FEC bulk data files"""
     
+    # SQLite has a limit of 999 variables per statement
+    # With ~11 fields per record, we can insert ~90 records per statement
+    SQLITE_MAX_BATCH_SIZE = 90
+    
     def __init__(self, bulk_data_service):
         self.bulk_data_service = bulk_data_service
+    
+    def _split_records_for_sqlite(self, records: List[Dict], max_batch_size: int = None) -> List[List[Dict]]:
+        """
+        Split records into smaller batches to avoid SQLite's variable limit (999 variables per statement)
+        
+        Args:
+            records: List of records to split
+            max_batch_size: Maximum records per batch (defaults to SQLITE_MAX_BATCH_SIZE)
+        
+        Returns:
+            List of record batches
+        """
+        if max_batch_size is None:
+            max_batch_size = self.SQLITE_MAX_BATCH_SIZE
+        
+        if not records:
+            return []
+        
+        # Estimate fields per record (add some safety margin)
+        # Most records have ~11 fields, so we use 90 as default
+        batches = []
+        for i in range(0, len(records), max_batch_size):
+            batches.append(records[i:i + max_batch_size])
+        
+        return batches
     
     @staticmethod
     def is_parser_implemented(data_type: DataType) -> bool:
@@ -48,6 +77,7 @@ class GenericBulkDataParser:
             DataType.INDIVIDUAL_CONTRIBUTIONS,
             DataType.CANDIDATE_MASTER,
             DataType.COMMITTEE_MASTER,
+            DataType.CANDIDATE_COMMITTEE_LINKAGE,
             DataType.INDEPENDENT_EXPENDITURES,
             DataType.OPERATING_EXPENDITURES,
             DataType.CANDIDATE_SUMMARY,
@@ -80,6 +110,8 @@ class GenericBulkDataParser:
             return await self.parse_candidate_master(file_path, cycle, job_id, batch_size)
         elif data_type == DataType.COMMITTEE_MASTER:
             return await self.parse_committee_master(file_path, cycle, job_id, batch_size)
+        elif data_type == DataType.CANDIDATE_COMMITTEE_LINKAGE:
+            return await self.parse_candidate_committee_linkage(file_path, cycle, job_id, batch_size)
         elif data_type == DataType.INDEPENDENT_EXPENDITURES:
             return await self.parse_independent_expenditures(file_path, cycle, job_id, batch_size)
         elif data_type == DataType.OPERATING_EXPENDITURES:
@@ -279,22 +311,25 @@ class GenericBulkDataParser:
                         record['raw_data'] = raw_data_records[i]
                     
                     if records:
-                        # Bulk upsert using single execute call
-                        insert_stmt = sqlite_insert(Candidate).values(records)
-                        upsert_stmt = insert_stmt.on_conflict_do_update(
-                            index_elements=['candidate_id'],
-                            set_={
-                                'name': insert_stmt.excluded.name,
-                                'office': insert_stmt.excluded.office,
-                                'party': insert_stmt.excluded.party,
-                                'state': insert_stmt.excluded.state,
-                                'district': insert_stmt.excluded.district,
-                                'election_years': insert_stmt.excluded.election_years,
-                                'raw_data': insert_stmt.excluded.raw_data,
-                                'updated_at': datetime.utcnow()
-                            }
-                        )
-                        await session.execute(upsert_stmt)
+                        # Split records into smaller batches to avoid SQLite variable limit
+                        record_batches = self._split_records_for_sqlite(records)
+                        for batch in record_batches:
+                            # Bulk upsert using single execute call
+                            insert_stmt = sqlite_insert(Candidate).values(batch)
+                            upsert_stmt = insert_stmt.on_conflict_do_update(
+                                index_elements=['candidate_id'],
+                                set_={
+                                    'name': insert_stmt.excluded.name,
+                                    'office': insert_stmt.excluded.office,
+                                    'party': insert_stmt.excluded.party,
+                                    'state': insert_stmt.excluded.state,
+                                    'district': insert_stmt.excluded.district,
+                                    'election_years': insert_stmt.excluded.election_years,
+                                    'raw_data': insert_stmt.excluded.raw_data,
+                                    'updated_at': datetime.utcnow()
+                                }
+                            )
+                            await session.execute(upsert_stmt)
                         await session.commit()
                         total_records += len(records)
                         
@@ -403,21 +438,24 @@ class GenericBulkDataParser:
                         record['raw_data'] = raw_data_records[i]
                     
                     if records:
-                        # Bulk upsert using single execute call
-                        insert_stmt = sqlite_insert(Committee).values(records)
-                        upsert_stmt = insert_stmt.on_conflict_do_update(
-                            index_elements=['committee_id'],
-                            set_={
-                                'name': insert_stmt.excluded.name,
-                                'committee_type': insert_stmt.excluded.committee_type,
-                                'party': insert_stmt.excluded.party,
-                                'state': insert_stmt.excluded.state,
-                                'candidate_ids': insert_stmt.excluded.candidate_ids,
-                                'raw_data': insert_stmt.excluded.raw_data,
-                                'updated_at': datetime.utcnow()
-                            }
-                        )
-                        await session.execute(upsert_stmt)
+                        # Split records into smaller batches to avoid SQLite variable limit
+                        record_batches = self._split_records_for_sqlite(records)
+                        for batch in record_batches:
+                            # Bulk upsert using single execute call
+                            insert_stmt = sqlite_insert(Committee).values(batch)
+                            upsert_stmt = insert_stmt.on_conflict_do_update(
+                                index_elements=['committee_id'],
+                                set_={
+                                    'name': insert_stmt.excluded.name,
+                                    'committee_type': insert_stmt.excluded.committee_type,
+                                    'party': insert_stmt.excluded.party,
+                                    'state': insert_stmt.excluded.state,
+                                    'candidate_ids': insert_stmt.excluded.candidate_ids,
+                                    'raw_data': insert_stmt.excluded.raw_data,
+                                    'updated_at': datetime.utcnow()
+                                }
+                            )
+                            await session.execute(upsert_stmt)
                         await session.commit()
                         total_records += len(records)
                         
@@ -442,6 +480,164 @@ class GenericBulkDataParser:
             
         except Exception as e:
             logger.error(f"Error parsing committee master: {e}", exc_info=True)
+            raise
+    
+    async def parse_candidate_committee_linkage(
+        self,
+        file_path: str,
+        cycle: int,
+        job_id: Optional[str] = None,
+        batch_size: int = 50000
+    ) -> int:
+        """Parse candidate-committee linkage file (ccl*.zip -> ccl.txt)"""
+        logger.info(f"Parsing candidate-committee linkage file for cycle {cycle}")
+        
+        # Get column names from header file
+        columns = await self.get_column_names(DataType.CANDIDATE_COMMITTEE_LINKAGE, file_path)
+        if not columns:
+            # Fallback to known FEC candidate-committee linkage columns
+            columns = [
+                'CAND_ID', 'CAND_ELECTION_YR', 'FEC_ELECTION_YR', 'CMTE_ID', 'CMTE_TP',
+                'CMTE_DSGN', 'LINKAGE_ID', 'CAND_OFFICE', 'CAND_OFFICE_ST', 'CAND_OFFICE_DISTRICT',
+                'CAND_ICI', 'CAND_STATUS', 'CAND_PCC', 'CAND_ST1', 'CAND_ST2', 'CAND_CITY',
+                'CAND_ST', 'CAND_ZIP', 'CMTE_ST1', 'CMTE_ST2', 'CMTE_CITY', 'CMTE_ST',
+                'CMTE_ZIP', 'CMTE_TP_ORG', 'CMTE_TP_CATEGORY', 'ORG_TP', 'CONNECTED_ORG_NM',
+                'IND_EMP', 'IND_OCC', 'IND_NAME', 'IND_ST1', 'IND_ST2', 'IND_CITY',
+                'IND_ST', 'IND_ZIP', 'IND_EMPLOYER', 'IND_OCCUPATION'
+            ]
+            logger.warning(f"Using fallback column names for candidate-committee linkage")
+        
+        try:
+            total_records = 0
+            skipped = 0
+            chunk_count = 0
+            
+            async with AsyncSessionLocal() as session:
+                # Read the file in chunks
+                for chunk in pd.read_csv(
+                    file_path,
+                    sep='|',
+                    header=None,
+                    names=columns,
+                    chunksize=batch_size,
+                    dtype=str,
+                    low_memory=False,
+                    on_bad_lines='skip'
+                ):
+                    if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
+                        logger.info(f"Import cancelled for job {job_id}")
+                        return total_records
+                    
+                    chunk_count += 1
+                    
+                    # Filter out rows without CMTE_ID or CAND_ID
+                    chunk = chunk[
+                        chunk['CMTE_ID'].notna() & (chunk['CMTE_ID'].astype(str).str.strip() != '') &
+                        chunk['CAND_ID'].notna() & (chunk['CAND_ID'].astype(str).str.strip() != '')
+                    ]
+                    if len(chunk) == 0:
+                        del chunk
+                        gc.collect()
+                        continue
+                    
+                    # Clean fields
+                    chunk['committee_id'] = chunk['CMTE_ID'].astype(str).str.strip()
+                    chunk['candidate_id'] = chunk['CAND_ID'].astype(str).str.strip()
+                    
+                    # Group by committee_id to collect all candidate_ids
+                    # This creates a mapping: committee_id -> list of candidate_ids
+                    committee_candidate_map = chunk.groupby('committee_id')['candidate_id'].apply(
+                        lambda x: list(x.unique())
+                    ).to_dict()
+                    
+                    # Update Committee table with candidate_ids
+                    if committee_candidate_map:
+                        # Process in batches to avoid too many individual updates
+                        update_batch = []
+                        for comm_id, candidate_ids in committee_candidate_map.items():
+                            # Filter out empty candidate_ids
+                            candidate_ids = [cid for cid in candidate_ids if cid and cid.strip()]
+                            if candidate_ids:
+                                update_batch.append((comm_id, candidate_ids))
+                        
+                        # Update committees in batches
+                        for comm_id, candidate_ids in update_batch:
+                            try:
+                                # Get existing candidate_ids and merge
+                                result = await session.execute(
+                                    select(Committee.candidate_ids)
+                                    .where(Committee.committee_id == comm_id)
+                                )
+                                existing = result.scalar_one_or_none()
+                                
+                                # Merge existing and new candidate_ids, removing duplicates
+                                if existing and existing:
+                                    merged_ids = list(set(existing + candidate_ids))
+                                else:
+                                    merged_ids = candidate_ids
+                                
+                                # Update the committee
+                                await session.execute(
+                                    update(Committee)
+                                    .where(Committee.committee_id == comm_id)
+                                    .values(candidate_ids=merged_ids)
+                                )
+                            except Exception as e:
+                                logger.debug(f"Error updating committee {comm_id}: {e}")
+                                continue
+                        
+                        # Also update contributions with candidate_id based on committee_id
+                        # Use the first candidate_id for each committee (most committees have one primary candidate)
+                        
+                        contribution_updates = 0
+                        for comm_id, candidate_ids in update_batch:
+                            if candidate_ids:
+                                # Use first candidate_id (primary candidate)
+                                primary_candidate_id = candidate_ids[0]
+                                
+                                try:
+                                    # Update contributions missing candidate_id for this committee
+                                    result = await session.execute(
+                                        update(Contribution)
+                                        .where(
+                                            Contribution.committee_id == comm_id,
+                                            ((Contribution.candidate_id.is_(None)) | (Contribution.candidate_id == ''))
+                                        )
+                                        .values(candidate_id=primary_candidate_id)
+                                        .execution_options(synchronize_session=False)
+                                    )
+                                    contribution_updates += result.rowcount
+                                except Exception as e:
+                                    logger.debug(f"Error updating contributions for committee {comm_id}: {e}")
+                                    continue
+                        
+                        if contribution_updates > 0:
+                            logger.info(f"Updated {contribution_updates} contributions with candidate_id from linkage data")
+                        
+                        await session.commit()
+                        total_records += len(update_batch)
+                    
+                    # Log progress
+                    if chunk_count % 10 == 0:
+                        logger.info(f"Processed {chunk_count} chunks: {total_records} committee linkages")
+                    
+                    # Update progress
+                    if job_id and chunk_count % 5 == 0:
+                        await self.bulk_data_service._update_job_progress(
+                            job_id,
+                            current_chunk=chunk_count,
+                            imported_records=total_records,
+                            skipped_records=skipped
+                        )
+                    
+                    del chunk, committee_candidate_map
+                    gc.collect()
+            
+            logger.info(f"Completed candidate-committee linkage import: {total_records} linkages processed")
+            return total_records
+            
+        except Exception as e:
+            logger.error(f"Error parsing candidate-committee linkage: {e}", exc_info=True)
             raise
     
     async def parse_independent_expenditures(
@@ -518,10 +714,33 @@ class GenericBulkDataParser:
                     chunk['payee_name'] = clean_str_field(get_col(chunk, 'PAYEE_NM', 'payee_name'))
                     chunk['expenditure_purpose'] = clean_str_field(get_col(chunk, 'EXPENDITURE_PURPOSE_DESC', 'expenditure_purpose'))
                     
-                    # Vectorized amount parsing
+                    # Vectorized amount parsing with better handling of malformed values
                     amount_col = get_col(chunk, 'EXPENDITURE_AMOUNT', 'expenditure_amount')
+                    # Clean the amount strings
+                    amount_str = amount_col.astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip()
+                    
+                    # Handle malformed strings with multiple decimal points (e.g., "0.00.00.00...")
+                    def fix_malformed_amount(amount_str_series):
+                        """Fix malformed amounts with multiple decimal points"""
+                        result = amount_str_series.copy()
+                        # Find strings with multiple decimal points
+                        multi_dot_mask = result.str.count('.') > 1
+                        if multi_dot_mask.any():
+                            # For strings with multiple dots, take only the first decimal part
+                            def take_first_decimal(s):
+                                if '.' in s:
+                                    first_dot = s.find('.')
+                                    second_dot = s.find('.', first_dot + 1)
+                                    if second_dot > 0:
+                                        return s[:second_dot]
+                                return s
+                            result[multi_dot_mask] = result[multi_dot_mask].apply(take_first_decimal)
+                        return result
+                    
+                    amount_str = fix_malformed_amount(amount_str)
+                    
                     chunk['expenditure_amount'] = pd.to_numeric(
-                        amount_col.astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip(),
+                        amount_str,
                         errors='coerce'
                     ).fillna(0.0)
                     
@@ -540,32 +759,54 @@ class GenericBulkDataParser:
                     records = records_df.to_dict('records')
                     
                     # Add cycle, raw_data, and data_age_days
+                    # Ensure data_age_days is an integer (not NaN or None)
+                    if data_age_days is None or (isinstance(data_age_days, float) and pd.isna(data_age_days)):
+                        data_age_days_int = 0
+                    else:
+                        try:
+                            data_age_days_int = int(data_age_days)
+                        except (ValueError, TypeError):
+                            data_age_days_int = 0
                     for i, record in enumerate(records):
                         record['cycle'] = cycle
                         record['raw_data'] = raw_data_records[i]
-                        record['data_age_days'] = data_age_days
+                        record['data_age_days'] = data_age_days_int
+                        # Convert pandas Timestamp to Python datetime for SQLite compatibility
+                        if 'expenditure_date' in record and pd.notna(record['expenditure_date']):
+                            if isinstance(record['expenditure_date'], pd.Timestamp):
+                                record['expenditure_date'] = record['expenditure_date'].to_pydatetime()
+                            elif not isinstance(record['expenditure_date'], (datetime, type(None))):
+                                try:
+                                    record['expenditure_date'] = pd.to_datetime(record['expenditure_date']).to_pydatetime()
+                                except:
+                                    record['expenditure_date'] = None
+                        else:
+                            record['expenditure_date'] = None
                     
                     if records:
-                        # Bulk upsert using single execute call
-                        insert_stmt = sqlite_insert(IndependentExpenditure).values(records)
-                        upsert_stmt = insert_stmt.on_conflict_do_update(
-                            index_elements=['expenditure_id'],
-                            set_={
-                                'cycle': insert_stmt.excluded.cycle,
-                                'committee_id': insert_stmt.excluded.committee_id,
-                                'candidate_id': insert_stmt.excluded.candidate_id,
-                                'candidate_name': insert_stmt.excluded.candidate_name,
-                                'support_oppose_indicator': insert_stmt.excluded.support_oppose_indicator,
-                                'expenditure_amount': insert_stmt.excluded.expenditure_amount,
-                                'expenditure_date': insert_stmt.excluded.expenditure_date,
-                                'payee_name': insert_stmt.excluded.payee_name,
-                                'expenditure_purpose': insert_stmt.excluded.expenditure_purpose,
-                                'raw_data': insert_stmt.excluded.raw_data,
-                                'data_age_days': insert_stmt.excluded.data_age_days,
-                                'updated_at': datetime.utcnow()
-                            }
-                        )
-                        await session.execute(upsert_stmt)
+                        # Split records into smaller batches to avoid SQLite variable limit
+                        record_batches = self._split_records_for_sqlite(records)
+                        for batch in record_batches:
+                            # Bulk upsert using single execute call
+                            insert_stmt = sqlite_insert(IndependentExpenditure).values(batch)
+                            upsert_stmt = insert_stmt.on_conflict_do_update(
+                                index_elements=['expenditure_id'],
+                                set_={
+                                    'cycle': insert_stmt.excluded.cycle,
+                                    'committee_id': insert_stmt.excluded.committee_id,
+                                    'candidate_id': insert_stmt.excluded.candidate_id,
+                                    'candidate_name': insert_stmt.excluded.candidate_name,
+                                    'support_oppose_indicator': insert_stmt.excluded.support_oppose_indicator,
+                                    'expenditure_amount': insert_stmt.excluded.expenditure_amount,
+                                    'expenditure_date': insert_stmt.excluded.expenditure_date,
+                                    'payee_name': insert_stmt.excluded.payee_name,
+                                    'expenditure_purpose': insert_stmt.excluded.expenditure_purpose,
+                                    'raw_data': insert_stmt.excluded.raw_data,
+                                    'data_age_days': insert_stmt.excluded.data_age_days,
+                                    'updated_at': datetime.utcnow()
+                                }
+                            )
+                            await session.execute(upsert_stmt)
                         await session.commit()
                         total_records += len(records)
                         
@@ -697,29 +938,52 @@ class GenericBulkDataParser:
                     records = records_df.to_dict('records')
                     
                     # Add cycle, raw_data, and data_age_days
+                    # Ensure data_age_days is an integer (not NaN or None)
+                    if data_age_days is None or (isinstance(data_age_days, float) and pd.isna(data_age_days)):
+                        data_age_days_int = 0
+                    else:
+                        try:
+                            data_age_days_int = int(data_age_days)
+                        except (ValueError, TypeError):
+                            data_age_days_int = 0
                     for i, record in enumerate(records):
                         record['cycle'] = cycle
                         record['raw_data'] = raw_data_records[i]
-                        record['data_age_days'] = data_age_days
+                        record['data_age_days'] = data_age_days_int
+                        # Convert pandas Timestamp to Python datetime for SQLite compatibility
+                        if 'expenditure_date' in record and pd.notna(record['expenditure_date']):
+                            if isinstance(record['expenditure_date'], pd.Timestamp):
+                                record['expenditure_date'] = record['expenditure_date'].to_pydatetime()
+                            elif not isinstance(record['expenditure_date'], (datetime, type(None))):
+                                # Try to convert if it's a string or other type
+                                try:
+                                    record['expenditure_date'] = pd.to_datetime(record['expenditure_date']).to_pydatetime()
+                                except:
+                                    record['expenditure_date'] = None
+                        else:
+                            record['expenditure_date'] = None
                     
                     if records:
-                        # Bulk upsert using single execute call
-                        insert_stmt = sqlite_insert(OperatingExpenditure).values(records)
-                        upsert_stmt = insert_stmt.on_conflict_do_update(
-                            index_elements=['expenditure_id'],
-                            set_={
-                                'cycle': insert_stmt.excluded.cycle,
-                                'committee_id': insert_stmt.excluded.committee_id,
-                                'payee_name': insert_stmt.excluded.payee_name,
-                                'expenditure_amount': insert_stmt.excluded.expenditure_amount,
-                                'expenditure_date': insert_stmt.excluded.expenditure_date,
-                                'expenditure_purpose': insert_stmt.excluded.expenditure_purpose,
-                                'raw_data': insert_stmt.excluded.raw_data,
-                                'data_age_days': insert_stmt.excluded.data_age_days,
-                                'updated_at': datetime.utcnow()
-                            }
-                        )
-                        await session.execute(upsert_stmt)
+                        # Split records into smaller batches to avoid SQLite variable limit
+                        record_batches = self._split_records_for_sqlite(records)
+                        for batch in record_batches:
+                            # Bulk upsert using single execute call
+                            insert_stmt = sqlite_insert(OperatingExpenditure).values(batch)
+                            upsert_stmt = insert_stmt.on_conflict_do_update(
+                                index_elements=['expenditure_id'],
+                                set_={
+                                    'cycle': insert_stmt.excluded.cycle,
+                                    'committee_id': insert_stmt.excluded.committee_id,
+                                    'payee_name': insert_stmt.excluded.payee_name,
+                                    'expenditure_amount': insert_stmt.excluded.expenditure_amount,
+                                    'expenditure_date': insert_stmt.excluded.expenditure_date,
+                                    'expenditure_purpose': insert_stmt.excluded.expenditure_purpose,
+                                    'raw_data': insert_stmt.excluded.raw_data,
+                                    'data_age_days': insert_stmt.excluded.data_age_days,
+                                    'updated_at': datetime.utcnow()
+                                }
+                            )
+                            await session.execute(upsert_stmt)
                         await session.commit()
                         total_records += len(records)
                         
@@ -831,31 +1095,42 @@ class GenericBulkDataParser:
                     records = records_df.to_dict('records')
                     
                     # Add cycle, raw_data, and data_age_days
+                    # Ensure data_age_days is an integer (not NaN or None)
+                    if data_age_days is None or (isinstance(data_age_days, float) and pd.isna(data_age_days)):
+                        data_age_days_int = 0
+                    else:
+                        try:
+                            data_age_days_int = int(data_age_days)
+                        except (ValueError, TypeError):
+                            data_age_days_int = 0
                     for i, record in enumerate(records):
                         record['cycle'] = cycle
                         record['raw_data'] = raw_data_records[i]
-                        record['data_age_days'] = data_age_days
+                        record['data_age_days'] = data_age_days_int
                     
                     if records:
-                        # Bulk upsert using single execute call
-                        insert_stmt = sqlite_insert(CandidateSummary).values(records)
-                        upsert_stmt = insert_stmt.on_conflict_do_update(
-                            index_elements=['candidate_id', 'cycle'],
-                            set_={
-                                'candidate_name': insert_stmt.excluded.candidate_name,
-                                'office': insert_stmt.excluded.office,
-                                'party': insert_stmt.excluded.party,
-                                'state': insert_stmt.excluded.state,
-                                'district': insert_stmt.excluded.district,
-                                'total_receipts': insert_stmt.excluded.total_receipts,
-                                'total_disbursements': insert_stmt.excluded.total_disbursements,
-                                'cash_on_hand': insert_stmt.excluded.cash_on_hand,
-                                'raw_data': insert_stmt.excluded.raw_data,
-                                'data_age_days': insert_stmt.excluded.data_age_days,
-                                'updated_at': datetime.utcnow()
-                            }
-                        )
-                        await session.execute(upsert_stmt)
+                        # Split records into smaller batches to avoid SQLite variable limit
+                        record_batches = self._split_records_for_sqlite(records)
+                        for batch in record_batches:
+                            # Bulk upsert using single execute call
+                            insert_stmt = sqlite_insert(CandidateSummary).values(batch)
+                            upsert_stmt = insert_stmt.on_conflict_do_update(
+                                index_elements=['candidate_id', 'cycle'],
+                                set_={
+                                    'candidate_name': insert_stmt.excluded.candidate_name,
+                                    'office': insert_stmt.excluded.office,
+                                    'party': insert_stmt.excluded.party,
+                                    'state': insert_stmt.excluded.state,
+                                    'district': insert_stmt.excluded.district,
+                                    'total_receipts': insert_stmt.excluded.total_receipts,
+                                    'total_disbursements': insert_stmt.excluded.total_disbursements,
+                                    'cash_on_hand': insert_stmt.excluded.cash_on_hand,
+                                    'raw_data': insert_stmt.excluded.raw_data,
+                                    'data_age_days': insert_stmt.excluded.data_age_days,
+                                    'updated_at': datetime.utcnow()
+                                }
+                            )
+                            await session.execute(upsert_stmt)
                         await session.commit()
                         total_records += len(records)
                         
@@ -964,28 +1239,39 @@ class GenericBulkDataParser:
                     records = records_df.to_dict('records')
                     
                     # Add cycle, raw_data, and data_age_days
+                    # Ensure data_age_days is an integer (not NaN or None)
+                    if data_age_days is None or (isinstance(data_age_days, float) and pd.isna(data_age_days)):
+                        data_age_days_int = 0
+                    else:
+                        try:
+                            data_age_days_int = int(data_age_days)
+                        except (ValueError, TypeError):
+                            data_age_days_int = 0
                     for i, record in enumerate(records):
                         record['cycle'] = cycle
                         record['raw_data'] = raw_data_records[i]
-                        record['data_age_days'] = data_age_days
+                        record['data_age_days'] = data_age_days_int
                     
                     if records:
-                        # Bulk upsert using single execute call
-                        insert_stmt = sqlite_insert(CommitteeSummary).values(records)
-                        upsert_stmt = insert_stmt.on_conflict_do_update(
-                            index_elements=['committee_id', 'cycle'],
-                            set_={
-                                'committee_name': insert_stmt.excluded.committee_name,
-                                'committee_type': insert_stmt.excluded.committee_type,
-                                'total_receipts': insert_stmt.excluded.total_receipts,
-                                'total_disbursements': insert_stmt.excluded.total_disbursements,
-                                'cash_on_hand': insert_stmt.excluded.cash_on_hand,
-                                'raw_data': insert_stmt.excluded.raw_data,
-                                'data_age_days': insert_stmt.excluded.data_age_days,
-                                'updated_at': datetime.utcnow()
-                            }
-                        )
-                        await session.execute(upsert_stmt)
+                        # Split records into smaller batches to avoid SQLite variable limit
+                        record_batches = self._split_records_for_sqlite(records)
+                        for batch in record_batches:
+                            # Bulk upsert using single execute call
+                            insert_stmt = sqlite_insert(CommitteeSummary).values(batch)
+                            upsert_stmt = insert_stmt.on_conflict_do_update(
+                                index_elements=['committee_id', 'cycle'],
+                                set_={
+                                    'committee_name': insert_stmt.excluded.committee_name,
+                                    'committee_type': insert_stmt.excluded.committee_type,
+                                    'total_receipts': insert_stmt.excluded.total_receipts,
+                                    'total_disbursements': insert_stmt.excluded.total_disbursements,
+                                    'cash_on_hand': insert_stmt.excluded.cash_on_hand,
+                                    'raw_data': insert_stmt.excluded.raw_data,
+                                    'data_age_days': insert_stmt.excluded.data_age_days,
+                                    'updated_at': datetime.utcnow()
+                                }
+                            )
+                            await session.execute(upsert_stmt)
                         await session.commit()
                         total_records += len(records)
                         
@@ -1055,8 +1341,27 @@ class GenericBulkDataParser:
                     
                     chunk_count += 1
                     
-                    # Filter out rows without CMTE_ID
-                    chunk = chunk[chunk['CMTE_ID'].notna() & (chunk['CMTE_ID'].astype(str).str.strip() != '')]
+                    # Check if CMTE_ID column exists (might be inferred with different name)
+                    committee_id_col = None
+                    for col in chunk.columns:
+                        if col.upper() == 'CMTE_ID' or col.upper() == 'COMMITTEE_ID':
+                            committee_id_col = col
+                            break
+                    
+                    if committee_id_col is None:
+                        logger.warning(f"CMTE_ID column not found in PAC summary. Available columns: {list(chunk.columns)}")
+                        # Try to use first column as committee_id if available
+                        if len(chunk.columns) > 0:
+                            committee_id_col = chunk.columns[0]
+                            logger.info(f"Using first column '{committee_id_col}' as committee_id")
+                        else:
+                            logger.error("No columns found in PAC summary chunk, skipping")
+                            del chunk
+                            gc.collect()
+                            continue
+                    
+                    # Filter out rows without committee_id
+                    chunk = chunk[chunk[committee_id_col].notna() & (chunk[committee_id_col].astype(str).str.strip() != '')]
                     if len(chunk) == 0:
                         del chunk
                         gc.collect()
@@ -1075,18 +1380,34 @@ class GenericBulkDataParser:
                             errors='coerce'
                         ).fillna(0.0)
                     
-                    chunk['committee_id'] = chunk['CMTE_ID'].astype(str).str.strip()
-                    chunk['committee_name'] = clean_str_field(chunk.get('CMTE_NM', pd.Series([''] * len(chunk))))
-                    chunk['committee_type'] = clean_str_field(chunk.get('CMTE_TP', pd.Series([''] * len(chunk))))
+                    # Helper to get column with case-insensitive matching
+                    def get_col(df, *possible_names):
+                        for name in possible_names:
+                            for col in df.columns:
+                                if col.upper() == name.upper():
+                                    return col
+                        return None
+                    
+                    chunk['committee_id'] = chunk[committee_id_col].astype(str).str.strip()
+                    
+                    # Use helper function to find columns case-insensitively
+                    cmte_nm_col = get_col(chunk, 'CMTE_NM', 'COMMITTEE_NAME', 'CMTE_NAME')
+                    cmte_tp_col = get_col(chunk, 'CMTE_TP', 'COMMITTEE_TYPE', 'CMTE_TYPE')
+                    receipts_col = get_col(chunk, 'TTL_RECEIPTS', 'TOTAL_RECEIPTS', 'RECEIPTS')
+                    disb_col = get_col(chunk, 'TTL_DISB', 'TOTAL_DISBURSEMENTS', 'DISBURSEMENTS', 'DISB')
+                    coh_col = get_col(chunk, 'COH_COP', 'CASH_ON_HAND', 'COH')
+                    
+                    chunk['committee_name'] = clean_str_field(chunk[cmte_nm_col] if cmte_nm_col else pd.Series([''] * len(chunk)))
+                    chunk['committee_type'] = clean_str_field(chunk[cmte_tp_col] if cmte_tp_col else pd.Series([''] * len(chunk)))
                     
                     # Parse financial amounts
-                    receipts_col = chunk.get('TTL_RECEIPTS', pd.Series(['0'] * len(chunk)))
-                    disb_col = chunk.get('TTL_DISB', pd.Series(['0'] * len(chunk)))
-                    coh_col = chunk.get('COH_COP', pd.Series(['0'] * len(chunk)))
+                    receipts_series = chunk[receipts_col] if receipts_col else pd.Series(['0'] * len(chunk))
+                    disb_series = chunk[disb_col] if disb_col else pd.Series(['0'] * len(chunk))
+                    coh_series = chunk[coh_col] if coh_col else pd.Series(['0'] * len(chunk))
                     
-                    chunk['total_receipts'] = parse_amount_vectorized(receipts_col)
-                    chunk['total_disbursements'] = parse_amount_vectorized(disb_col)
-                    chunk['cash_on_hand'] = parse_amount_vectorized(coh_col)
+                    chunk['total_receipts'] = parse_amount_vectorized(receipts_series)
+                    chunk['total_disbursements'] = parse_amount_vectorized(disb_series)
+                    chunk['cash_on_hand'] = parse_amount_vectorized(coh_series)
                     
                     # Build raw_data vectorized
                     raw_data_df = pd.DataFrame({col: chunk[col].astype(str).where(chunk[col].notna(), None) for col in columns if col in chunk.columns})
@@ -1097,28 +1418,39 @@ class GenericBulkDataParser:
                     records = records_df.to_dict('records')
                     
                     # Add cycle, raw_data, and data_age_days
+                    # Ensure data_age_days is an integer (not NaN or None)
+                    if data_age_days is None or (isinstance(data_age_days, float) and pd.isna(data_age_days)):
+                        data_age_days_int = 0
+                    else:
+                        try:
+                            data_age_days_int = int(data_age_days)
+                        except (ValueError, TypeError):
+                            data_age_days_int = 0
                     for i, record in enumerate(records):
                         record['cycle'] = cycle
                         record['raw_data'] = raw_data_records[i]
-                        record['data_age_days'] = data_age_days
+                        record['data_age_days'] = data_age_days_int
                     
                     if records:
-                        # Bulk upsert using single execute call
-                        insert_stmt = sqlite_insert(CommitteeSummary).values(records)
-                        upsert_stmt = insert_stmt.on_conflict_do_update(
-                            index_elements=['committee_id', 'cycle'],
-                            set_={
-                                'committee_name': insert_stmt.excluded.committee_name,
-                                'committee_type': insert_stmt.excluded.committee_type,
-                                'total_receipts': insert_stmt.excluded.total_receipts,
-                                'total_disbursements': insert_stmt.excluded.total_disbursements,
-                                'cash_on_hand': insert_stmt.excluded.cash_on_hand,
-                                'raw_data': insert_stmt.excluded.raw_data,
-                                'data_age_days': insert_stmt.excluded.data_age_days,
-                                'updated_at': datetime.utcnow()
-                            }
-                        )
-                        await session.execute(upsert_stmt)
+                        # Split records into smaller batches to avoid SQLite variable limit
+                        record_batches = self._split_records_for_sqlite(records)
+                        for batch in record_batches:
+                            # Bulk upsert using single execute call
+                            insert_stmt = sqlite_insert(CommitteeSummary).values(batch)
+                            upsert_stmt = insert_stmt.on_conflict_do_update(
+                                index_elements=['committee_id', 'cycle'],
+                                set_={
+                                    'committee_name': insert_stmt.excluded.committee_name,
+                                    'committee_type': insert_stmt.excluded.committee_type,
+                                    'total_receipts': insert_stmt.excluded.total_receipts,
+                                    'total_disbursements': insert_stmt.excluded.total_disbursements,
+                                    'cash_on_hand': insert_stmt.excluded.cash_on_hand,
+                                    'raw_data': insert_stmt.excluded.raw_data,
+                                    'data_age_days': insert_stmt.excluded.data_age_days,
+                                    'updated_at': datetime.utcnow()
+                                }
+                            )
+                            await session.execute(upsert_stmt)
                         await session.commit()
                         total_records += len(records)
                         
@@ -1365,28 +1697,50 @@ class GenericBulkDataParser:
                     records = records_df.to_dict('records')
                     
                     # Add cycle, raw_data, and data_age_days
+                    # Ensure data_age_days is an integer (not NaN or None)
+                    if data_age_days is None or (isinstance(data_age_days, float) and pd.isna(data_age_days)):
+                        data_age_days_int = 0
+                    else:
+                        try:
+                            data_age_days_int = int(data_age_days)
+                        except (ValueError, TypeError):
+                            data_age_days_int = 0
                     for i, record in enumerate(records):
                         record['cycle'] = cycle
                         record['raw_data'] = raw_data_records[i]
-                        record['data_age_days'] = data_age_days
+                        record['data_age_days'] = data_age_days_int
+                        # Convert pandas Timestamp to Python datetime for SQLite compatibility
+                        if 'communication_date' in record and pd.notna(record['communication_date']):
+                            if isinstance(record['communication_date'], pd.Timestamp):
+                                record['communication_date'] = record['communication_date'].to_pydatetime()
+                            elif not isinstance(record['communication_date'], (datetime, type(None))):
+                                try:
+                                    record['communication_date'] = pd.to_datetime(record['communication_date']).to_pydatetime()
+                                except:
+                                    record['communication_date'] = None
+                        else:
+                            record['communication_date'] = None
                     
                     if records:
-                        # Bulk upsert using single execute call
-                        insert_stmt = sqlite_insert(ElectioneeringComm).values(records)
-                        upsert_stmt = insert_stmt.on_conflict_do_update(
-                            index_elements=['id'],  # Will use auto-generated ID
-                            set_={
-                                'committee_id': insert_stmt.excluded.committee_id,
-                                'candidate_id': insert_stmt.excluded.candidate_id,
-                                'candidate_name': insert_stmt.excluded.candidate_name,
-                                'communication_amount': insert_stmt.excluded.communication_amount,
-                                'communication_date': insert_stmt.excluded.communication_date,
-                                'raw_data': insert_stmt.excluded.raw_data,
-                                'data_age_days': insert_stmt.excluded.data_age_days,
-                                'updated_at': datetime.utcnow()
-                            }
-                        )
-                        await session.execute(upsert_stmt)
+                        # Split records into smaller batches to avoid SQLite variable limit
+                        record_batches = self._split_records_for_sqlite(records)
+                        for batch in record_batches:
+                            # Bulk upsert using single execute call
+                            insert_stmt = sqlite_insert(ElectioneeringComm).values(batch)
+                            upsert_stmt = insert_stmt.on_conflict_do_update(
+                                index_elements=['id'],  # Will use auto-generated ID
+                                set_={
+                                    'committee_id': insert_stmt.excluded.committee_id,
+                                    'candidate_id': insert_stmt.excluded.candidate_id,
+                                    'candidate_name': insert_stmt.excluded.candidate_name,
+                                    'communication_amount': insert_stmt.excluded.communication_amount,
+                                    'communication_date': insert_stmt.excluded.communication_date,
+                                    'raw_data': insert_stmt.excluded.raw_data,
+                                    'data_age_days': insert_stmt.excluded.data_age_days,
+                                    'updated_at': datetime.utcnow()
+                                }
+                            )
+                            await session.execute(upsert_stmt)
                         await session.commit()
                         total_records += len(records)
                         
@@ -1491,28 +1845,50 @@ class GenericBulkDataParser:
                     records = records_df.to_dict('records')
                     
                     # Add cycle, raw_data, and data_age_days
+                    # Ensure data_age_days is an integer (not NaN or None)
+                    if data_age_days is None or (isinstance(data_age_days, float) and pd.isna(data_age_days)):
+                        data_age_days_int = 0
+                    else:
+                        try:
+                            data_age_days_int = int(data_age_days)
+                        except (ValueError, TypeError):
+                            data_age_days_int = 0
                     for i, record in enumerate(records):
                         record['cycle'] = cycle
                         record['raw_data'] = raw_data_records[i]
-                        record['data_age_days'] = data_age_days
+                        record['data_age_days'] = data_age_days_int
+                        # Convert pandas Timestamp to Python datetime for SQLite compatibility
+                        if 'communication_date' in record and pd.notna(record['communication_date']):
+                            if isinstance(record['communication_date'], pd.Timestamp):
+                                record['communication_date'] = record['communication_date'].to_pydatetime()
+                            elif not isinstance(record['communication_date'], (datetime, type(None))):
+                                try:
+                                    record['communication_date'] = pd.to_datetime(record['communication_date']).to_pydatetime()
+                                except:
+                                    record['communication_date'] = None
+                        else:
+                            record['communication_date'] = None
                     
                     if records:
-                        # Bulk upsert using single execute call
-                        insert_stmt = sqlite_insert(CommunicationCost).values(records)
-                        upsert_stmt = insert_stmt.on_conflict_do_update(
-                            index_elements=['id'],  # Will use auto-generated ID
-                            set_={
-                                'committee_id': insert_stmt.excluded.committee_id,
-                                'candidate_id': insert_stmt.excluded.candidate_id,
-                                'candidate_name': insert_stmt.excluded.candidate_name,
-                                'communication_amount': insert_stmt.excluded.communication_amount,
-                                'communication_date': insert_stmt.excluded.communication_date,
-                                'raw_data': insert_stmt.excluded.raw_data,
-                                'data_age_days': insert_stmt.excluded.data_age_days,
-                                'updated_at': datetime.utcnow()
-                            }
-                        )
-                        await session.execute(upsert_stmt)
+                        # Split records into smaller batches to avoid SQLite variable limit
+                        record_batches = self._split_records_for_sqlite(records)
+                        for batch in record_batches:
+                            # Bulk upsert using single execute call
+                            insert_stmt = sqlite_insert(CommunicationCost).values(batch)
+                            upsert_stmt = insert_stmt.on_conflict_do_update(
+                                index_elements=['id'],  # Will use auto-generated ID
+                                set_={
+                                    'committee_id': insert_stmt.excluded.committee_id,
+                                    'candidate_id': insert_stmt.excluded.candidate_id,
+                                    'candidate_name': insert_stmt.excluded.candidate_name,
+                                    'communication_amount': insert_stmt.excluded.communication_amount,
+                                    'communication_date': insert_stmt.excluded.communication_date,
+                                    'raw_data': insert_stmt.excluded.raw_data,
+                                    'data_age_days': insert_stmt.excluded.data_age_days,
+                                    'updated_at': datetime.utcnow()
+                                }
+                            )
+                            await session.execute(upsert_stmt)
                         await session.commit()
                         total_records += len(records)
                         

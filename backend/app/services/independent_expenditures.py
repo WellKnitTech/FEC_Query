@@ -28,30 +28,39 @@ class IndependentExpenditureService:
     ) -> List[Dict]:
         """Get independent expenditures from local DB or API"""
         # Try local database first
-        local_data = await self._query_local_expenditures(
-            candidate_id=candidate_id,
-            committee_id=committee_id,
-            support_oppose=support_oppose,
-            min_date=min_date,
-            max_date=max_date,
-            min_amount=min_amount,
-            max_amount=max_amount,
-            limit=limit
-        )
-        if local_data:
-            return local_data
+        try:
+            local_data = await self._query_local_expenditures(
+                candidate_id=candidate_id,
+                committee_id=committee_id,
+                support_oppose=support_oppose,
+                min_date=min_date,
+                max_date=max_date,
+                min_amount=min_amount,
+                max_amount=max_amount,
+                limit=limit
+            )
+            if local_data and len(local_data) > 0:
+                logger.debug(f"Found {len(local_data)} independent expenditures in local database")
+                return local_data
+        except Exception as e:
+            logger.warning(f"Error querying local independent expenditures, falling back to API: {e}")
         
         # Fall back to API
-        return await self.fec_client.get_independent_expenditures(
-            candidate_id=candidate_id,
-            committee_id=committee_id,
-            support_oppose=support_oppose,
-            min_date=min_date,
-            max_date=max_date,
-            min_amount=min_amount,
-            max_amount=max_amount,
-            limit=limit
-        )
+        logger.debug(f"Querying FEC API for independent expenditures: candidate_id={candidate_id}, committee_id={committee_id}")
+        try:
+            return await self.fec_client.get_independent_expenditures(
+                candidate_id=candidate_id,
+                committee_id=committee_id,
+                support_oppose=support_oppose,
+                min_date=min_date,
+                max_date=max_date,
+                min_amount=min_amount,
+                max_amount=max_amount,
+                limit=limit
+            )
+        except Exception as e:
+            logger.error(f"API fallback failed for independent expenditures: {e}")
+            return []
     
     async def _query_local_expenditures(
         self,
@@ -105,6 +114,26 @@ class IndependentExpenditureService:
                 if expenditures:
                     result_list = []
                     for exp in expenditures:
+                        # Safely convert expenditure_amount to float, handling malformed values
+                        amount = 0.0
+                        if exp.expenditure_amount:
+                            try:
+                                if isinstance(exp.expenditure_amount, str):
+                                    # Clean the string and handle malformed values
+                                    amount_str = exp.expenditure_amount.replace('$', '').replace(',', '').strip()
+                                    # Handle multiple decimal points
+                                    if '.' in amount_str and amount_str.count('.') > 1:
+                                        first_dot = amount_str.find('.')
+                                        second_dot = amount_str.find('.', first_dot + 1)
+                                        if second_dot > 0:
+                                            amount_str = amount_str[:second_dot]
+                                    amount = float(amount_str)
+                                else:
+                                    amount = float(exp.expenditure_amount)
+                            except (ValueError, TypeError) as e:
+                                logger.warning(f"Invalid expenditure_amount in database: {exp.expenditure_amount}, using 0.0")
+                                amount = 0.0
+                        
                         exp_dict = {
                             "expenditure_id": exp.expenditure_id,
                             "cycle": exp.cycle,
@@ -112,7 +141,7 @@ class IndependentExpenditureService:
                             "candidate_id": exp.candidate_id,
                             "candidate_name": exp.candidate_name,
                             "support_oppose_indicator": exp.support_oppose_indicator,
-                            "expenditure_amount": float(exp.expenditure_amount) if exp.expenditure_amount else 0.0,
+                            "expenditure_amount": amount,
                             "expenditure_date": exp.expenditure_date.strftime("%Y-%m-%d") if exp.expenditure_date else None,
                             "payee_name": exp.payee_name,
                             "expenditure_purpose": exp.expenditure_purpose
@@ -157,43 +186,94 @@ class IndependentExpenditureService:
         
         df = pd.DataFrame(expenditures)
         
+        # Ensure expenditure_amount is numeric, handling malformed values
+        if 'expenditure_amount' in df.columns:
+            # Convert to numeric, coercing errors to NaN, then fill NaN with 0
+            df['expenditure_amount'] = pd.to_numeric(df['expenditure_amount'], errors='coerce').fillna(0.0)
+        else:
+            df['expenditure_amount'] = 0.0
+        
         # Calculate totals
-        total_expenditures = df['expenditure_amount'].fillna(0).sum() if 'expenditure_amount' in df.columns else 0.0
+        total_expenditures = df['expenditure_amount'].sum() if 'expenditure_amount' in df.columns else 0.0
         total_transactions = len(df)
         
         # Support vs Oppose
         support_oppose_col = df.get('support_oppose_indicator', pd.Series())
-        total_support = df[df.get('support_oppose_indicator') == 'S']['expenditure_amount'].fillna(0).sum() if 'support_oppose_indicator' in df.columns else 0.0
-        total_oppose = df[df.get('support_oppose_indicator') == 'O']['expenditure_amount'].fillna(0).sum() if 'support_oppose_indicator' in df.columns else 0.0
+        if 'support_oppose_indicator' in df.columns:
+            total_support = df[df['support_oppose_indicator'] == 'S']['expenditure_amount'].sum()
+            total_oppose = df[df['support_oppose_indicator'] == 'O']['expenditure_amount'].sum()
+        else:
+            total_support = 0.0
+            total_oppose = 0.0
         
         # By date
         expenditures_by_date = {}
         if 'expenditure_date' in df.columns:
             date_grouped = df.groupby('expenditure_date')['expenditure_amount'].sum()
-            expenditures_by_date = {str(date): float(amount) for date, amount in date_grouped.items()}
+            expenditures_by_date = {str(date): float(amount) for date, amount in date_grouped.items() if pd.notna(amount)}
         
         # By committee
         expenditures_by_committee = {}
         top_committees = []
         if 'committee_id' in df.columns:
-            committee_grouped = df.groupby('committee_id').agg({
-                'expenditure_amount': 'sum',
-                'expenditure_id': 'count'
-            }).reset_index()
-            committee_grouped.columns = ['committee_id', 'total_amount', 'count']
-            expenditures_by_committee = {row['committee_id']: float(row['total_amount']) for _, row in committee_grouped.iterrows()}
+            # Use a column that exists for counting, or count rows directly
+            count_col = None
+            if 'expenditure_id' in df.columns:
+                count_col = 'expenditure_id'
+            elif 'sub_id' in df.columns:
+                count_col = 'sub_id'
+            
+            if count_col:
+                committee_grouped = df.groupby('committee_id').agg({
+                    'expenditure_amount': 'sum',
+                    count_col: 'count'
+                }).reset_index()
+                committee_grouped.columns = ['committee_id', 'total_amount', 'count']
+            else:
+                # If no ID column exists, count rows directly using size()
+                committee_grouped = df.groupby('committee_id').agg({
+                    'expenditure_amount': 'sum'
+                }).reset_index()
+                count_df = df.groupby('committee_id').size().reset_index(name='count')
+                committee_grouped = committee_grouped.merge(count_df, on='committee_id')
+            
+            expenditures_by_committee = {
+                row['committee_id']: float(row['total_amount']) 
+                for _, row in committee_grouped.iterrows() 
+                if pd.notna(row['total_amount'])
+            }
             top_committees = committee_grouped.nlargest(10, 'total_amount').to_dict('records')
         
         # By candidate
         expenditures_by_candidate = {}
         top_candidates = []
         if 'candidate_id' in df.columns:
-            candidate_grouped = df.groupby('candidate_id').agg({
-                'expenditure_amount': 'sum',
-                'expenditure_id': 'count'
-            }).reset_index()
-            candidate_grouped.columns = ['candidate_id', 'total_amount', 'count']
-            expenditures_by_candidate = {row['candidate_id']: float(row['total_amount']) for _, row in candidate_grouped.iterrows()}
+            # Use a column that exists for counting, or count rows directly
+            count_col = None
+            if 'expenditure_id' in df.columns:
+                count_col = 'expenditure_id'
+            elif 'sub_id' in df.columns:
+                count_col = 'sub_id'
+            
+            if count_col:
+                candidate_grouped = df.groupby('candidate_id').agg({
+                    'expenditure_amount': 'sum',
+                    count_col: 'count'
+                }).reset_index()
+                candidate_grouped.columns = ['candidate_id', 'total_amount', 'count']
+            else:
+                # If no ID column exists, count rows directly using size()
+                candidate_grouped = df.groupby('candidate_id').agg({
+                    'expenditure_amount': 'sum'
+                }).reset_index()
+                count_df = df.groupby('candidate_id').size().reset_index(name='count')
+                candidate_grouped = candidate_grouped.merge(count_df, on='candidate_id')
+            
+            expenditures_by_candidate = {
+                row['candidate_id']: float(row['total_amount']) 
+                for _, row in candidate_grouped.iterrows() 
+                if pd.notna(row['total_amount'])
+            }
             top_candidates = candidate_grouped.nlargest(10, 'total_amount').to_dict('records')
         
         return {

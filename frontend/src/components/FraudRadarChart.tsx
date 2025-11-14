@@ -38,9 +38,10 @@ export default function FraudRadarChart({ candidateId, minDate, maxDate }: Fraud
       try {
         const data = await fraudApi.analyze(candidateId, minDate, maxDate);
         setAnalysis(data);
-      } catch (err) {
-        setError('Failed to load fraud analysis');
-        console.error(err);
+      } catch (err: any) {
+        const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load fraud analysis';
+        setError(errorMessage);
+        console.error('Error loading fraud analysis:', err);
       } finally {
         setLoading(false);
       }
@@ -65,7 +66,10 @@ export default function FraudRadarChart({ candidateId, minDate, maxDate }: Fraud
   if (error) {
     return (
       <div className="bg-white rounded-lg shadow p-6">
-        <div className="text-red-600">{error}</div>
+        <h2 className="text-xl font-semibold mb-4">Fraud Pattern Analysis</h2>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-800">{error}</p>
+        </div>
       </div>
     );
   }

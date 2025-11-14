@@ -31,6 +31,7 @@ interface ContributionAnalysisProps {
   committeeId?: string;
   minDate?: string;
   maxDate?: string;
+  cycle?: number;
 }
 
 export default function ContributionAnalysis({
@@ -38,6 +39,7 @@ export default function ContributionAnalysis({
   committeeId,
   minDate,
   maxDate,
+  cycle,
 }: ContributionAnalysisProps) {
   const [analysis, setAnalysis] = useState<ContributionAnalysisType | null>(null);
   const [loading, setLoading] = useState(true);
@@ -53,11 +55,13 @@ export default function ContributionAnalysis({
           committee_id: committeeId,
           min_date: minDate,
           max_date: maxDate,
+          cycle: cycle,
         });
         setAnalysis(data);
-      } catch (err) {
-        setError('Failed to load contribution analysis');
-        console.error(err);
+      } catch (err: any) {
+        const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contribution analysis';
+        setError(errorMessage);
+        console.error('Error loading contribution analysis:', err);
       } finally {
         setLoading(false);
       }
@@ -66,7 +70,7 @@ export default function ContributionAnalysis({
     if (candidateId || committeeId) {
       fetchAnalysis();
     }
-  }, [candidateId, committeeId, minDate, maxDate]);
+  }, [candidateId, committeeId, minDate, maxDate, cycle]);
 
   if (loading) {
     return (
@@ -82,7 +86,10 @@ export default function ContributionAnalysis({
   if (error) {
     return (
       <div className="bg-white rounded-lg shadow p-6">
-        <div className="text-red-600">{error}</div>
+        <h2 className="text-xl font-semibold mb-4">Contribution Analysis</h2>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-800">{error}</p>
+        </div>
       </div>
     );
   }
@@ -92,21 +99,22 @@ export default function ContributionAnalysis({
   }
 
   // Prepare chart data
-  const dateLabels = Object.keys(analysis.contributions_by_date).sort();
-  const dateData = dateLabels.map((date) => analysis.contributions_by_date[date]);
+  const dateLabels = Object.keys(analysis.contributions_by_date || {}).sort();
+  const dateData = dateLabels.map((date) => analysis.contributions_by_date[date] || 0);
 
-  const stateLabels = Object.keys(analysis.contributions_by_state);
-  const stateData = stateLabels.map((state) => analysis.contributions_by_state[state]);
+  const stateLabels = Object.keys(analysis.contributions_by_state || {});
+  const stateData = stateLabels.map((state) => analysis.contributions_by_state[state] || 0);
 
-  const distributionLabels = Object.keys(analysis.contribution_distribution);
-  const distributionData = Object.values(analysis.contribution_distribution);
+  const distributionLabels = Object.keys(analysis.contribution_distribution || {});
+  const distributionData = Object.values(analysis.contribution_distribution || {});
 
+  const topDonors = analysis.top_donors || [];
   const topDonorsData = {
-    labels: analysis.top_donors.slice(0, 10).map((d) => d.name),
+    labels: topDonors.slice(0, 10).map((d) => d.name || 'Unknown'),
     datasets: [
       {
         label: 'Total Contributions',
-        data: analysis.top_donors.slice(0, 10).map((d) => d.total),
+        data: topDonors.slice(0, 10).map((d) => d.total || 0),
         backgroundColor: 'rgba(59, 130, 246, 0.5)',
         borderColor: 'rgba(59, 130, 246, 1)',
         borderWidth: 1,
@@ -167,20 +175,20 @@ export default function ContributionAnalysis({
           <div>
             <div className="text-sm text-gray-600">Total Contributions</div>
             <div className="text-2xl font-bold">
-              ${(analysis.total_contributions / 1000).toFixed(1)}K
+              ${((analysis.total_contributions || 0) / 1000).toFixed(1)}K
             </div>
           </div>
           <div>
             <div className="text-sm text-gray-600">Total Contributors</div>
-            <div className="text-2xl font-bold">{analysis.total_contributors.toLocaleString()}</div>
+            <div className="text-2xl font-bold">{(analysis.total_contributors || 0).toLocaleString()}</div>
           </div>
           <div>
             <div className="text-sm text-gray-600">Average Contribution</div>
-            <div className="text-2xl font-bold">${analysis.average_contribution.toFixed(2)}</div>
+            <div className="text-2xl font-bold">${(analysis.average_contribution || 0).toFixed(2)}</div>
           </div>
           <div>
             <div className="text-sm text-gray-600">Top Donors</div>
-            <div className="text-2xl font-bold">{analysis.top_donors.length}</div>
+            <div className="text-2xl font-bold">{(analysis.top_donors || []).length}</div>
           </div>
         </div>
       </div>

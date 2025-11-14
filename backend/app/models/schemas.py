@@ -13,6 +13,7 @@ class CandidateSummary(BaseModel):
     election_years: Optional[List[int]] = None
     active_through: Optional[int] = None
     contact_info: Optional['ContactInformation'] = None
+    contact_info_updated_at: Optional[str] = None  # ISO format timestamp of when contact info was last updated
 
 
 class FinancialSummary(BaseModel):

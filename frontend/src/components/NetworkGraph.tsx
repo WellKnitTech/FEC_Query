@@ -21,9 +21,10 @@ export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 10
       try {
         const data = await analysisApi.getMoneyFlow(candidateId, maxDepth, minAmount);
         setGraph(data);
-      } catch (err) {
-        setError('Failed to load money flow graph');
-        console.error(err);
+      } catch (err: any) {
+        const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load money flow graph';
+        setError(errorMessage);
+        console.error('Error loading money flow graph:', err);
       } finally {
         setLoading(false);
       }
@@ -139,7 +140,10 @@ export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 10
   if (error) {
     return (
       <div className="bg-white rounded-lg shadow p-6">
-        <div className="text-red-600">{error}</div>
+        <h2 className="text-xl font-semibold mb-4">Money Flow Network</h2>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-800">{error}</p>
+        </div>
       </div>
     );
   }

@@ -57,6 +57,7 @@ class BulkDataMetadata(Base):
     data_type = Column(String, index=True)  # "schedule_a", etc.
     download_date = Column(DateTime, default=datetime.utcnow)
     file_path = Column(String)
+    file_size = Column(Integer, nullable=True)  # File size in bytes
     record_count = Column(Integer, default=0)
     last_updated = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -141,6 +142,7 @@ class FinancialTotal(Base):
     individual_contributions = Column(Float, default=0.0)
     pac_contributions = Column(Float, default=0.0)
     party_contributions = Column(Float, default=0.0)
+    loan_contributions = Column(Float, default=0.0)
     raw_data = Column(JSON)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -167,6 +169,9 @@ class BulkImportJob(Base):
     skipped_records = Column(Integer, default=0)
     current_chunk = Column(Integer, default=0)
     total_chunks = Column(Integer, default=0)
+    file_position = Column(Integer, default=0)  # File position in bytes for resumable imports
+    data_type = Column(String, nullable=True)  # Data type being imported (e.g., 'individual_contributions')
+    file_path = Column(String, nullable=True)  # Path to file being imported
     error_message = Column(Text, nullable=True)
     started_at = Column(DateTime, default=datetime.utcnow, index=True)
     completed_at = Column(DateTime, nullable=True)
@@ -357,6 +362,22 @@ class SavedSearch(Base):
     )
 
 
+class ApiKeySetting(Base):
+    """Stored API key configuration"""
+    __tablename__ = "api_key_settings"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    api_key = Column(String, nullable=False)  # FEC keys are public, stored as plain text
+    source = Column(String, default="ui")  # 'ui' or 'env'
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_active = Column(Integer, default=1)  # 1 = active, 0 = deleted (soft delete)
+    
+    __table_args__ = (
+        Index('idx_api_key_active', 'is_active'),
+    )
+
+
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./fec_data.db")
 if DATABASE_URL.startswith("sqlite"):
@@ -368,8 +389,9 @@ if DATABASE_URL.startswith("sqlite"):
         echo=False,
         future=True,
         pool_pre_ping=True,  # Verify connections before using
-        pool_size=5,  # Limit concurrent connections
-        max_overflow=10,  # Allow overflow connections
+        pool_size=10,  # Increased from 5 to handle more concurrent connections
+        max_overflow=20,  # Increased from 10 to allow more overflow connections
+        pool_timeout=60.0,  # Increased timeout for getting connection from pool
         connect_args={
             "timeout": 60.0,  # 60 second timeout for database operations
         }
@@ -402,17 +424,64 @@ async def init_db():
     import logging
     logger = logging.getLogger(__name__)
     
+    # Run migrations first
+    migrations = [
+        "add_file_size_column.py",
+        "add_resume_columns.py"
+    ]
+    for migration_name in migrations:
+        try:
+            from pathlib import Path
+            migration_script = Path(__file__).parent.parent.parent / "migrations" / migration_name
+            if migration_script.exists():
+                import subprocess
+                import sys
+                result = subprocess.run(
+                    [sys.executable, str(migration_script)],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(Path(__file__).parent.parent.parent)
+                )
+                if result.returncode == 0:
+                    logger.info(f"Migration {migration_name} completed successfully")
+                elif "already exists" in result.stdout or "already exists" in result.stderr:
+                    logger.debug(f"Migration {migration_name}: columns already exist")
+                else:
+                    logger.warning(f"Migration {migration_name} output: {result.stdout} {result.stderr}")
+        except Exception as e:
+            logger.warning(f"Could not run migration {migration_name} automatically: {e}")
+    
     try:
         async with engine.begin() as conn:
             # Enable WAL mode for better concurrency (allows readers and writers simultaneously)
             if DATABASE_URL.startswith("sqlite"):
                 try:
+                    # Check database integrity first
+                    try:
+                        result = await conn.execute(text("PRAGMA integrity_check"))
+                        integrity_result = result.fetchone()
+                        if integrity_result and integrity_result[0] != "ok":
+                            logger.error(f"Database integrity check failed: {integrity_result[0]}")
+                            logger.error("Database is corrupted! Please see backend/migrations/REPAIR_INSTRUCTIONS.md")
+                            raise RuntimeError(f"Database corruption detected: {integrity_result[0]}")
+                        logger.debug("Database integrity check passed")
+                    except Exception as e:
+                        if "disk I/O error" in str(e).lower() or "corrupted" in str(e).lower():
+                            logger.error("Database corruption detected during integrity check!")
+                            logger.error("Please see backend/migrations/REPAIR_INSTRUCTIONS.md for recovery steps")
+                            raise RuntimeError("Database is corrupted and cannot be used") from e
+                        # If it's a different error (e.g., database doesn't exist yet), continue
+                        logger.debug(f"Integrity check skipped (database may not exist yet): {e}")
+                    
                     await conn.execute(text("PRAGMA journal_mode=WAL"))
                     # Set WAL checkpoint settings for better performance
-                    await conn.execute(text("PRAGMA wal_autocheckpoint=1000"))  # Checkpoint every 1000 pages
+                    await conn.execute(text("PRAGMA wal_autocheckpoint=500"))  # More frequent checkpoints
                     await conn.execute(text("PRAGMA synchronous=NORMAL"))  # Balance between safety and speed
                     await conn.execute(text("PRAGMA busy_timeout=60000"))  # 60 second timeout
                     logger.info("SQLite WAL mode enabled with optimized settings")
+                except RuntimeError:
+                    # Re-raise corruption errors
+                    raise
                 except Exception as e:
                     logger.warning(f"Could not configure WAL mode: {e}")
             

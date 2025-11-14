@@ -15,8 +15,15 @@ class ContactUpdaterService:
     
     def __init__(self):
         self.fec_client = FECClient()
-        self.update_interval_hours = int(os.getenv("CONTACT_INFO_UPDATE_INTERVAL_HOURS", "168"))  # 7 days default
-        self.stale_threshold_days = int(os.getenv("CONTACT_INFO_STALE_THRESHOLD_DAYS", "30"))  # 30 days default
+        # Quarterly update interval (90 days = 2160 hours)
+        self.update_interval_hours = int(os.getenv("CONTACT_INFO_UPDATE_INTERVAL_HOURS", "2160"))  # 90 days (quarterly) default
+        self.stale_threshold_days = int(os.getenv("CONTACT_INFO_STALE_THRESHOLD_DAYS", "14"))  # 14 days (2 weeks) default
+        # Quarterly threshold for aging out contact info (90 days)
+        self.quarterly_threshold_days = int(os.getenv("CONTACT_INFO_QUARTERLY_THRESHOLD_DAYS", "90"))  # 90 days (quarterly) default
+        # Only refresh contact info if it's very old (1 year) - contact info doesn't change much
+        self.very_old_threshold_days = int(os.getenv("CONTACT_INFO_VERY_OLD_THRESHOLD_DAYS", "365"))  # 1 year default
+        # Only run on startup if explicitly enabled (default: False)
+        self.run_on_startup = os.getenv("CONTACT_INFO_RUN_ON_STARTUP", "false").lower() == "true"
         self.batch_size = int(os.getenv("CONTACT_INFO_BATCH_SIZE", "50"))  # 50 per batch
         self._running = False
         self._task = None
@@ -61,7 +68,7 @@ class ContactUpdaterService:
         return results
     
     async def _refresh_candidate_contact_info(self, max_records: Optional[int] = None) -> Dict:
-        """Refresh contact info for candidates that need it"""
+        """Refresh contact info for candidates that need it - quarterly aging for all candidates"""
         results = {
             "checked": 0,
             "updated": 0,
@@ -70,23 +77,21 @@ class ContactUpdaterService:
         
         try:
             async with AsyncSessionLocal() as session:
-                # Find candidates with missing or stale contact info
-                cutoff_date = datetime.utcnow() - timedelta(days=self.stale_threshold_days)
-                
-                # Query candidates where:
-                # 1. All contact fields are NULL, OR
-                # 2. updated_at is older than threshold
+                # Quarterly aging: Refresh ALL candidates where updated_at is older than quarterly threshold (90 days)
+                # This ensures all contact info is refreshed quarterly regardless of whether it exists
+                cutoff_date = datetime.utcnow() - timedelta(days=self.quarterly_threshold_days)
                 query = select(Candidate).where(
                     or_(
+                        # Candidates with updated_at older than quarterly threshold
                         and_(
-                            Candidate.street_address.is_(None),
-                            Candidate.city.is_(None),
-                            Candidate.zip.is_(None),
-                            Candidate.email.is_(None),
-                            Candidate.phone.is_(None),
-                            Candidate.website.is_(None)
+                            Candidate.updated_at.isnot(None),
+                            Candidate.updated_at < cutoff_date
                         ),
-                        Candidate.updated_at < cutoff_date
+                        # Candidates with no updated_at but created_at older than quarterly threshold
+                        and_(
+                            Candidate.updated_at.is_(None),
+                            Candidate.created_at < cutoff_date
+                        )
                     )
                 )
                 
@@ -97,23 +102,26 @@ class ContactUpdaterService:
                 candidates = result.scalars().all()
                 results["checked"] = len(candidates)
                 
-                logger.info(f"Found {len(candidates)} candidates needing contact info refresh")
+                if len(candidates) > 0:
+                    logger.info(f"Found {len(candidates)} candidates needing quarterly contact info refresh (not updated in {self.quarterly_threshold_days} days)")
+                else:
+                    logger.debug(f"No candidates need quarterly contact info refresh (all updated within {self.quarterly_threshold_days} days)")
                 
                 # Process in batches
                 for i in range(0, len(candidates), self.batch_size):
                     batch = candidates[i:i + self.batch_size]
                     for candidate in batch:
                         try:
-                            # Refresh contact info
+                            # Force refresh to update contact info (quarterly aging)
                             refreshed = await self.fec_client.refresh_candidate_contact_info_if_needed(
                                 candidate.candidate_id,
-                                stale_threshold_days=self.stale_threshold_days
+                                force_refresh=True
                             )
                             if refreshed:
                                 results["updated"] += 1
                             
-                            # Small delay to respect rate limits
-                            await asyncio.sleep(0.1)
+                            # Delay to respect rate limits (500ms between requests)
+                            await asyncio.sleep(0.5)
                         except Exception as e:
                             logger.warning(f"Error refreshing contact info for candidate {candidate.candidate_id}: {e}")
                             results["errors"].append(f"Candidate {candidate.candidate_id}: {str(e)}")
@@ -138,24 +146,33 @@ class ContactUpdaterService:
         
         try:
             async with AsyncSessionLocal() as session:
-                # Find committees with missing or stale contact info
-                cutoff_date = datetime.utcnow() - timedelta(days=self.stale_threshold_days)
-                
-                # Query committees where:
-                # 1. All contact fields are NULL, OR
-                # 2. updated_at is older than threshold
+                # Find committees with missing contact info that are very old
+                # Don't refresh if contact info exists (even if stale) - preserve bulk import data
+                # Only refresh if updated_at is very old (1+ year) - contact info doesn't change much
+                # If updated_at is None, only refresh if created_at is also very old (committee was created long ago and never checked)
+                cutoff_date = datetime.utcnow() - timedelta(days=self.very_old_threshold_days)
                 query = select(Committee).where(
-                    or_(
-                        and_(
-                            Committee.street_address.is_(None),
-                            Committee.city.is_(None),
-                            Committee.zip.is_(None),
-                            Committee.email.is_(None),
-                            Committee.phone.is_(None),
-                            Committee.website.is_(None),
-                            Committee.treasurer_name.is_(None)
-                        ),
-                        Committee.updated_at < cutoff_date
+                    and_(
+                        Committee.street_address.is_(None),
+                        Committee.city.is_(None),
+                        Committee.zip.is_(None),
+                        Committee.email.is_(None),
+                        Committee.phone.is_(None),
+                        Committee.website.is_(None),
+                        Committee.treasurer_name.is_(None),
+                        # Only refresh if:
+                        # 1. updated_at exists and is very old (1+ year), OR
+                        # 2. updated_at is None AND created_at is very old (committee was created long ago and never checked)
+                        or_(
+                            and_(
+                                Committee.updated_at.isnot(None),
+                                Committee.updated_at < cutoff_date
+                            ),
+                            and_(
+                                Committee.updated_at.is_(None),
+                                Committee.created_at < cutoff_date
+                            )
+                        )
                     )
                 )
                 
@@ -166,23 +183,25 @@ class ContactUpdaterService:
                 committees = result.scalars().all()
                 results["checked"] = len(committees)
                 
-                logger.info(f"Found {len(committees)} committees needing contact info refresh")
+                if len(committees) > 0:
+                    logger.info(f"Found {len(committees)} committees needing contact info refresh (missing contact info and not checked in {self.very_old_threshold_days} days)")
+                else:
+                    logger.debug("No committees need contact info refresh (all have contact info or were recently checked)")
                 
                 # Process in batches
                 for i in range(0, len(committees), self.batch_size):
                     batch = committees[i:i + self.batch_size]
                     for committee in batch:
                         try:
-                            # Refresh contact info
+                            # Refresh contact info (only if missing)
                             refreshed = await self.fec_client.refresh_committee_contact_info_if_needed(
-                                committee.committee_id,
-                                stale_threshold_days=self.stale_threshold_days
+                                committee.committee_id
                             )
                             if refreshed:
                                 results["updated"] += 1
                             
-                            # Small delay to respect rate limits
-                            await asyncio.sleep(0.1)
+                            # Delay to respect rate limits (500ms between requests)
+                            await asyncio.sleep(0.5)
                         except Exception as e:
                             logger.warning(f"Error refreshing contact info for committee {committee.committee_id}: {e}")
                             results["errors"].append(f"Committee {committee.committee_id}: {str(e)}")
@@ -220,14 +239,24 @@ class ContactUpdaterService:
     
     async def _update_loop(self):
         """Background loop for periodic updates"""
+        # Don't run immediately on startup unless explicitly enabled
+        if not self.run_on_startup:
+            logger.info(f"Contact updater will start refreshing after {self.update_interval_hours} hours (skipping startup refresh)")
+            if self._running:
+                await asyncio.sleep(self.update_interval_hours * 3600)
+        else:
+            logger.info("Running contact info refresh on startup (CONTACT_INFO_RUN_ON_STARTUP=true)")
+        
         while self._running:
             try:
+                logger.info("Running scheduled contact info refresh...")
                 await self.refresh_stale_contact_info()
             except Exception as e:
                 logger.error(f"Error in background update loop: {e}", exc_info=True)
             
             # Wait for next update interval
             if self._running:
+                logger.info(f"Next contact info refresh in {self.update_interval_hours} hours")
                 await asyncio.sleep(self.update_interval_hours * 3600)
     
     async def get_status(self) -> Dict:
@@ -236,6 +265,7 @@ class ContactUpdaterService:
             "running": self._running,
             "update_interval_hours": self.update_interval_hours,
             "stale_threshold_days": self.stale_threshold_days,
+            "quarterly_threshold_days": self.quarterly_threshold_days,
             "batch_size": self.batch_size
         }
 

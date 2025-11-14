@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Body
 from typing import Optional, List, Dict
 import asyncio
 from app.services.fec_client import FECClient
-from app.models.schemas import CandidateSummary, FinancialSummary, BatchFinancialsRequest
+from app.models.schemas import CandidateSummary, FinancialSummary, BatchFinancialsRequest, ContactInformation
 from app.services.analysis import AnalysisService
 import logging
 
@@ -24,6 +24,77 @@ def get_fec_client():
 def get_analysis_service():
     """Get analysis service instance"""
     return AnalysisService(get_fec_client())
+
+
+def extract_candidate_contact_info(candidate: Dict) -> Optional[ContactInformation]:
+    """Extract contact information from candidate data.
+    
+    This handles both local DB format (already extracted) and API format (needs extraction).
+    The FEC API may return contact info in fields like principal_committee_street_1,
+    principal_committee_city, etc., rather than street_address, city, etc.
+    """
+    # Try multiple field name variations to find contact info
+    extracted_contact = {
+        "street_address": (
+            candidate.get("street_address") or
+            candidate.get("principal_committee_street_1") or 
+            candidate.get("mailing_address") or
+            candidate.get("street_1") or
+            candidate.get("address") or
+            candidate.get("principal_committee_street_address")
+        ),
+        "city": (
+            candidate.get("city") or
+            candidate.get("principal_committee_city") or
+            candidate.get("mailing_city")
+        ),
+        "state": (
+            candidate.get("state") or
+            candidate.get("principal_committee_state")
+        ),
+        "zip": (
+            candidate.get("zip") or
+            candidate.get("principal_committee_zip") or
+            candidate.get("mailing_zip") or
+            candidate.get("zip_code")
+        ),
+        "email": (
+            candidate.get("email") or
+            candidate.get("principal_committee_email")
+        ),
+        "phone": (
+            candidate.get("phone") or
+            candidate.get("principal_committee_phone") or
+            candidate.get("telephone")
+        ),
+        "website": (
+            candidate.get("website") or
+            candidate.get("principal_committee_website") or
+            candidate.get("web_site") or
+            candidate.get("url")
+        )
+    }
+    
+    # Only create ContactInformation if at least one field is present
+    if any([
+        extracted_contact.get("street_address"),
+        extracted_contact.get("city"),
+        extracted_contact.get("zip"),
+        extracted_contact.get("email"),
+        extracted_contact.get("phone"),
+        extracted_contact.get("website")
+    ]):
+        return ContactInformation(
+            street_address=extracted_contact.get("street_address"),
+            city=extracted_contact.get("city"),
+            state=extracted_contact.get("state"),
+            zip=extracted_contact.get("zip"),
+            email=extracted_contact.get("email"),
+            phone=extracted_contact.get("phone"),
+            website=extracted_contact.get("website")
+        )
+    
+    return None
 
 
 @router.get("/search", response_model=List[CandidateSummary])
@@ -51,6 +122,9 @@ async def search_candidates(
         candidates = []
         for candidate in results:
             try:
+                # Extract contact information
+                contact_info = extract_candidate_contact_info(candidate)
+                
                 # Map API fields to our schema
                 candidate_data = {
                     "candidate_id": candidate.get("candidate_id", ""),
@@ -60,7 +134,8 @@ async def search_candidates(
                     "state": candidate.get("state"),
                     "district": candidate.get("district"),
                     "election_years": candidate.get("election_years"),
-                    "active_through": candidate.get("active_through")
+                    "active_through": candidate.get("active_through"),
+                    "contact_info": contact_info
                 }
                 candidates.append(CandidateSummary(**candidate_data))
             except Exception as e:
@@ -98,6 +173,9 @@ async def get_race_candidates(
         candidates = []
         for candidate in results:
             try:
+                # Extract contact information
+                contact_info = extract_candidate_contact_info(candidate)
+                
                 candidate_data = {
                     "candidate_id": candidate.get("candidate_id", ""),
                     "name": candidate.get("name", candidate.get("candidate_name", "Unknown")),
@@ -106,7 +184,9 @@ async def get_race_candidates(
                     "state": candidate.get("state"),
                     "district": candidate.get("district"),
                     "election_years": candidate.get("election_years"),
-                    "active_through": candidate.get("active_through")
+                    "active_through": candidate.get("active_through"),
+                    "contact_info": contact_info,
+                    "contact_info_updated_at": candidate.get("contact_info_updated_at")
                 }
                 candidates.append(CandidateSummary(**candidate_data))
             except Exception as e:
@@ -130,6 +210,40 @@ async def get_candidate(candidate_id: str):
         if not candidate:
             raise HTTPException(status_code=404, detail="Candidate not found")
         
+        # Extract contact information
+        contact_info = extract_candidate_contact_info(candidate)
+        
+        # If contact info is missing, trigger on-demand fetch in background
+        if not contact_info:
+            # Check if contact info is truly missing (not just empty fields)
+            has_any_contact = any([
+                candidate.get("street_address"),
+                candidate.get("city"),
+                candidate.get("zip"),
+                candidate.get("email"),
+                candidate.get("phone"),
+                candidate.get("website"),
+                candidate.get("principal_committee_street_1"),
+                candidate.get("principal_committee_city"),
+                candidate.get("principal_committee_zip"),
+            ])
+            
+            if not has_any_contact:
+                # Trigger background refresh (non-blocking)
+                async def background_refresh():
+                    try:
+                        await fec_client.refresh_candidate_contact_info_if_needed(
+                            candidate_id,
+                            force_refresh=True  # Force refresh to ensure it actually runs
+                        )
+                        logger.info(f"Background contact info refresh completed for candidate {candidate_id}")
+                    except Exception as e:
+                        logger.warning(f"Error in background contact info refresh for candidate {candidate_id}: {e}")
+                
+                # Schedule background task (fire and forget)
+                asyncio.create_task(background_refresh())
+                logger.debug(f"Triggered on-demand contact info fetch for candidate {candidate_id}")
+        
         # Map API response to our schema
         candidate_data = {
             "candidate_id": candidate.get("candidate_id", candidate_id),
@@ -139,7 +253,9 @@ async def get_candidate(candidate_id: str):
             "state": candidate.get("state"),
             "district": candidate.get("district"),
             "election_years": candidate.get("election_years"),
-            "active_through": candidate.get("active_through")
+            "active_through": candidate.get("active_through"),
+            "contact_info": contact_info,
+            "contact_info_updated_at": candidate.get("contact_info_updated_at")
         }
         return CandidateSummary(**candidate_data)
     except HTTPException:
@@ -147,6 +263,44 @@ async def get_candidate(candidate_id: str):
     except Exception as e:
         logger.error(f"Error getting candidate {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get candidate: {str(e)}")
+
+
+@router.post("/{candidate_id}/refresh-contact-info")
+async def refresh_candidate_contact_info(candidate_id: str):
+    """Manually refresh contact information for a candidate from the FEC API"""
+    try:
+        fec_client = get_fec_client()
+        # Force refresh by bypassing the cache and missing-only check
+        refreshed = await fec_client.refresh_candidate_contact_info_if_needed(
+            candidate_id,
+            force_refresh=True
+        )
+        
+        if refreshed:
+            # Get updated candidate data
+            candidate = await fec_client.get_candidate(candidate_id)
+            if candidate:
+                # Extract contact information
+                contact_info = extract_candidate_contact_info(candidate)
+                
+                return {
+                    "success": True,
+                    "message": "Contact information refreshed successfully",
+                    "contact_info": contact_info,
+                    "contact_info_updated_at": candidate.get("contact_info_updated_at")
+                }
+        
+        return {
+            "success": True,
+            "message": "Contact information is up to date",
+            "contact_info": None,
+            "contact_info_updated_at": None
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error refreshing contact info for candidate {candidate_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to refresh contact info: {str(e)}")
 
 
 @router.get("/{candidate_id}/financials", response_model=List[FinancialSummary])
@@ -183,7 +337,15 @@ async def get_candidate_financials(
                 "total_contributions": float(total.get("contributions", 0)),
                 "individual_contributions": float(total.get("individual_contributions", 0)),
                 "pac_contributions": float(total.get("pac_contributions", 0)),
-                "party_contributions": float(total.get("party_contributions", 0))
+                "party_contributions": float(total.get("party_contributions", 0)),
+                "loan_contributions": float(
+                    total.get("loan_contributions", 0) or 
+                    total.get("loans_received", 0) or 
+                    total.get("other_loans_received", 0) or
+                    total.get("loans", 0) or
+                    total.get("other_loans", 0) or
+                    0
+                )
             }
             financials.append(FinancialSummary(**financial_data))
         
@@ -253,7 +415,15 @@ async def get_batch_financials(request: BatchFinancialsRequest):
                     "total_contributions": float(total.get("contributions", 0)),
                     "individual_contributions": float(total.get("individual_contributions", 0)),
                     "pac_contributions": float(total.get("pac_contributions", 0)),
-                    "party_contributions": float(total.get("party_contributions", 0))
+                    "party_contributions": float(total.get("party_contributions", 0)),
+                    "loan_contributions": float(
+                    total.get("loan_contributions", 0) or 
+                    total.get("loans_received", 0) or 
+                    total.get("other_loans_received", 0) or
+                    total.get("loans", 0) or
+                    total.get("other_loans", 0) or
+                    0
+                )
                 }
                 financials.append(FinancialSummary(**financial_data))
             

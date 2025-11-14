@@ -3,6 +3,7 @@ from typing import Optional, List
 from app.services.bulk_data import BulkDataService, _running_tasks, _cancelled_jobs
 from app.services.bulk_updater import BulkUpdaterService
 from app.services.bulk_data_config import DataType, get_config, get_high_priority_types, DATA_TYPE_CONFIGS
+from app.services.backfill_candidate_ids import backfill_candidate_ids_from_committees, get_backfill_stats
 from app.db.database import BulkImportJob
 from datetime import datetime
 import logging
@@ -38,6 +39,7 @@ def get_bulk_updater_service() -> BulkUpdaterService:
 async def import_multiple_data_types(
     cycle: int = Query(..., description="Election cycle to download (e.g., 2024)"),
     data_types: List[str] = Query(..., description="List of data types to import"),
+    force_download: bool = Query(False, description="Force download even if file size matches"),
     background_tasks: BackgroundTasks = None
 ):
     """Import multiple data types for a cycle"""
@@ -83,7 +85,7 @@ async def import_multiple_data_types(
         
         async def _import_multiple_internal():
             await bulk_data_service._update_job_progress(job_id, status='running')
-            results = await bulk_data_service.import_multiple_data_types(cycle, validated_types, job_id=job_id)
+            results = await bulk_data_service.import_multiple_data_types(cycle, validated_types, job_id=job_id, force_download=force_download)
             
             # Check if all succeeded
             all_succeeded = all(r.get("success", False) for r in results.values())
@@ -178,6 +180,7 @@ async def import_all_data_types(
 async def download_bulk_data(
     cycle: int = Query(..., description="Election cycle to download (e.g., 2024)"),
     data_type: Optional[str] = Query(None, description="Data type to download (default: individual_contributions)"),
+    force_download: bool = Query(False, description="Force download even if file size matches"),
     background_tasks: BackgroundTasks = None
 ):
     """Manually trigger download for a specific cycle and data type with job tracking"""
@@ -219,7 +222,7 @@ async def download_bulk_data(
         
         async def _download_with_job_internal():
             await bulk_data_service._update_job_progress(job_id, status='running')
-            result = await bulk_data_service.download_and_import_data_type(dt, cycle, job_id=job_id)
+            result = await bulk_data_service.download_and_import_data_type(dt, cycle, job_id=job_id, force_download=force_download)
             if not result.get("success"):
                 await bulk_data_service._update_job_progress(
                     job_id,
@@ -312,10 +315,25 @@ async def get_cycle_status(cycle: int):
         # Get all statuses from database
         statuses = await bulk_data_service.get_all_data_type_statuses(cycle)
         
+        # Get download dates from metadata
+        from app.db.database import BulkDataMetadata
+        from sqlalchemy import select
+        from app.db.database import AsyncSessionLocal
+        
+        async with AsyncSessionLocal() as session:
+            metadata_result = await session.execute(
+                select(BulkDataMetadata).where(
+                    BulkDataMetadata.cycle == cycle
+                )
+            )
+            metadata_list = metadata_result.scalars().all()
+            metadata_dict = {m.data_type: m for m in metadata_list}
+        
         # Build response with all data types
         result = []
         for data_type, config in DATA_TYPE_CONFIGS.items():
             status_record = statuses.get(data_type.value)
+            metadata_record = metadata_dict.get(data_type.value)
             is_implemented = GenericBulkDataParser.is_parser_implemented(data_type)
             
             result.append({
@@ -327,6 +345,7 @@ async def get_cycle_status(cycle: int):
                 "status": status_record.status if status_record else "not_imported",
                 "record_count": status_record.record_count if status_record else 0,
                 "last_imported_at": status_record.last_imported_at.isoformat() if status_record and status_record.last_imported_at else None,
+                "download_date": metadata_record.download_date.isoformat() if metadata_record and metadata_record.download_date else None,
                 "error_message": status_record.error_message if status_record else None,
             })
         
@@ -401,6 +420,70 @@ async def trigger_update(
         )
 
 
+@router.post("/backfill-candidate-ids")
+async def backfill_candidate_ids_endpoint(
+    batch_size: int = Query(10000, ge=1, le=100000, description="Number of contributions to update per batch"),
+    limit: Optional[int] = Query(None, ge=1, description="Optional limit on total contributions to update"),
+    background_tasks: BackgroundTasks = None
+):
+    """Backfill candidate_id in contributions using committee linkages"""
+    try:
+        # Get stats first
+        stats = await get_backfill_stats()
+        
+        if stats["contributions_missing_candidate_id"] == 0:
+            return {
+                "message": "No contributions need candidate_id backfill",
+                "stats": stats
+            }
+        
+        # Run backfill in background if it's a large operation
+        if stats["contributions_missing_candidate_id"] > 10000:
+            async def _backfill_task():
+                try:
+                    result = await backfill_candidate_ids_from_committees(batch_size=batch_size, limit=limit)
+                    logger.info(f"Backfill completed: {result}")
+                except Exception as e:
+                    logger.error(f"Error in backfill task: {e}", exc_info=True)
+            
+            task = asyncio.create_task(_backfill_task())
+            _running_tasks.add(task)
+            
+            return {
+                "message": f"Backfill started for {stats['contributions_missing_candidate_id']} contributions",
+                "stats": stats,
+                "status": "started"
+            }
+        else:
+            # Run synchronously for small operations
+            result = await backfill_candidate_ids_from_committees(batch_size=batch_size, limit=limit)
+            return {
+                "message": "Backfill completed",
+                "stats": stats,
+                "result": result
+            }
+    except Exception as e:
+        logger.error(f"Error backfilling candidate_ids: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to backfill candidate_ids: {str(e)}"
+        )
+
+
+@router.get("/backfill-candidate-ids/stats")
+async def get_backfill_stats_endpoint():
+    """Get statistics about contributions missing candidate_id"""
+    try:
+        stats = await get_backfill_stats()
+        return stats
+    except Exception as e:
+        logger.error(f"Error getting backfill stats: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get backfill stats: {str(e)}"
+        )
+
+
 @router.delete("/contributions")
 async def clear_contributions(
     cycle: Optional[int] = Query(None, description="Clear contributions for specific cycle (optional, clears all if not specified)")
@@ -420,6 +503,28 @@ async def clear_contributions(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to clear contributions: {str(e)}"
+        )
+
+
+@router.delete("/all-data")
+async def clear_all_data():
+    """Clear ALL data from the database (contributions, committees, candidates, etc.)"""
+    try:
+        bulk_data_service = get_bulk_data_service()
+        deleted_counts = await bulk_data_service.clear_all_data()
+        
+        total_deleted = sum(deleted_counts.values())
+        
+        return {
+            "message": f"Cleared all data from database ({total_deleted} total records)",
+            "deleted_counts": deleted_counts,
+            "total_deleted": total_deleted
+        }
+    except Exception as e:
+        logger.error(f"Error clearing all data: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to clear all data: {str(e)}"
         )
 
 
@@ -687,6 +792,11 @@ async def get_job_status(job_id: str):
         elif job.total_cycles > 0:
             overall_progress = (job.completed_cycles / job.total_cycles) * 100
         
+        # Enhance progress_data with file_position if available
+        progress_data = job.progress_data or {}
+        if job.file_position and job.file_position > 0:
+            progress_data['file_position'] = job.file_position
+        
         return {
             "job_id": job.id,
             "job_type": job.job_type,
@@ -704,7 +814,7 @@ async def get_job_status(job_id: str):
             "error_message": job.error_message,
             "started_at": job.started_at.isoformat() if job.started_at else None,
             "completed_at": job.completed_at.isoformat() if job.completed_at else None,
-            "progress_data": job.progress_data or {},
+            "progress_data": progress_data,
             "overall_progress": overall_progress
         }
     except HTTPException:
@@ -739,6 +849,194 @@ async def cancel_job(job_id: str):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to cancel job: {str(e)}"
+        )
+
+
+@router.post("/jobs/{job_id}/resume")
+async def resume_job(job_id: str, background_tasks: BackgroundTasks):
+    """Resume an incomplete import job"""
+    try:
+        bulk_data_service = get_bulk_data_service()
+        
+        # Check if job exists and is resumable
+        async def _resume_job():
+            task = None
+            try:
+                task = asyncio.create_task(bulk_data_service.resume_job(job_id))
+                _running_tasks.add(task)
+                success = await task
+                if success:
+                    logger.info(f"Job {job_id} resumed successfully")
+                else:
+                    logger.warning(f"Job {job_id} could not be resumed")
+            except asyncio.CancelledError:
+                logger.info(f"Resume job {job_id} was cancelled")
+            except Exception as e:
+                logger.error(f"Error resuming job {job_id}: {e}", exc_info=True)
+                await bulk_data_service._update_job_progress(job_id, status='failed', error_message=str(e))
+            finally:
+                if task:
+                    _running_tasks.discard(task)
+        
+        # Run in background
+        task = asyncio.create_task(_resume_job())
+        _running_tasks.add(task)
+        
+        return {
+            "message": f"Resuming job {job_id}",
+            "job_id": job_id,
+            "status": "resuming"
+        }
+    except Exception as e:
+        logger.error(f"Error resuming job {job_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to resume job: {str(e)}"
+        )
+
+
+@router.get("/jobs/incomplete")
+async def get_incomplete_jobs():
+    """Get all incomplete import jobs"""
+    try:
+        bulk_data_service = get_bulk_data_service()
+        jobs = await bulk_data_service.get_incomplete_jobs()
+        
+        return {
+            "jobs": [
+                {
+                    "job_id": job.id,
+                    "job_type": job.job_type,
+                    "status": job.status,
+                    "cycle": job.cycle,
+                    "data_type": job.data_type,
+                    "file_path": job.file_path,
+                    "imported_records": job.imported_records,
+                    "file_position": job.file_position,
+                    "started_at": job.started_at.isoformat() if job.started_at else None,
+                    "error_message": job.error_message,
+                    "progress_data": job.progress_data
+                }
+                for job in jobs
+            ],
+            "count": len(jobs)
+        }
+    except Exception as e:
+        logger.error(f"Error getting incomplete jobs: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get incomplete jobs: {str(e)}"
+        )
+
+
+@router.get("/committee-ids/invalid")
+async def get_invalid_committee_ids():
+    """Get list of invalid committee IDs in contributions"""
+    try:
+        bulk_data_service = get_bulk_data_service()
+        
+        from app.db.database import AsyncSessionLocal, Contribution
+        from sqlalchemy import distinct, select
+        
+        async with AsyncSessionLocal() as session:
+            # Get all unique committee IDs
+            result = await session.execute(
+                select(distinct(Contribution.committee_id)).where(
+                    Contribution.committee_id.isnot(None)
+                )
+            )
+            all_ids = [row[0] for row in result if row[0]]
+            
+            # Separate valid and invalid
+            invalid_ids = []
+            valid_ids = []
+            corrections = {}
+            
+            for cid in all_ids:
+                if bulk_data_service._is_valid_committee_id(cid):
+                    valid_ids.append(cid)
+                else:
+                    invalid_ids.append(cid)
+                    # Try to correct it
+                    corrected = bulk_data_service._attempt_correct_committee_id(cid)
+                    if corrected:
+                        corrections[cid] = corrected
+            
+            return {
+                "total": len(all_ids),
+                "valid": len(valid_ids),
+                "invalid": len(invalid_ids),
+                "correctable": len(corrections),
+                "invalid_ids": invalid_ids,
+                "corrections": corrections
+            }
+    except Exception as e:
+        logger.error(f"Error getting invalid committee IDs: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get invalid committee IDs: {str(e)}"
+        )
+
+
+@router.post("/committee-ids/fix")
+async def fix_invalid_committee_ids():
+    """Fix invalid committee IDs in contributions database"""
+    try:
+        bulk_data_service = get_bulk_data_service()
+        
+        from app.db.database import AsyncSessionLocal, Contribution
+        from sqlalchemy import distinct, select, text
+        
+        async with AsyncSessionLocal() as session:
+            # Get all unique committee IDs
+            result = await session.execute(
+                select(distinct(Contribution.committee_id)).where(
+                    Contribution.committee_id.isnot(None)
+                )
+            )
+            all_ids = [row[0] for row in result if row[0]]
+            
+            corrections = {}
+            uncorrectable = []
+            
+            for cid in all_ids:
+                if not bulk_data_service._is_valid_committee_id(cid):
+                    corrected = bulk_data_service._attempt_correct_committee_id(cid)
+                    if corrected:
+                        corrections[cid] = corrected
+                    else:
+                        uncorrectable.append(cid)
+            
+            # Apply corrections
+            updated_count = 0
+            for original_id, corrected_id in corrections.items():
+                try:
+                    result = await session.execute(
+                        text("""
+                            UPDATE contributions 
+                            SET committee_id = :corrected_id 
+                            WHERE committee_id = :original_id
+                        """),
+                        {"corrected_id": corrected_id, "original_id": original_id}
+                    )
+                    updated_count += result.rowcount
+                except Exception as e:
+                    logger.warning(f"Error updating committee ID '{original_id}' to '{corrected_id}': {e}")
+            
+            await session.commit()
+            
+            return {
+                "message": f"Fixed {len(corrections)} invalid committee IDs",
+                "updated_records": updated_count,
+                "corrections_applied": corrections,
+                "uncorrectable": uncorrectable,
+                "uncorrectable_count": len(uncorrectable)
+            }
+    except Exception as e:
+        logger.error(f"Error fixing invalid committee IDs: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fix invalid committee IDs: {str(e)}"
         )
 
 

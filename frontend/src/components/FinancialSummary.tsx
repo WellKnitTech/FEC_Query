@@ -3,9 +3,10 @@ import { candidateApi, FinancialSummary } from '../services/api';
 
 interface FinancialSummaryProps {
   candidateId: string;
+  onCycleChange?: (cycle: number | undefined) => void;
 }
 
-export default function FinancialSummaryComponent({ candidateId }: FinancialSummaryProps) {
+export default function FinancialSummaryComponent({ candidateId, onCycleChange }: FinancialSummaryProps) {
   const [financials, setFinancials] = useState<FinancialSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -17,6 +18,10 @@ export default function FinancialSummaryComponent({ candidateId }: FinancialSumm
       try {
         const data = await candidateApi.getFinancials(candidateId);
         setFinancials(data);
+        // Notify parent of the cycle from the latest financial data
+        if (data.length > 0 && onCycleChange) {
+          onCycleChange(data[0].cycle);
+        }
       } catch (err: any) {
         setError(err?.response?.data?.detail || err?.message || 'Failed to load financial data');
       } finally {
@@ -43,7 +48,10 @@ export default function FinancialSummaryComponent({ candidateId }: FinancialSumm
   if (error) {
     return (
       <div className="bg-white rounded-lg shadow p-6">
-        <div className="text-red-600">{error}</div>
+        <h2 className="text-xl font-semibold mb-4">Financial Summary</h2>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-800">{error}</p>
+        </div>
       </div>
     );
   }
@@ -61,7 +69,9 @@ export default function FinancialSummaryComponent({ candidateId }: FinancialSumm
 
   return (
     <div className="bg-white rounded-lg shadow p-6">
-      <h2 className="text-xl font-semibold mb-4">Financial Summary (Cycle {latest.cycle})</h2>
+      <h2 className="text-xl font-semibold mb-4">
+        Financial Summary{latest.cycle !== undefined ? ` (Cycle ${latest.cycle})` : ''}
+      </h2>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="bg-blue-50 p-4 rounded-lg">
           <div className="text-sm text-gray-600 mb-1">Total Receipts</div>
@@ -88,7 +98,7 @@ export default function FinancialSummaryComponent({ candidateId }: FinancialSumm
           </div>
         </div>
       </div>
-      <div className="mt-6 grid grid-cols-3 gap-4">
+      <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
         <div>
           <div className="text-sm text-gray-600">Individual Contributions</div>
           <div className="text-lg font-semibold">
@@ -105,6 +115,12 @@ export default function FinancialSummaryComponent({ candidateId }: FinancialSumm
           <div className="text-sm text-gray-600">Party Contributions</div>
           <div className="text-lg font-semibold">
             ${(latest.party_contributions / 1000).toFixed(1)}K
+          </div>
+        </div>
+        <div>
+          <div className="text-sm text-gray-600">Loan Contributions</div>
+          <div className="text-lg font-semibold">
+            ${((latest.loan_contributions || 0) / 1000).toFixed(1)}K
           </div>
         </div>
       </div>
