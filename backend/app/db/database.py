@@ -389,11 +389,12 @@ if DATABASE_URL.startswith("sqlite"):
         echo=False,
         future=True,
         pool_pre_ping=True,  # Verify connections before using
-        pool_size=10,  # Increased from 5 to handle more concurrent connections
-        max_overflow=20,  # Increased from 10 to allow more overflow connections
-        pool_timeout=60.0,  # Increased timeout for getting connection from pool
+        pool_size=20,  # Increased to handle high concurrency with large database
+        max_overflow=30,  # Increased overflow for burst traffic
+        pool_timeout=120.0,  # Increased timeout for getting connection from pool (2 minutes)
+        pool_recycle=3600,  # Recycle connections after 1 hour to prevent stale connections
         connect_args={
-            "timeout": 60.0,  # 60 second timeout for database operations
+            "timeout": 120.0,  # 120 second timeout for database operations
         }
     )
 else:

@@ -1353,12 +1353,37 @@ class FECClient:
             # Store new contributions in database for caching
             if api_results:
                 logger.info(f"Storing {len(api_results)} new contributions from API in database")
-                # Store contributions asynchronously to avoid blocking
-                for contrib in api_results:
-                    # Ensure candidate_id is set when storing contributions
-                    if candidate_id and not contrib.get('candidate_id'):
-                        contrib['candidate_id'] = candidate_id
-                    asyncio.create_task(self._store_contribution(contrib))
+                # Store contributions in batches to avoid exhausting connection pool
+                # Limit concurrent storage operations to prevent connection pool exhaustion
+                batch_size = 50  # Store 50 contributions at a time
+                semaphore = asyncio.Semaphore(10)  # Max 10 concurrent storage operations
+                
+                async def store_with_semaphore(contrib_data):
+                    async with semaphore:
+                        try:
+                            await self._store_contribution(contrib_data)
+                        except Exception as e:
+                            # Log but don't fail - connection pool exhaustion is expected under load
+                            if "QueuePool" in str(e) or "timeout" in str(e).lower():
+                                logger.debug(f"Connection pool exhausted while storing contribution, skipping: {e}")
+                            else:
+                                logger.warning(f"Error storing contribution: {e}")
+                
+                # Process in batches to avoid overwhelming the database
+                for i in range(0, len(api_results), batch_size):
+                    batch = api_results[i:i + batch_size]
+                    tasks = []
+                    for contrib in batch:
+                        # Ensure candidate_id is set when storing contributions
+                        if candidate_id and not contrib.get('candidate_id'):
+                            contrib['candidate_id'] = candidate_id
+                        tasks.append(store_with_semaphore(contrib))
+                    
+                    # Wait for batch to complete before starting next batch
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    # Small delay between batches to allow connections to be released
+                    if i + batch_size < len(api_results):
+                        await asyncio.sleep(0.1)
             
             # Merge local and API results, avoiding duplicates
             all_results = local_data.copy() if local_data else []
