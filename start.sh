@@ -7,9 +7,46 @@ echo ""
 
 # Kill any existing processes on ports 8000 and 3000
 echo "Checking for existing processes..."
+
+# Kill backend processes
+echo "  Stopping backend processes..."
 pkill -f "uvicorn app.main:app" 2>/dev/null
+pkill -f "uvicorn.*8000" 2>/dev/null
+# Kill processes using port 8000
+if command -v lsof >/dev/null 2>&1; then
+    lsof -ti:8000 | xargs kill -9 2>/dev/null
+fi
+if command -v fuser >/dev/null 2>&1; then
+    fuser -k 8000/tcp 2>/dev/null
+fi
+
+# Kill frontend processes
+echo "  Stopping frontend processes..."
 pkill -f "vite" 2>/dev/null
-sleep 1
+pkill -f "node.*vite" 2>/dev/null
+# Kill processes using port 3000
+if command -v lsof >/dev/null 2>&1; then
+    lsof -ti:3000 | xargs kill -9 2>/dev/null
+    lsof -ti:5173 | xargs kill -9 2>/dev/null
+fi
+if command -v fuser >/dev/null 2>&1; then
+    fuser -k 3000/tcp 2>/dev/null
+    fuser -k 5173/tcp 2>/dev/null
+fi
+
+# Wait for processes to fully terminate
+sleep 2
+
+# Verify processes are killed
+if pgrep -f "uvicorn app.main:app" >/dev/null 2>&1 || pgrep -f "vite" >/dev/null 2>&1; then
+    echo "  ⚠️  Warning: Some processes may still be running"
+    echo "  Attempting force kill..."
+    pkill -9 -f "uvicorn app.main:app" 2>/dev/null
+    pkill -9 -f "vite" 2>/dev/null
+    sleep 1
+fi
+
+echo "  ✓ Processes cleaned up"
 
 # Check if .env exists in backend
 if [ ! -f "backend/.env" ]; then

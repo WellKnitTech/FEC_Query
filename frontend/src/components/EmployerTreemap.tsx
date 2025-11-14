@@ -51,9 +51,10 @@ export default function EmployerTreemap({
           max_date: maxDate,
         });
         setAnalysis(data);
-      } catch (err) {
-        setError('Failed to load employer analysis');
-        console.error(err);
+      } catch (err: any) {
+        const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load employer analysis';
+        setError(errorMessage);
+        console.error('Error loading employer analysis:', err);
       } finally {
         setLoading(false);
       }
@@ -78,7 +79,10 @@ export default function EmployerTreemap({
   if (error) {
     return (
       <div className="bg-white rounded-lg shadow p-6">
-        <div className="text-red-600">{error}</div>
+        <h2 className="text-xl font-semibold mb-4">Employer/Industry Analysis</h2>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-800">{error}</p>
+        </div>
       </div>
     );
   }
@@ -97,14 +101,14 @@ export default function EmployerTreemap({
   }
 
   // Prepare chart data
-  const topEmployers = analysis.top_employers.slice(0, 20);
-  const employerLabels = topEmployers.map((e) => e.employer.length > 40 ? e.employer.substring(0, 40) + '...' : e.employer);
-  const employerAmounts = topEmployers.map((e) => e.total);
-  const employerCounts = topEmployers.map((e) => e.count);
+  const topEmployers = (analysis.top_employers || []).slice(0, 20);
+  const employerLabels = topEmployers.map((e) => (e.employer || 'Unknown').length > 40 ? (e.employer || 'Unknown').substring(0, 40) + '...' : (e.employer || 'Unknown'));
+  const employerAmounts = topEmployers.map((e) => e.total || 0);
+  const employerCounts = topEmployers.map((e) => e.count || 0);
 
-  const top10Employers = analysis.top_employers.slice(0, 10);
-  const pieLabels = top10Employers.map((e) => e.employer.length > 30 ? e.employer.substring(0, 30) + '...' : e.employer);
-  const pieData = top10Employers.map((e) => e.total);
+  const top10Employers = (analysis.top_employers || []).slice(0, 10);
+  const pieLabels = top10Employers.map((e) => (e.employer || 'Unknown').length > 30 ? (e.employer || 'Unknown').substring(0, 30) + '...' : (e.employer || 'Unknown'));
+  const pieData = top10Employers.map((e) => e.total || 0);
 
   const barData = {
     labels: employerLabels,
@@ -141,9 +145,9 @@ export default function EmployerTreemap({
     ],
   };
 
-  const totalFromEmployers = analysis.top_employers.reduce((sum, e) => sum + e.total, 0);
-  const percentageWithEmployer = analysis.total_contributions > 0
-    ? (totalFromEmployers / analysis.total_contributions) * 100
+  const totalFromEmployers = (analysis.top_employers || []).reduce((sum, e) => sum + (e.total || 0), 0);
+  const percentageWithEmployer = (analysis.total_contributions || 0) > 0
+    ? (totalFromEmployers / (analysis.total_contributions || 1)) * 100
     : 0;
 
   return (
@@ -228,22 +232,22 @@ export default function EmployerTreemap({
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
-              {analysis.top_employers.slice(0, 30).map((employer, idx) => (
+              {(analysis.top_employers || []).slice(0, 30).map((employer, idx) => (
                 <tr key={idx} className="hover:bg-gray-50">
                   <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                     {idx + 1}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {employer.employer}
+                    {employer.employer || 'Unknown'}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                    ${employer.total.toLocaleString()}
+                    ${(employer.total || 0).toLocaleString()}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                    {employer.count}
+                    {employer.count || 0}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                    ${(employer.total / employer.count).toFixed(2)}
+                    ${((employer.total || 0) / (employer.count || 1)).toFixed(2)}
                   </td>
                 </tr>
               ))}

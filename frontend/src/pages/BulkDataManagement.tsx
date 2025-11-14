@@ -3,6 +3,33 @@ import { bulkDataApi, BulkDataStatus, BulkDataCycle, BulkImportJobStatus, CycleS
 import ProgressTracker from '../components/ProgressTracker';
 import DataTypeGrid from '../components/DataTypeGrid';
 
+// Helper function to extract error message from API responses
+function extractErrorMessage(err: any): string {
+  if (!err) return 'An unknown error occurred';
+  
+  // Handle FastAPI validation errors (422) - detail is an array of error objects
+  if (err.response?.data?.detail) {
+    const detail = err.response.data.detail;
+    
+    // If detail is an array (validation errors), format them
+    if (Array.isArray(detail)) {
+      return detail.map((error: any) => {
+        const loc = error.loc ? error.loc.join('.') : '';
+        const msg = error.msg || error.message || 'Validation error';
+        return loc ? `${loc}: ${msg}` : msg;
+      }).join('; ');
+    }
+    
+    // If detail is a string, use it directly
+    if (typeof detail === 'string') {
+      return detail;
+    }
+  }
+  
+  // Fallback to message or default
+  return err.message || 'An unknown error occurred';
+}
+
 export default function BulkDataManagement() {
   const [status, setStatus] = useState<BulkDataStatus | null>(null);
   const [cycles, setCycles] = useState<BulkDataCycle[]>([]);
@@ -12,6 +39,7 @@ export default function BulkDataManagement() {
   const [success, setSuccess] = useState<string | null>(null);
   const [selectedCycle, setSelectedCycle] = useState<number>(2024);
   const [selectedDataTypes, setSelectedDataTypes] = useState<Set<string>>(new Set());
+  const [forceDownload, setForceDownload] = useState<boolean>(false);
   const [operationInProgress, setOperationInProgress] = useState<string | null>(null);
   const [activeJobs, setActiveJobs] = useState<Map<string, BulkImportJobStatus>>(new Map());
   const wsRefs = useRef<Map<string, WebSocket>>(new Map());
@@ -141,7 +169,7 @@ export default function BulkDataManagement() {
       await bulkDataApi.cancelJob(jobId);
       // Job status will be updated via WebSocket/polling
     } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || 'Failed to cancel job');
+      setError(extractErrorMessage(err) || 'Failed to cancel job');
       console.error(err);
     }
   };
@@ -173,7 +201,7 @@ export default function BulkDataManagement() {
         }
       }
     } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || 'Failed to load bulk data status');
+      setError(extractErrorMessage(err) || 'Failed to load bulk data status');
       console.error(err);
     } finally {
       setLoading(false);
@@ -183,10 +211,19 @@ export default function BulkDataManagement() {
   const loadCycleStatus = async () => {
     try {
       const status = await bulkDataApi.getDataTypeStatus(selectedCycle);
-      setCycleStatus(status);
+      // Validate response structure
+      if (status && status.data_types && Array.isArray(status.data_types)) {
+        setCycleStatus(status);
+      } else {
+        console.error('Invalid cycle status response structure:', status);
+        setCycleStatus(null);
+        setError('Invalid response from server. Please try again.');
+      }
     } catch (err: any) {
       console.error('Failed to load cycle status:', err);
       setCycleStatus(null);
+      // Don't set error here as it might be a temporary issue
+      // The error will be shown in the DataTypeGrid component
     }
   };
 
@@ -205,7 +242,7 @@ export default function BulkDataManagement() {
       setSuccess(`Successfully cleared ${result.deleted_count} contributions`);
       await loadStatus(); // Refresh status
     } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || 'Failed to clear contributions');
+      setError(extractErrorMessage(err) || 'Failed to clear contributions');
       console.error(err);
     } finally {
       setLoading(false);
@@ -219,7 +256,7 @@ export default function BulkDataManagement() {
       setError(null);
       setSuccess(null);
       
-      const result = await bulkDataApi.download(selectedCycle);
+      const result = await bulkDataApi.download(selectedCycle, forceDownload);
       setSuccess(result.message || `Download started for cycle ${selectedCycle}`);
       
       // Start tracking the job
@@ -229,7 +266,7 @@ export default function BulkDataManagement() {
       
       await loadStatus(); // Refresh status
     } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || 'Failed to download bulk data');
+      setError(extractErrorMessage(err) || 'Failed to download bulk data');
       console.error(err);
     } finally {
       setLoading(false);
@@ -260,7 +297,7 @@ export default function BulkDataManagement() {
       
       await loadStatus(); // Refresh status
     } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || 'Failed to cleanup and reimport');
+      setError(extractErrorMessage(err) || 'Failed to cleanup and reimport');
       console.error(err);
     } finally {
       setLoading(false);
@@ -286,7 +323,7 @@ export default function BulkDataManagement() {
       setError(null);
       setSuccess(null);
       
-      const result = await bulkDataApi.importMultipleDataTypes(selectedCycle, dataTypesArray);
+      const result = await bulkDataApi.importMultipleDataTypes(selectedCycle, dataTypesArray, forceDownload);
       setSuccess(result.message || `Import started for ${dataTypesArray.length} data types`);
       
       // Start tracking the job
@@ -294,10 +331,17 @@ export default function BulkDataManagement() {
         startJobTracking(result.job_id);
       }
       
-      await loadCycleStatus(); // Refresh cycle status
+      // Refresh cycle status, but don't fail if it errors
+      try {
+        await loadCycleStatus();
+      } catch (err) {
+        console.error('Failed to refresh cycle status after import:', err);
+        // Don't throw - the import started successfully
+      }
     } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || 'Failed to import selected data types');
-      console.error(err);
+      const errorMessage = extractErrorMessage(err) || 'Failed to import selected data types';
+      setError(errorMessage);
+      console.error('Import error:', err);
     } finally {
       setLoading(false);
       setOperationInProgress(null);
@@ -326,7 +370,7 @@ export default function BulkDataManagement() {
       
       await loadCycleStatus(); // Refresh cycle status
     } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || 'Failed to import all data types');
+      setError(extractErrorMessage(err) || 'Failed to import all data types');
       console.error(err);
     } finally {
       setLoading(false);
@@ -359,7 +403,7 @@ export default function BulkDataManagement() {
       
       await loadStatus(); // Refresh status
     } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || 'Failed to import all cycles');
+      setError(extractErrorMessage(err) || 'Failed to import all cycles');
       console.error(err);
     } finally {
       setLoading(false);
@@ -425,30 +469,40 @@ export default function BulkDataManagement() {
         </div>
       )}
 
-          {/* Active Jobs */}
-          {Array.from(activeJobs.values()).length > 0 && (
-            <div className="mb-6">
-              <h2 className="text-xl font-semibold text-gray-900 mb-4">Active Jobs</h2>
-              {Array.from(activeJobs.values()).map((job) => (
-                <ProgressTracker
-                  key={job.job_id}
-                  jobStatus={job}
-                  onCancel={() => handleCancelJob(job.job_id)}
-                />
-              ))}
+      {/* Active Jobs - Prominent Display */}
+      {Array.from(activeJobs.values()).length > 0 && (
+        <div className="mb-6 bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-lg p-6 shadow-lg">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
+              <span className="animate-pulse">⚡</span>
+              Active Import Jobs ({Array.from(activeJobs.values()).length})
+            </h2>
+            <div className="text-sm text-gray-600">
+              {Array.from(activeJobs.values()).filter(j => j.status === 'running').length} running
             </div>
-          )}
+          </div>
+          <div className="space-y-4">
+            {Array.from(activeJobs.values()).map((job) => (
+              <ProgressTracker
+                key={job.job_id}
+                jobStatus={job}
+                onCancel={() => handleCancelJob(job.job_id)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
-          {operationInProgress && activeJobs.size === 0 && (
-            <div className="mb-6 bg-blue-50 border border-blue-200 text-blue-800 px-4 py-3 rounded">
-              <strong>In Progress:</strong> {operationInProgress}
-              <div className="mt-2">
-                <div className="w-full bg-blue-200 rounded-full h-2.5">
-                  <div className="bg-blue-600 h-2.5 rounded-full animate-pulse" style={{ width: '100%' }}></div>
-                </div>
-              </div>
+      {operationInProgress && activeJobs.size === 0 && (
+        <div className="mb-6 bg-blue-50 border border-blue-200 text-blue-800 px-4 py-3 rounded">
+          <strong>In Progress:</strong> {operationInProgress}
+          <div className="mt-2">
+            <div className="w-full bg-blue-200 rounded-full h-2.5">
+              <div className="bg-blue-600 h-2.5 rounded-full animate-pulse" style={{ width: '100%' }}></div>
             </div>
-          )}
+          </div>
+        </div>
+      )}
 
       {/* Status Card */}
       <div className="bg-white shadow rounded-lg p-6 mb-6">
@@ -530,21 +584,33 @@ export default function BulkDataManagement() {
               </button>
             </div>
           </div>
-          <div className="flex gap-2">
-            <button
-              onClick={handleImportSelected}
-              disabled={loading || selectedDataTypes.size === 0}
-              className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Import Selected ({selectedDataTypes.size})
-            </button>
-            <button
-              onClick={handleImportAllTypes}
-              disabled={loading}
-              className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Import All Types
-            </button>
+          <div className="flex flex-col gap-2">
+            <div className="flex gap-2">
+              <button
+                onClick={handleImportSelected}
+                disabled={loading || selectedDataTypes.size === 0}
+                className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Import Selected ({selectedDataTypes.size})
+              </button>
+              <button
+                onClick={handleImportAllTypes}
+                disabled={loading}
+                className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Import All Types
+              </button>
+            </div>
+            <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={forceDownload}
+                onChange={(e) => setForceDownload(e.target.checked)}
+                disabled={loading}
+                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded disabled:opacity-50"
+              />
+              <span>Force download (skip file size check)</span>
+            </label>
           </div>
         </div>
 
@@ -566,13 +632,25 @@ export default function BulkDataManagement() {
         <div className="space-y-4">
           {/* Action Buttons */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <button
-              onClick={handleDownload}
-              disabled={loading}
-              className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Download & Import (Individual Contributions)
-            </button>
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={handleDownload}
+                disabled={loading}
+                className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Download & Import (Individual Contributions)
+              </button>
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={forceDownload}
+                  onChange={(e) => setForceDownload(e.target.checked)}
+                  disabled={loading}
+                  className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded disabled:opacity-50"
+                />
+                <span>Force download (skip file size check)</span>
+              </label>
+            </div>
 
             <button
               onClick={handleClearContributions}

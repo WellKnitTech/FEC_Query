@@ -53,7 +53,9 @@ export default function CumulativeChart({
         });
         setContributions(data);
       } catch (err: any) {
-        setError(err?.response?.data?.detail || err?.message || 'Failed to load contributions');
+        const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contributions';
+        setError(errorMessage);
+        console.error('Error loading contributions:', err);
       } finally {
         setLoading(false);
       }
@@ -78,7 +80,10 @@ export default function CumulativeChart({
   if (error) {
     return (
       <div className="bg-white rounded-lg shadow p-6">
-        <div className="text-red-600">{error}</div>
+        <h2 className="text-xl font-semibold mb-4">Cumulative Contributions</h2>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-800">{error}</p>
+        </div>
       </div>
     );
   }

@@ -53,9 +53,10 @@ export default function ContributionVelocityComponent({
           max_date: maxDate,
         });
         setVelocity(data);
-      } catch (err) {
-        setError('Failed to load contribution velocity');
-        console.error(err);
+      } catch (err: any) {
+        const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contribution velocity';
+        setError(errorMessage);
+        console.error('Error loading contribution velocity:', err);
       } finally {
         setLoading(false);
       }
@@ -80,7 +81,10 @@ export default function ContributionVelocityComponent({
   if (error) {
     return (
       <div className="bg-white rounded-lg shadow p-6">
-        <div className="text-red-600">{error}</div>
+        <h2 className="text-xl font-semibold mb-4">Contribution Velocity</h2>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-800">{error}</p>
+        </div>
       </div>
     );
   }
@@ -90,18 +94,19 @@ export default function ContributionVelocityComponent({
   }
 
   // Prepare chart data
-  const dateLabels = Object.keys(velocity.velocity_by_date).sort();
-  const dateData = dateLabels.map((date) => velocity.velocity_by_date[date]);
+  const dateLabels = Object.keys(velocity.velocity_by_date || {}).sort();
+  const dateData = dateLabels.map((date) => velocity.velocity_by_date[date] || 0);
 
-  const weekLabels = Object.keys(velocity.velocity_by_week).sort();
-  const weekData = weekLabels.map((week) => velocity.velocity_by_week[week]);
+  const weekLabels = Object.keys(velocity.velocity_by_week || {}).sort();
+  const weekData = weekLabels.map((week) => velocity.velocity_by_week[week] || 0);
 
+  const peakDays = velocity.peak_days || [];
   const peakDaysData = {
-    labels: velocity.peak_days.map((d) => d.date),
+    labels: peakDays.map((d) => d.date || 'Unknown'),
     datasets: [
       {
         label: 'Contributions',
-        data: velocity.peak_days.map((d) => d.count),
+        data: peakDays.map((d) => d.count || 0),
         backgroundColor: 'rgba(59, 130, 246, 0.5)',
         borderColor: 'rgba(59, 130, 246, 1)',
         borderWidth: 1,
@@ -179,13 +184,13 @@ export default function ContributionVelocityComponent({
           <div className="mt-4 text-sm text-gray-600">
             <p className="font-semibold mb-2">Top Peak Days:</p>
             <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-              {velocity.peak_days.slice(0, 10).map((day, idx) => (
+              {peakDays.slice(0, 10).map((day, idx) => (
                 <div key={idx} className="p-2 bg-gray-50 rounded">
-                  <div className="font-medium text-xs">{day.date}</div>
+                  <div className="font-medium text-xs">{day.date || 'Unknown'}</div>
                   <div className="text-xs text-gray-600">
-                    {day.count} contributions
+                    {day.count || 0} contributions
                     <br />
-                    ${(day.amount / 1000).toFixed(1)}K
+                    ${((day.amount || 0) / 1000).toFixed(1)}K
                   </div>
                 </div>
               ))}

@@ -56,6 +56,24 @@ async def get_independent_expenditures(
         expenditures = []
         for exp in results:
             try:
+                # Safely convert expenditure_amount to float, handling malformed values
+                amount = exp.get("expenditure_amount", 0) or 0
+                try:
+                    if isinstance(amount, str):
+                        # Try to clean the string first (remove $, commas, etc.)
+                        amount = amount.replace('$', '').replace(',', '').strip()
+                        # If it's a malformed string like "0.00.00.00...", take the first valid part
+                        if '.' in amount and amount.count('.') > 1:
+                            # Take only the first decimal part
+                            first_dot = amount.find('.')
+                            second_dot = amount.find('.', first_dot + 1)
+                            if second_dot > 0:
+                                amount = amount[:second_dot]
+                    amount = float(amount)
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid expenditure_amount value: {exp.get('expenditure_amount')}, using 0.0")
+                    amount = 0.0
+                
                 exp_data = IndependentExpenditure(
                     expenditure_id=exp.get("expenditure_id") or exp.get("sub_id", ""),
                     cycle=exp.get("cycle"),
@@ -63,7 +81,7 @@ async def get_independent_expenditures(
                     candidate_id=exp.get("candidate_id"),
                     candidate_name=exp.get("candidate_name"),
                     support_oppose_indicator=exp.get("support_oppose_indicator"),
-                    expenditure_amount=float(exp.get("expenditure_amount", 0) or 0),
+                    expenditure_amount=amount,
                     expenditure_date=exp.get("expenditure_date") or exp.get("expenditure_date_formatted"),
                     payee_name=exp.get("payee_name"),
                     expenditure_purpose=exp.get("expenditure_purpose")

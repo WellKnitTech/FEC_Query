@@ -55,9 +55,10 @@ export default function ExpenditureBreakdownComponent({
           max_date: maxDate,
         });
         setBreakdown(data);
-      } catch (err) {
-        setError('Failed to load expenditure breakdown');
-        console.error(err);
+      } catch (err: any) {
+        const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load expenditure breakdown';
+        setError(errorMessage);
+        console.error('Error loading expenditure breakdown:', err);
       } finally {
         setLoading(false);
       }
@@ -82,7 +83,10 @@ export default function ExpenditureBreakdownComponent({
   if (error) {
     return (
       <div className="bg-white rounded-lg shadow p-6">
-        <div className="text-red-600">{error}</div>
+        <h2 className="text-xl font-semibold mb-4">Expenditure Analysis</h2>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-800">{error}</p>
+        </div>
       </div>
     );
   }
@@ -92,18 +96,19 @@ export default function ExpenditureBreakdownComponent({
   }
 
   // Prepare chart data
-  const categoryLabels = Object.keys(breakdown.expenditures_by_category);
-  const categoryData = Object.values(breakdown.expenditures_by_category);
+  const categoryLabels = Object.keys(breakdown.expenditures_by_category || {});
+  const categoryData = Object.values(breakdown.expenditures_by_category || {});
 
-  const dateLabels = Object.keys(breakdown.expenditures_by_date).sort();
-  const dateData = dateLabels.map((date) => breakdown.expenditures_by_date[date]);
+  const dateLabels = Object.keys(breakdown.expenditures_by_date || {}).sort();
+  const dateData = dateLabels.map((date) => breakdown.expenditures_by_date[date] || 0);
 
+  const topRecipients = breakdown.top_recipients || [];
   const topRecipientsData = {
-    labels: breakdown.top_recipients.slice(0, 10).map((r) => r.name),
+    labels: topRecipients.slice(0, 10).map((r) => r.name || 'Unknown'),
     datasets: [
       {
         label: 'Total Expenditures',
-        data: breakdown.top_recipients.slice(0, 10).map((r) => r.total),
+        data: topRecipients.slice(0, 10).map((r) => r.total || 0),
         backgroundColor: 'rgba(239, 68, 68, 0.5)',
         borderColor: 'rgba(239, 68, 68, 1)',
         borderWidth: 1,

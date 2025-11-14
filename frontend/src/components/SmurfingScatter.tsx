@@ -42,9 +42,10 @@ export default function SmurfingScatter({
           limit: 10000,
         });
         setContributions(data);
-      } catch (err) {
-        setError('Failed to load contributions');
-        console.error(err);
+      } catch (err: any) {
+        const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contributions';
+        setError(errorMessage);
+        console.error('Error loading contributions:', err);
       } finally {
         setLoading(false);
       }
@@ -69,7 +70,10 @@ export default function SmurfingScatter({
   if (error) {
     return (
       <div className="bg-white rounded-lg shadow p-6">
-        <div className="text-red-600">{error}</div>
+        <h2 className="text-xl font-semibold mb-4">Smurfing Detection Visualization</h2>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-800">{error}</p>
+        </div>
       </div>
     );
   }

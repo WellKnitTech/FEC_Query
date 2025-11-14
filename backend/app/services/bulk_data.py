@@ -7,7 +7,7 @@ import uuid
 import gc
 import zipfile
 from typing import Optional, Dict, List, Any, Set
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from sqlalchemy import select, and_, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -26,6 +26,12 @@ _cancelled_jobs: Set[str] = set()
 
 # Global set to track running background tasks for graceful shutdown
 _running_tasks: Set[asyncio.Task] = set()
+
+# Module-level cache for FEC cycle availability (shared across all instances)
+_available_cycles_cache: Optional[List[int]] = None
+_available_cycles_cache_time: Optional[datetime] = None
+_available_cycles_cache_ttl: int = 3600  # 1 hour (cycle availability changes infrequently)
+_available_cycles_cache_lock: asyncio.Lock = asyncio.Lock()
 
 
 class BulkDataService:
@@ -120,30 +126,63 @@ class BulkDataService:
             return False
     
     async def get_available_cycles_from_fec(self) -> List[int]:
-        """Query FEC bulk data URLs to determine which cycles have data available"""
-        current_year = datetime.now().year
-        # Check cycles from 2000 to current year + 6
-        future_years = current_year + 6
-        cycles_to_check = list(range(2000, future_years + 1, 2))
+        """Query FEC bulk data URLs to determine which cycles have data available
         
-        available_cycles = []
+        Results are cached for 10 minutes to avoid repeated API calls.
+        Uses module-level cache with locking to prevent concurrent API calls.
+        """
+        global _available_cycles_cache, _available_cycles_cache_time
         
-        # Check in batches to avoid too many concurrent requests
-        batch_size = 10
-        for i in range(0, len(cycles_to_check), batch_size):
-            batch = cycles_to_check[i:i + batch_size]
-            # Check cycles in parallel
-            tasks = [self.check_cycle_availability(cycle) for cycle in batch]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Check cache first (without lock for fast path)
+        now = datetime.utcnow()
+        if (_available_cycles_cache is not None and 
+            _available_cycles_cache_time is not None):
+            cache_age = (now - _available_cycles_cache_time).total_seconds()
+            if cache_age < _available_cycles_cache_ttl:
+                logger.debug(f"Using cached available cycles (age: {cache_age:.1f}s)")
+                return _available_cycles_cache
+        
+        # Cache miss or expired - use lock to prevent concurrent API calls
+        async with _available_cycles_cache_lock:
+            # Double-check cache after acquiring lock (another request might have updated it)
+            if (_available_cycles_cache is not None and 
+                _available_cycles_cache_time is not None):
+                cache_age = (now - _available_cycles_cache_time).total_seconds()
+                if cache_age < _available_cycles_cache_ttl:
+                    logger.debug(f"Using cached available cycles (age: {cache_age:.1f}s) after lock")
+                    return _available_cycles_cache
             
-            for cycle, is_available in zip(batch, results):
-                if isinstance(is_available, bool) and is_available:
-                    available_cycles.append(cycle)
-                elif isinstance(is_available, Exception):
-                    logger.debug(f"Exception checking cycle {cycle}: {is_available}")
-        
-        logger.info(f"Found {len(available_cycles)} cycles with available bulk data: {available_cycles}")
-        return sorted(available_cycles, reverse=True)  # Most recent first
+            # Cache miss or expired - fetch from API
+            logger.info("Cache miss or expired, fetching available cycles from FEC API")
+            current_year = datetime.now().year
+            # Check cycles from 2000 to current year + 6
+            future_years = current_year + 6
+            cycles_to_check = list(range(2000, future_years + 1, 2))
+            
+            available_cycles = []
+            
+            # Check in batches to avoid too many concurrent requests
+            batch_size = 10
+            for i in range(0, len(cycles_to_check), batch_size):
+                batch = cycles_to_check[i:i + batch_size]
+                # Check cycles in parallel
+                tasks = [self.check_cycle_availability(cycle) for cycle in batch]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for cycle, is_available in zip(batch, results):
+                    if isinstance(is_available, bool) and is_available:
+                        available_cycles.append(cycle)
+                    elif isinstance(is_available, Exception):
+                        logger.debug(f"Exception checking cycle {cycle}: {is_available}")
+            
+            sorted_cycles = sorted(available_cycles, reverse=True)  # Most recent first
+            logger.info(f"FEC API check found {len(sorted_cycles)} available cycles: {sorted_cycles}")
+            
+            # Update module-level cache
+            _available_cycles_cache = sorted_cycles
+            _available_cycles_cache_time = now
+            
+            return sorted_cycles
     
     async def download_schedule_a_csv(self, cycle: int, job_id: Optional[str] = None) -> Optional[str]:
         """Download Schedule A CSV for a specific cycle with progress tracking"""
@@ -278,7 +317,8 @@ class BulkDataService:
         self,
         data_type: DataType,
         cycle: int,
-        job_id: Optional[str] = None
+        job_id: Optional[str] = None,
+        force_download: bool = False
     ) -> Optional[str]:
         """
         Generic method to download any FEC bulk data file type
@@ -303,6 +343,48 @@ class BulkDataService:
         else:  # CSV
             download_path = self.bulk_data_dir / f"{data_type.value}_{cycle}.csv"
             extracted_path = download_path
+        
+        # Check if we should skip download (file size matches and file exists)
+        # Skip this check if force_download is True
+        if not force_download:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(BulkDataMetadata).where(
+                        and_(
+                            BulkDataMetadata.cycle == cycle,
+                            BulkDataMetadata.data_type == data_type.value
+                        )
+                    )
+                )
+                metadata = result.scalar_one_or_none()
+                
+                if metadata and metadata.file_size is not None:
+                    # Check remote file size
+                    try:
+                        head_response = await self.client.head(url, follow_redirects=True)
+                        head_response.raise_for_status()
+                        remote_size = int(head_response.headers.get("content-length", 0))
+                        
+                        # If file size matches and file exists, skip download
+                        if remote_size > 0 and metadata.file_size == remote_size:
+                            if extracted_path.exists():
+                                logger.info(
+                                    f"Skipping download for {data_type.value} cycle {cycle}: "
+                                    f"file size matches ({remote_size / (1024*1024):.1f} MB) and file exists"
+                                )
+                                return str(extracted_path)
+                            else:
+                                logger.warning(
+                                    f"Metadata indicates file size matches but file missing: {extracted_path}. "
+                                    f"Proceeding with download."
+                                )
+                        else:
+                            logger.info(
+                                f"File size changed for {data_type.value} cycle {cycle}: "
+                                f"stored={metadata.file_size}, remote={remote_size}. Re-downloading."
+                            )
+                    except Exception as e:
+                        logger.warning(f"Could not check remote file size for {data_type.value} cycle {cycle}: {e}. Proceeding with download.")
         
         logger.info(f"Downloading {data_type.value} for cycle {cycle} from {url}")
         
@@ -357,6 +439,36 @@ class BulkDataService:
                 final_size_mb = downloaded_size / (1024 * 1024)
                 logger.info(f"Downloaded {final_size_mb:.1f} MB to {download_path}")
                 
+                # Use total_size from header if available, otherwise use downloaded_size
+                file_size_to_store = total_size if total_size > 0 else downloaded_size
+                
+                # Update metadata with file size immediately after download
+                if file_size_to_store > 0:
+                    async with AsyncSessionLocal() as session:
+                        result = await session.execute(
+                            select(BulkDataMetadata).where(
+                                and_(
+                                    BulkDataMetadata.cycle == cycle,
+                                    BulkDataMetadata.data_type == data_type.value
+                                )
+                            )
+                        )
+                        metadata = result.scalar_one_or_none()
+                        
+                        if metadata:
+                            metadata.file_size = file_size_to_store
+                            metadata.download_date = datetime.utcnow()
+                        else:
+                            metadata = BulkDataMetadata(
+                                cycle=cycle,
+                                data_type=data_type.value,
+                                file_size=file_size_to_store,
+                                download_date=datetime.utcnow()
+                            )
+                            session.add(metadata)
+                        
+                        await session.commit()
+                
                 # Extract if ZIP
                 if config.file_format == FileFormat.ZIP:
                     if job_id:
@@ -368,19 +480,44 @@ class BulkDataService:
                     logger.info(f"Extracting {config.zip_internal_file or 'all files'} from {download_path}")
                     with zipfile.ZipFile(download_path, 'r') as zip_ref:
                         if config.zip_internal_file:
-                            # Extract specific file
-                            zip_ref.extract(config.zip_internal_file, path=self.bulk_data_dir)
-                            extracted_file = self.bulk_data_dir / config.zip_internal_file
-                            if extracted_file.exists():
-                                extracted_file.rename(extracted_path)
-                                logger.info(f"Extracted and renamed to {extracted_path}")
+                            # Extract specific file - first try exact name, then search for similar
+                            file_list = zip_ref.namelist()
+                            target_file = None
+                            
+                            # Try exact match first
+                            if config.zip_internal_file in file_list:
+                                target_file = config.zip_internal_file
                             else:
-                                logger.error(f"{config.zip_internal_file} not found in ZIP file {download_path}")
+                                # Search for files with similar names (case-insensitive, partial match)
+                                target_basename = config.zip_internal_file.lower()
+                                for file_name in file_list:
+                                    if target_basename in file_name.lower() or file_name.lower().endswith(target_basename.split('.')[-1]):
+                                        target_file = file_name
+                                        logger.info(f"Found alternative file name in ZIP: {file_name} (expected {config.zip_internal_file})")
+                                        break
+                            
+                            if target_file:
+                                zip_ref.extract(target_file, path=self.bulk_data_dir)
+                                extracted_file = self.bulk_data_dir / target_file
+                                if extracted_file.exists():
+                                    extracted_file.rename(extracted_path)
+                                    logger.info(f"Extracted {target_file} and renamed to {extracted_path}")
+                                else:
+                                    logger.error(f"Extracted file {target_file} not found after extraction")
+                                    if job_id:
+                                        await self._update_job_progress(
+                                            job_id,
+                                            status='failed',
+                                            error_message=f"Failed to extract {target_file} from ZIP file for {data_type.value} cycle {cycle}"
+                                        )
+                                    return None
+                            else:
+                                logger.error(f"{config.zip_internal_file} not found in ZIP file {download_path}. Available files: {file_list[:10]}")
                                 if job_id:
                                     await self._update_job_progress(
                                         job_id,
                                         status='failed',
-                                        error_message=f"{config.zip_internal_file} not found in ZIP file for {data_type.value} cycle {cycle}"
+                                        error_message=f"{config.zip_internal_file} not found in ZIP file for {data_type.value} cycle {cycle}. Available files: {', '.join(file_list[:5])}"
                                     )
                                 return None
                         else:
@@ -523,10 +660,19 @@ class BulkDataService:
         file_path: str,
         cycle: int,
         job_id: Optional[str] = None,
-        batch_size: int = 50000
+        batch_size: int = 50000,
+        resume: bool = False
     ) -> int:
-        """Parse CSV and store in Contribution table with optimized bulk inserts using vectorized operations"""
-        logger.info(f"Parsing CSV file: {file_path}")
+        """Parse CSV and store in Contribution table with optimized bulk inserts using vectorized operations
+        
+        Args:
+            file_path: Path to CSV file
+            cycle: Election cycle
+            job_id: Optional job ID for progress tracking
+            batch_size: Number of records per chunk
+            resume: If True, resume from last checkpoint (for job_id)
+        """
+        logger.info(f"Parsing CSV file: {file_path} (resume={resume})")
         
         # FEC Schedule A CSV columns (pipe-delimited, no headers)
         fec_columns = [
@@ -537,8 +683,23 @@ class BulkDataService:
         ]
         
         try:
+            # Check for resume checkpoint
+            rows_to_skip = 0
+            initial_records = 0
+            if resume and job_id:
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(
+                        select(BulkImportJob).where(BulkImportJob.id == job_id)
+                    )
+                    job = result.scalar_one_or_none()
+                    if job and job.file_position > 0:
+                        # file_position stores rows processed (not bytes for CSV)
+                        rows_to_skip = job.file_position
+                        initial_records = job.imported_records or 0
+                        logger.info(f"Resuming import from row {rows_to_skip} ({initial_records} records already imported)")
+            
             chunk_count = 0
-            total_records = 0
+            total_records = initial_records
             skipped_duplicates = 0
             
             # Estimate total chunks for progress tracking
@@ -551,11 +712,19 @@ class BulkDataService:
                     job_id,
                     current_cycle=cycle,
                     total_chunks=estimated_chunks,
-                    progress_data={"status": "parsing", "cycle": cycle}
+                    data_type='individual_contributions',
+                    file_path=file_path,
+                    progress_data={"status": "parsing", "cycle": cycle, "resuming": resume}
                 )
             
             async with AsyncSessionLocal() as session:
                 # Read CSV in chunks - optimized for memory
+                # Use skiprows to resume from checkpoint (use callable for efficiency)
+                skiprows_func = None
+                if rows_to_skip > 0:
+                    # Create a callable that returns True for rows to skip
+                    skiprows_func = lambda x: x < rows_to_skip
+                
                 for chunk in pd.read_csv(
                     file_path,
                     sep='|',
@@ -564,7 +733,8 @@ class BulkDataService:
                     chunksize=batch_size,
                     dtype=str,
                     low_memory=False,
-                    on_bad_lines='skip'
+                    on_bad_lines='skip',
+                    skiprows=skiprows_func
                 ):
                     # Check for cancellation before processing each chunk
                     if job_id and job_id in _cancelled_jobs:
@@ -594,6 +764,42 @@ class BulkDataService:
                     
                     chunk['candidate_id'] = clean_str_field(chunk['CAND_ID'])
                     chunk['committee_id'] = clean_str_field(chunk['CMTE_ID'])
+                    
+                    # Backfill candidate_id from Committee table for rows where it's missing
+                    # Many contributions in bulk data don't have CAND_ID but are linked via committee_id
+                    missing_candidate_mask = chunk['candidate_id'].isna() | (chunk['candidate_id'].astype(str) == '')
+                    if missing_candidate_mask.any():
+                        # Get unique committee_ids that need lookup
+                        committees_to_lookup = chunk.loc[missing_candidate_mask, 'committee_id'].dropna().unique().tolist()
+                        
+                        if committees_to_lookup:
+                            # Query Committee table for candidate_ids
+                            from sqlalchemy import select
+                            from app.db.database import Committee
+                            
+                            # Use the same session to avoid nested async context issues
+                            result = await session.execute(
+                                select(Committee.committee_id, Committee.candidate_ids)
+                                .where(Committee.committee_id.in_(committees_to_lookup))
+                            )
+                            # Create mapping: committee_id -> candidate_id (use first candidate if multiple)
+                            committee_map = {}
+                            for row in result:
+                                if row.candidate_ids and len(row.candidate_ids) > 0:
+                                    committee_map[row.committee_id] = row.candidate_ids[0]  # Use first candidate
+                            
+                            # Backfill candidate_id using the mapping
+                            if committee_map:
+                                # Update only rows that need backfilling
+                                for idx in chunk.index:
+                                    if missing_candidate_mask.loc[idx]:
+                                        comm_id = chunk.loc[idx, 'committee_id']
+                                        if pd.notna(comm_id) and comm_id in committee_map:
+                                            chunk.loc[idx, 'candidate_id'] = committee_map[comm_id]
+                                
+                                backfilled_count = chunk.loc[missing_candidate_mask, 'candidate_id'].notna().sum()
+                                if backfilled_count > 0:
+                                    logger.debug(f"Backfilled candidate_id for {int(backfilled_count)} contributions using committee linkages")
                     chunk['contributor_name'] = clean_str_field(chunk['NAME'])
                     chunk['contributor_city'] = clean_str_field(chunk['CITY'])
                     chunk['contributor_state'] = clean_str_field(chunk['STATE'])
@@ -671,17 +877,28 @@ class BulkDataService:
                             total_records += inserted
                             
                             # Update progress every 5 chunks to reduce overhead
+                            # Track file position as rows processed (for resume capability)
+                            rows_processed = total_records
                             if job_id and chunk_count % 5 == 0:
+                                # Calculate estimated progress percentage
+                                estimated_progress = 0.0
+                                if estimated_chunks > 0:
+                                    estimated_progress = (chunk_count / estimated_chunks) * 100
+                                
                                 await self._update_job_progress(
                                     job_id,
                                     current_chunk=chunk_count,
                                     imported_records=total_records,
+                                    file_position=rows_processed,  # Store rows processed for resume
                                     progress_data={
                                         "status": "importing",
                                         "cycle": cycle,
                                         "chunks_processed": chunk_count,
+                                        "total_chunks_estimated": estimated_chunks,
                                         "records_imported": total_records,
-                                        "records_skipped": skipped_duplicates
+                                        "records_skipped": skipped_duplicates,
+                                        "rows_processed": rows_processed,
+                                        "estimated_progress": min(100, estimated_progress)
                                     }
                                 )
                             
@@ -742,6 +959,7 @@ class BulkDataService:
                     status='completed',
                     imported_records=total_records,
                     skipped_records=skipped_duplicates,
+                    file_position=total_records,  # Final position
                     completed_at=datetime.utcnow()
                 )
             
@@ -749,8 +967,110 @@ class BulkDataService:
         except Exception as e:
             logger.error(f"Error parsing CSV file {file_path}: {e}", exc_info=True)
             if job_id:
-                await self._update_job_progress(job_id, status='failed', error_message=str(e))
+                # Save current progress before marking as failed
+                await self._update_job_progress(
+                    job_id, 
+                    status='failed', 
+                    error_message=str(e),
+                    file_position=total_records  # Save progress for potential resume
+                )
             raise
+    
+    def _is_valid_committee_id(self, committee_id: str) -> bool:
+        """Validate committee ID format: must start with 'C' followed by 8 digits"""
+        if not committee_id or not isinstance(committee_id, str):
+            return False
+        # Remove whitespace
+        committee_id = committee_id.strip()
+        # Must start with 'C' followed by exactly 8 digits
+        import re
+        pattern = r'^C\d{8}$'
+        return bool(re.match(pattern, committee_id))
+    
+    def _attempt_correct_committee_id(self, committee_id: str) -> Optional[str]:
+        """
+        Attempt to correct common committee ID format issues
+        
+        Common issues:
+        - Missing leading 'C'
+        - Missing leading zeros (e.g., C12345 instead of C00012345)
+        - Extra whitespace
+        - Lowercase 'c' instead of 'C'
+        - Extra characters or formatting
+        
+        Returns corrected ID if fixable, None otherwise
+        """
+        if not committee_id or not isinstance(committee_id, str):
+            return None
+        
+        import re
+        
+        # Remove all whitespace
+        corrected = committee_id.strip().replace(' ', '').replace('\t', '').replace('\n', '')
+        
+        # If empty after cleaning, return None
+        if not corrected:
+            return None
+        
+        # If already valid, return as-is
+        if self._is_valid_committee_id(corrected):
+            return corrected
+        
+        # Try to fix common issues
+        
+        # 1. Missing leading 'C' but has digits
+        if re.match(r'^\d+$', corrected):
+            # Pad to 8 digits and add 'C'
+            digits = corrected.zfill(8)
+            if len(digits) == 8:
+                corrected = 'C' + digits
+                if self._is_valid_committee_id(corrected):
+                    return corrected
+        
+        # 2. Has 'C' but wrong case or missing digits
+        if corrected.upper().startswith('C'):
+            # Normalize to uppercase 'C'
+            corrected = 'C' + corrected[1:].lstrip('C').lstrip('c')
+            
+            # Extract digits only
+            digits = re.sub(r'\D', '', corrected)
+            if digits:
+                # Pad to 8 digits
+                digits = digits.zfill(8)
+                if len(digits) == 8:
+                    corrected = 'C' + digits
+                    if self._is_valid_committee_id(corrected):
+                        return corrected
+        
+        # 3. Has 'C' but too many or too few digits
+        match = re.match(r'^[Cc](\d+)$', corrected)
+        if match:
+            digits = match.group(1)
+            # If too many digits, take first 8
+            if len(digits) > 8:
+                digits = digits[:8]
+            # Pad to 8 digits
+            digits = digits.zfill(8)
+            if len(digits) == 8:
+                corrected = 'C' + digits
+                if self._is_valid_committee_id(corrected):
+                    return corrected
+        
+        # 4. Has 'C' but has non-digit characters - try to extract just digits
+        if 'C' in corrected.upper() or 'c' in corrected:
+            # Extract all digits after C
+            parts = re.split(r'[Cc]', corrected, 1)
+            if len(parts) > 1:
+                digits = re.sub(r'\D', '', parts[1])
+                if digits:
+                    digits = digits.zfill(8)
+                    if len(digits) == 8:
+                        corrected = 'C' + digits
+                        if self._is_valid_committee_id(corrected):
+                            return corrected
+        
+        # Could not correct
+        return None
     
     async def _extract_and_cache_committees(self):
         """Extract unique committee IDs from contributions and cache them"""
@@ -763,21 +1083,84 @@ class BulkDataService:
                         Contribution.committee_id.isnot(None)
                     )
                 )
-                committee_ids = [row[0] for row in result if row[0]]
+                all_committee_ids = [row[0] for row in result if row[0]]
                 
-                if not committee_ids:
+                if not all_committee_ids:
                     return
                 
-                logger.info(f"Found {len(committee_ids)} unique committee IDs in contributions")
+                # Filter and attempt to correct invalid committee IDs
+                valid_committee_ids = []
+                invalid_committee_ids = []
+                corrected_ids = {}  # Map of original -> corrected
+                
+                for cid in all_committee_ids:
+                    # Check if already valid
+                    if self._is_valid_committee_id(cid):
+                        valid_committee_ids.append(cid)
+                    else:
+                        # Try to correct it
+                        corrected = self._attempt_correct_committee_id(cid)
+                        if corrected:
+                            valid_committee_ids.append(corrected)
+                            corrected_ids[cid] = corrected
+                            logger.debug(f"Corrected committee ID: '{cid}' -> '{corrected}'")
+                        else:
+                            invalid_committee_ids.append(cid)
+                
+                invalid_count = len(invalid_committee_ids)
+                corrected_count = len(corrected_ids)
+                
+                if corrected_count > 0:
+                    logger.info(
+                        f"Auto-corrected {corrected_count} committee ID(s). "
+                        f"Examples: {list(corrected_ids.items())[:5]}"
+                    )
+                
+                if invalid_count > 0:
+                    logger.warning(
+                        f"Found {invalid_count} uncorrectable invalid committee ID(s) from {len(all_committee_ids)} total. "
+                        f"Invalid IDs (first 10): {invalid_committee_ids[:10]}"
+                    )
+                    # Log all invalid IDs at DEBUG level for investigation
+                    logger.debug(f"All invalid committee IDs: {invalid_committee_ids}")
+                
+                if not valid_committee_ids:
+                    logger.debug("No valid committee IDs found in contributions")
+                    return
+                
+                logger.info(f"Found {len(valid_committee_ids)} unique valid committee IDs in contributions")
+                
+                # If we have corrections, update the database with corrected IDs
+                if corrected_ids:
+                    logger.info(f"Updating {len(corrected_ids)} contributions with corrected committee IDs")
+                    for original_id, corrected_id in corrected_ids.items():
+                        try:
+                            # Update all contributions with the invalid ID to use the corrected ID
+                            result = await session.execute(
+                                text("""
+                                    UPDATE contributions 
+                                    SET committee_id = :corrected_id 
+                                    WHERE committee_id = :original_id
+                                """),
+                                {"corrected_id": corrected_id, "original_id": original_id}
+                            )
+                            updated_count = result.rowcount
+                            if updated_count > 0:
+                                logger.debug(f"Updated {updated_count} contributions: '{original_id}' -> '{corrected_id}'")
+                        except Exception as e:
+                            logger.warning(f"Error updating committee ID '{original_id}' to '{corrected_id}': {e}")
+                    
+                    await session.commit()
+                    logger.info(f"Successfully updated {len(corrected_ids)} committee ID corrections in database")
                 
                 # Check which committees we already have
                 existing_result = await session.execute(
                     select(Committee.committee_id).where(
-                        Committee.committee_id.in_(committee_ids)
+                        Committee.committee_id.in_(valid_committee_ids)
                     )
                 )
                 existing_ids = {row[0] for row in existing_result}
-                missing_ids = [cid for cid in committee_ids if cid not in existing_ids]
+                missing_ids = [cid for cid in valid_committee_ids if cid not in existing_ids]
                 
                 if missing_ids:
                     logger.info(f"Fetching {len(missing_ids)} missing committees from API")
@@ -848,7 +1231,7 @@ class BulkDataService:
         if use_fec_api:
             try:
                 fec_available_cycles = await self.get_available_cycles_from_fec()
-                logger.info(f"FEC API check found {len(fec_available_cycles)} available cycles")
+                # Log is handled inside get_available_cycles_from_fec() to distinguish cache hits from API calls
             except Exception as e:
                 logger.warning(f"Failed to check FEC API for available cycles, falling back to default: {e}")
                 # Fall back to generating all even years
@@ -899,7 +1282,8 @@ class BulkDataService:
         data_type: DataType,
         cycle: int,
         job_id: Optional[str] = None,
-        batch_size: int = 50000
+        batch_size: int = 50000,
+        force_download: bool = False
     ) -> Dict[str, Any]:
         """
         Download and import a specific data type for a cycle
@@ -917,11 +1301,12 @@ class BulkDataService:
                     job_id,
                     status='running',
                     current_cycle=cycle,
+                    data_type=data_type.value,
                     progress_data={"status": "downloading", "cycle": cycle, "data_type": data_type.value}
                 )
             
             # Download file
-            file_path = await self.download_bulk_data_file(data_type, cycle, job_id=job_id)
+            file_path = await self.download_bulk_data_file(data_type, cycle, job_id=job_id, force_download=force_download)
             if not file_path:
                 error_msg = f"Failed to download {data_type.value} for cycle {cycle}"
                 logger.error(error_msg)
@@ -939,14 +1324,31 @@ class BulkDataService:
             if job_id:
                 await self._update_job_progress(
                     job_id,
+                    file_path=file_path,
                     progress_data={"status": "parsing", "cycle": cycle, "data_type": data_type.value}
                 )
             
             # Parse and store
             logger.info(f"Parsing and storing {data_type.value} for cycle {cycle}")
-            record_count = await self.parser.parse_and_store(
-                data_type, file_path, cycle, job_id=job_id, batch_size=batch_size
-            )
+            # Check if we should resume
+            resume = False
+            if job_id:
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(
+                        select(BulkImportJob).where(BulkImportJob.id == job_id)
+                    )
+                    job = result.scalar_one_or_none()
+                    if job and job.file_position > 0:
+                        resume = True
+            
+            if data_type == DataType.INDIVIDUAL_CONTRIBUTIONS:
+                record_count = await self.parse_and_store_csv(
+                    file_path, cycle, job_id=job_id, batch_size=batch_size, resume=resume
+                )
+            else:
+                record_count = await self.parser.parse_and_store(
+                    data_type, file_path, cycle, job_id=job_id, batch_size=batch_size
+                )
             
             # Update metadata
             async with AsyncSessionLocal() as session:
@@ -965,12 +1367,23 @@ class BulkDataService:
                     metadata.file_path = file_path
                     metadata.record_count = record_count
                     metadata.last_updated = datetime.utcnow()
+                    # file_size should already be set during download, but update if missing
+                    if metadata.file_size is None:
+                        # Try to get file size from downloaded file
+                        if Path(file_path).exists():
+                            metadata.file_size = Path(file_path).stat().st_size
                 else:
+                    # Get file size from downloaded file if not already set
+                    file_size = None
+                    if Path(file_path).exists():
+                        file_size = Path(file_path).stat().st_size
+                    
                     metadata = BulkDataMetadata(
                         cycle=cycle,
                         data_type=data_type.value,
                         download_date=datetime.utcnow(),
                         file_path=file_path,
+                        file_size=file_size,
                         record_count=record_count,
                         last_updated=datetime.utcnow()
                     )
@@ -1058,6 +1471,98 @@ class BulkDataService:
             logger.info(f"Cleared {deleted_count} contributions from database")
             return deleted_count
     
+    async def clear_all_data(self) -> Dict[str, int]:
+        """Clear all data from the database (contributions, committees, candidates, etc.)
+        
+        Returns:
+            Dictionary with counts of deleted records per table
+        """
+        async with AsyncSessionLocal() as session:
+            from sqlalchemy import delete
+            from app.db.database import (
+                Contribution, Committee, Candidate, FinancialTotal,
+                BulkDataMetadata, BulkImportJob, IndependentExpenditure,
+                OperatingExpenditure, CandidateSummary, CommitteeSummary,
+                ElectioneeringComm, CommunicationCost
+            )
+            
+            deleted_counts = {}
+            
+            try:
+                # Clear in order to respect foreign key constraints
+                # Start with dependent tables first
+                logger.info("Clearing all data from database...")
+                
+                # Clear contributions
+                result = await session.execute(delete(Contribution))
+                deleted_counts['contributions'] = result.rowcount
+                logger.info(f"Cleared {result.rowcount} contributions")
+                
+                # Clear financial totals
+                result = await session.execute(delete(FinancialTotal))
+                deleted_counts['financial_totals'] = result.rowcount
+                logger.info(f"Cleared {result.rowcount} financial totals")
+                
+                # Clear independent expenditures
+                result = await session.execute(delete(IndependentExpenditure))
+                deleted_counts['independent_expenditures'] = result.rowcount
+                logger.info(f"Cleared {result.rowcount} independent expenditures")
+                
+                # Clear operating expenditures
+                result = await session.execute(delete(OperatingExpenditure))
+                deleted_counts['operating_expenditures'] = result.rowcount
+                logger.info(f"Cleared {result.rowcount} operating expenditures")
+                
+                # Clear candidate summaries
+                result = await session.execute(delete(CandidateSummary))
+                deleted_counts['candidate_summaries'] = result.rowcount
+                logger.info(f"Cleared {result.rowcount} candidate summaries")
+                
+                # Clear committee summaries
+                result = await session.execute(delete(CommitteeSummary))
+                deleted_counts['committee_summaries'] = result.rowcount
+                logger.info(f"Cleared {result.rowcount} committee summaries")
+                
+                # Clear electioneering communications
+                result = await session.execute(delete(ElectioneeringComm))
+                deleted_counts['electioneering_comm'] = result.rowcount
+                logger.info(f"Cleared {result.rowcount} electioneering communications")
+                
+                # Clear communication costs
+                result = await session.execute(delete(CommunicationCost))
+                deleted_counts['communication_costs'] = result.rowcount
+                logger.info(f"Cleared {result.rowcount} communication costs")
+                
+                # Clear committees (after clearing dependent data)
+                result = await session.execute(delete(Committee))
+                deleted_counts['committees'] = result.rowcount
+                logger.info(f"Cleared {result.rowcount} committees")
+                
+                # Clear candidates (after clearing dependent data)
+                result = await session.execute(delete(Candidate))
+                deleted_counts['candidates'] = result.rowcount
+                logger.info(f"Cleared {result.rowcount} candidates")
+                
+                # Clear bulk data metadata
+                result = await session.execute(delete(BulkDataMetadata))
+                deleted_counts['bulk_data_metadata'] = result.rowcount
+                logger.info(f"Cleared {result.rowcount} bulk data metadata records")
+                
+                # Clear import jobs (optional - you might want to keep history)
+                result = await session.execute(delete(BulkImportJob))
+                deleted_counts['import_jobs'] = result.rowcount
+                logger.info(f"Cleared {result.rowcount} import jobs")
+                
+                await session.commit()
+                logger.info("Successfully cleared all data from database")
+                
+                return deleted_counts
+                
+            except Exception as e:
+                await session.rollback()
+                logger.error(f"Error clearing database: {e}", exc_info=True)
+                raise
+    
     async def _update_job_progress(
         self,
         job_id: str,
@@ -1067,6 +1572,9 @@ class BulkDataService:
         total_chunks: Optional[int] = None,
         imported_records: Optional[int] = None,
         skipped_records: Optional[int] = None,
+        file_position: Optional[int] = None,
+        data_type: Optional[str] = None,
+        file_path: Optional[str] = None,
         error_message: Optional[str] = None,
         completed_at: Optional[datetime] = None,
         progress_data: Optional[Dict] = None
@@ -1092,6 +1600,12 @@ class BulkDataService:
                         job.imported_records = imported_records
                     if skipped_records is not None:
                         job.skipped_records = skipped_records
+                    if file_position is not None:
+                        job.file_position = file_position
+                    if data_type:
+                        job.data_type = data_type
+                    if file_path:
+                        job.file_path = file_path
                     if error_message:
                         job.error_message = error_message
                     if completed_at:
@@ -1139,6 +1653,73 @@ class BulkDataService:
                     await session.commit()
         except Exception as e:
             logger.warning(f"Error updating download progress: {e}")
+    
+    async def get_incomplete_jobs(self) -> List[BulkImportJob]:
+        """Get all incomplete import jobs (running or failed)"""
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(BulkImportJob).where(
+                    BulkImportJob.status.in_(['running', 'pending'])
+                ).order_by(BulkImportJob.started_at.desc())
+            )
+            return list(result.scalars().all())
+    
+    async def resume_job(self, job_id: str) -> bool:
+        """Resume an incomplete import job
+        
+        Returns True if job was resumed, False if job not found or not resumable
+        """
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(BulkImportJob).where(BulkImportJob.id == job_id)
+            )
+            job = result.scalar_one_or_none()
+            
+            if not job:
+                logger.warning(f"Job {job_id} not found")
+                return False
+            
+            if job.status not in ['running', 'pending', 'failed']:
+                logger.warning(f"Job {job_id} is in status {job.status}, cannot resume")
+                return False
+            
+            if not job.file_path or not os.path.exists(job.file_path):
+                logger.warning(f"Job {job_id} file path {job.file_path} does not exist, cannot resume")
+                return False
+            
+            if not job.data_type:
+                logger.warning(f"Job {job_id} has no data_type, cannot resume")
+                return False
+            
+            # Resume the job
+            logger.info(f"Resuming job {job_id}: {job.data_type} for cycle {job.cycle}")
+            job.status = 'running'
+            await session.commit()
+            
+            # Start the import in background
+            try:
+                if job.data_type == 'individual_contributions':
+                    await self.parse_and_store_csv(
+                        job.file_path,
+                        job.cycle,
+                        job_id=job_id,
+                        resume=True
+                    )
+                else:
+                    # For other data types, use the parser
+                    data_type_enum = DataType(job.data_type)
+                    await self.parser.parse_and_store(
+                        data_type_enum,
+                        job.file_path,
+                        job.cycle,
+                        job_id=job_id,
+                        resume=True
+                    )
+                return True
+            except Exception as e:
+                logger.error(f"Error resuming job {job_id}: {e}", exc_info=True)
+                await self._update_job_progress(job_id, status='failed', error_message=str(e))
+                return False
     
     async def create_job(
         self,
@@ -1262,13 +1843,14 @@ class BulkDataService:
         self,
         cycle: int,
         data_types: List[DataType],
-        job_id: Optional[str] = None
+        job_id: Optional[str] = None,
+        force_download: bool = False
     ) -> Dict[str, Any]:
         """Import multiple data types for a cycle"""
         results = {}
         for data_type in data_types:
             try:
-                result = await self.download_and_import_data_type(data_type, cycle, job_id=job_id)
+                result = await self.download_and_import_data_type(data_type, cycle, job_id=job_id, force_download=force_download)
                 results[data_type.value] = result
             except Exception as e:
                 logger.error(f"Error importing {data_type.value} for cycle {cycle}: {e}", exc_info=True)

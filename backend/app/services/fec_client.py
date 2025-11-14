@@ -2,7 +2,7 @@ import httpx
 import asyncio
 import os
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
 from app.api.dependencies import get_fec_api_key, get_fec_api_base_url
 from app.db.database import (
@@ -16,11 +16,30 @@ from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
+# Module-level cache for contact info checks (prevents duplicate API calls)
+# Maps candidate_id -> (has_contact_info: bool, checked_at: datetime)
+_contact_info_check_cache: Dict[str, Tuple[bool, datetime]] = {}
+_contact_info_check_cache_ttl = 300  # 5 minutes
+_contact_info_check_cache_lock = asyncio.Lock()
+
 class FECClient:
     """Client for interacting with OpenFEC API with caching and rate limiting"""
     
-    def __init__(self):
-        self.api_key = get_fec_api_key()
+    def __init__(self, api_key: Optional[str] = None):
+        """
+        Initialize FEC client.
+        
+        Args:
+            api_key: Optional API key. If not provided, will be fetched from database or environment on first use.
+        """
+        if api_key:
+            self.api_key = api_key
+            self._api_key_pending = False
+        else:
+            # Will be fetched asynchronously on first API call
+            self.api_key = None
+            self._api_key_pending = True
+        
         self.base_url = get_fec_api_base_url()
         self.client = httpx.AsyncClient(timeout=30.0)
         self.rate_limit_delay = 0.5  # 500ms between requests (slower to avoid rate limits)
@@ -44,6 +63,11 @@ class FECClient:
             "expenditures": int(os.getenv("CACHE_TTL_EXPENDITURES_HOURS", "24")),  # 24 hours
             "default": int(os.getenv("CACHE_TTL_HOURS", "24")),  # 24 hours default
         }
+        
+        # Lookback window for catching late-filed contributions (in days)
+        # FEC allows late filings and amendments, so we fetch contributions from
+        # (latest_date - lookback_days) to catch any that were filed late
+        self.contribution_lookback_days = int(os.getenv("CONTRIBUTION_LOOKBACK_DAYS", "30"))  # 30 days default
     
     def _get_semaphore(self):
         """Get or create the semaphore for limiting concurrent requests"""
@@ -66,41 +90,48 @@ class FECClient:
     
     async def _get_from_cache(self, cache_key: str) -> Optional[Dict]:
         """Retrieve data from cache if not expired"""
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(APICache).where(
-                    APICache.cache_key == cache_key,
-                    APICache.expires_at > datetime.utcnow()
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(APICache).where(
+                        APICache.cache_key == cache_key,
+                        APICache.expires_at > datetime.utcnow()
+                    )
                 )
-            )
-            cache_entry = result.scalar_one_or_none()
-            if cache_entry:
-                return cache_entry.response_data
-        return None
+                cache_entry = result.scalar_one_or_none()
+                if cache_entry:
+                    return cache_entry.response_data
+            return None
+        except Exception as e:
+            logger.debug(f"Error getting from cache: {e}")
+            return None
     
     async def _save_to_cache(self, cache_key: str, data: Dict, ttl_hours: int = 24):
         """Save response to cache"""
-        async with AsyncSessionLocal() as session:
-            expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
-            cache_entry = APICache(
-                cache_key=cache_key,
-                response_data=data,
-                expires_at=expires_at
-            )
-            session.add(cache_entry)
-            try:
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                # If entry exists, update it
-                result = await session.execute(
-                    select(APICache).where(APICache.cache_key == cache_key)
+        try:
+            async with AsyncSessionLocal() as session:
+                expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
+                cache_entry = APICache(
+                    cache_key=cache_key,
+                    response_data=data,
+                    expires_at=expires_at
                 )
-                existing = result.scalar_one_or_none()
-                if existing:
-                    existing.response_data = data
-                    existing.expires_at = expires_at
+                session.add(cache_entry)
+                try:
                     await session.commit()
+                except Exception:
+                    await session.rollback()
+                    # If entry exists, update it
+                    result = await session.execute(
+                        select(APICache).where(APICache.cache_key == cache_key)
+                    )
+                    existing = result.scalar_one_or_none()
+                    if existing:
+                        existing.response_data = data
+                        existing.expires_at = expires_at
+                        await session.commit()
+        except Exception as e:
+            logger.debug(f"Error saving to cache: {e}")
     
     def _get_cache_ttl(self, endpoint: str) -> int:
         """Get appropriate cache TTL for endpoint type"""
@@ -116,6 +147,12 @@ class FECClient:
             return self.cache_ttls["expenditures"]
         return self.cache_ttls["default"]
     
+    async def _ensure_api_key(self):
+        """Ensure API key is loaded (for async initialization)"""
+        if self.api_key is None or getattr(self, '_api_key_pending', False):
+            self.api_key = await get_fec_api_key()
+            self._api_key_pending = False
+    
     async def _make_request(
         self, 
         endpoint: str, 
@@ -126,6 +163,9 @@ class FECClient:
         data_type: Optional[str] = None
     ) -> Dict:
         """Make API request with caching, rate limit handling, and request deduplication"""
+        # Ensure API key is loaded before using it
+        await self._ensure_api_key()
+        
         # Add API key to params
         params["api_key"] = self.api_key
         # FEC API requires per_page to be between 1 and 100
@@ -161,19 +201,25 @@ class FECClient:
             # Stale-while-revalidate: return cached data immediately if available
             if cached_data:
                 # Check if cache is stale but not expired (for background refresh)
-                async with AsyncSessionLocal() as session:
-                    result = await session.execute(
-                        select(APICache).where(APICache.cache_key == cache_key)
-                    )
-                    cache_entry = result.scalar_one_or_none()
-                    if cache_entry:
-                        # If cache is more than 50% expired, refresh in background
-                        age = (datetime.utcnow() - cache_entry.created_at).total_seconds()
-                        ttl_seconds = cache_ttl * 3600
-                        if age > ttl_seconds * 0.5:
-                            # Trigger background refresh (don't wait)
-                            asyncio.create_task(self._refresh_cache_in_background(endpoint, params, cache_key, cache_ttl))
+                try:
+                    async with AsyncSessionLocal() as session:
+                        result = await session.execute(
+                            select(APICache).where(APICache.cache_key == cache_key)
+                        )
+                        cache_entry = result.scalar_one_or_none()
+                        if cache_entry:
+                            # If cache is more than 50% expired, refresh in background
+                            age = (datetime.utcnow() - cache_entry.created_at).total_seconds()
+                            ttl_seconds = cache_ttl * 3600
+                            if age > ttl_seconds * 0.5:
+                                # Trigger background refresh (don't wait)
+                                asyncio.create_task(self._refresh_cache_in_background(endpoint, params, cache_key, cache_ttl))
+                except Exception as e:
+                    logger.debug(f"Error checking cache staleness: {e}")
                 return cached_data
+        
+        # Ensure API key is loaded
+        await self._ensure_api_key()
         
         # Create request task for deduplication
         async def _do_request():
@@ -422,7 +468,16 @@ class FECClient:
                             "state": c.state,
                             "district": c.district,
                             "election_years": c.election_years or [],
-                            "active_through": c.active_through
+                            "active_through": c.active_through,
+                            # Include contact information for offline use
+                            "street_address": c.street_address,
+                            "city": c.city,
+                            "zip": c.zip,
+                            "email": c.email,
+                            "phone": c.phone,
+                            "website": c.website,
+                            # Include timestamp of when contact info was last updated
+                            "contact_info_updated_at": c.updated_at.isoformat() if c.updated_at else None
                         }
                         if c.raw_data:
                             candidate_dict.update(c.raw_data)
@@ -647,7 +702,16 @@ class FECClient:
                         "state": candidate.state,
                         "district": candidate.district,
                         "election_years": candidate.election_years or [],
-                        "active_through": candidate.active_through
+                        "active_through": candidate.active_through,
+                        # Include contact information for offline use
+                        "street_address": candidate.street_address,
+                        "city": candidate.city,
+                        "zip": candidate.zip,
+                        "email": candidate.email,
+                        "phone": candidate.phone,
+                        "website": candidate.website,
+                        # Include timestamp of when contact info was last updated
+                        "contact_info_updated_at": candidate.updated_at.isoformat() if candidate.updated_at else None
                     }
                     if candidate.raw_data:
                         candidate_dict.update(candidate.raw_data)
@@ -947,6 +1011,9 @@ class FECClient:
                 result = await session.execute(query)
                 contributions = result.scalars().all()
                 
+                # Log how many contributions were found
+                logger.debug(f"Database query found {len(contributions)} contributions for candidate_id={candidate_id}, limit={limit}")
+                
                 if contributions:
                     # Convert to dict format matching API response
                     result_list = []
@@ -967,14 +1034,17 @@ class FECClient:
                                         continue
                         
                         # Try to get candidate_id from raw_data if missing
-                        candidate_id = c.candidate_id
-                        if not candidate_id and c.raw_data and isinstance(c.raw_data, dict):
-                            candidate_id = c.raw_data.get('CAND_ID') or c.raw_data.get('candidate_id')
+                        contrib_candidate_id = c.candidate_id
+                        if not contrib_candidate_id and c.raw_data and isinstance(c.raw_data, dict):
+                            contrib_candidate_id = c.raw_data.get('CAND_ID') or c.raw_data.get('candidate_id')
+                        
+                        # Use the candidate_id from the contribution, or fall back to query parameter
+                        final_candidate_id = contrib_candidate_id or candidate_id
                         
                         contrib_dict = {
                             "sub_id": c.contribution_id,
                             "contribution_id": c.contribution_id,
-                            "candidate_id": candidate_id,
+                            "candidate_id": final_candidate_id,
                             "committee_id": c.committee_id,
                             "contributor_name": c.contributor_name,
                             "contributor_city": c.contributor_city,
@@ -1023,6 +1093,7 @@ class FECClient:
         # Try local database first if bulk data is enabled
         if self.bulk_data_enabled:
             try:
+                # First, try querying by candidate_id directly
                 local_data = await self._query_local_contributions(
                     candidate_id=candidate_id,
                     committee_id=committee_id,
@@ -1035,8 +1106,46 @@ class FECClient:
                     two_year_transaction_period=two_year_transaction_period
                 ) or []
                 
+                # If we have a candidate_id but no committee_id, also query by committees
+                # Many contributions in bulk data are linked via committee_id, not candidate_id
+                if candidate_id and not committee_id and len(local_data) < limit:
+                    try:
+                        # Get committees for this candidate
+                        committees = await self.get_committees(candidate_id=candidate_id, limit=100)
+                        if committees:
+                            # Query contributions for each committee and merge
+                            committee_ids = [c.get('committee_id') for c in committees if c.get('committee_id')]
+                            for comm_id in committee_ids[:50]:  # Limit to avoid too many queries
+                                if len(local_data) >= limit:
+                                    break
+                                committee_contribs = await self._query_local_contributions(
+                                    committee_id=comm_id,
+                                    contributor_name=contributor_name,
+                                    min_amount=min_amount,
+                                    max_amount=max_amount,
+                                    min_date=min_date,
+                                    max_date=max_date,
+                                    limit=limit - len(local_data),
+                                    two_year_transaction_period=two_year_transaction_period
+                                ) or []
+                                
+                                # Merge, avoiding duplicates and ONLY including contributions that match the candidate_id
+                                existing_ids = {c.get('contribution_id') or c.get('sub_id') for c in local_data}
+                                for contrib in committee_contribs:
+                                    contrib_id = contrib.get('contribution_id') or contrib.get('sub_id')
+                                    if contrib_id and contrib_id not in existing_ids:
+                                        # Only include if candidate_id matches or is missing (will be set to requested candidate_id)
+                                        contrib_candidate_id = contrib.get('candidate_id')
+                                        if not contrib_candidate_id or contrib_candidate_id == candidate_id:
+                                            if not contrib.get('candidate_id'):
+                                                contrib['candidate_id'] = candidate_id
+                                            local_data.append(contrib)
+                                            existing_ids.add(contrib_id)
+                    except Exception as e:
+                        logger.debug(f"Error querying contributions by committees: {e}")
+                
                 if local_data:
-                    logger.debug(f"Found {len(local_data)} contributions in local database")
+                    logger.debug(f"Found {len(local_data)} contributions in local database (after committee queries)")
                     
                     # If we have local data and fetch_new_only is True, determine latest date
                     # to only fetch new contributions from API
@@ -1048,17 +1157,23 @@ class FECClient:
                         )
                         
                         if latest_db_date:
-                            # Fetch contributions from the latest date (inclusive) to catch any we might have missed
+                            # Fetch contributions with a lookback window to catch late-filed contributions
+                            # FEC allows committees to file late or amend previous filings, so contributions
+                            # with earlier dates may appear in the API after we've already fetched newer ones.
+                            # The lookback window ensures we catch these late-filed contributions.
                             # The database's unique constraint on contribution_id will handle deduplication
-                            # This ensures we catch all contributions from the latest date, even if someone
-                            # contributed multiple times that day
-                            new_min_date = latest_db_date.strftime("%Y-%m-%d")
+                            # and amendments (updated data for same contribution_id).
+                            lookback_date = latest_db_date - timedelta(days=self.contribution_lookback_days)
+                            new_min_date = lookback_date.strftime("%Y-%m-%d")
+                            
                             if not min_date or new_min_date >= min_date:
                                 min_date = new_min_date
-                                logger.info(f"Fetching contributions from {min_date} onwards (latest in DB: {latest_db_date.strftime('%Y-%m-%d')}) "
-                                          f"- duplicates will be automatically skipped via contribution_id")
+                                logger.info(f"Fetching contributions from {min_date} onwards "
+                                          f"(latest in DB: {latest_db_date.strftime('%Y-%m-%d')}, "
+                                          f"lookback: {self.contribution_lookback_days} days) "
+                                          f"- duplicates and amendments will be handled via contribution_id")
                             else:
-                                logger.debug(f"User-specified min_date {min_date} is earlier than latest DB date, fetching all requested data")
+                                logger.debug(f"User-specified min_date {min_date} is earlier than calculated lookback date, fetching all requested data")
                         else:
                             logger.debug("No latest date found in database, will fetch all contributions")
                     
@@ -1077,25 +1192,44 @@ class FECClient:
             # If only candidate_id is provided, we need to get committees first
             # or provide two_year_transaction_period
             if candidate_id and not committee_id and not two_year_transaction_period:
+                # Try to determine the appropriate cycle from candidate's election years
+                candidate = await self.get_candidate(candidate_id)
+                if candidate and candidate.get('election_years'):
+                    # Use the most recent election year as the cycle
+                    # For FEC, the cycle is the election year itself
+                    election_years = candidate.get('election_years', [])
+                    if election_years:
+                        # Get the most recent election year
+                        most_recent_election = max(election_years)
+                        # For FEC API, two_year_transaction_period should be the election year
+                        two_year_transaction_period = most_recent_election
+                        logger.debug(f"Using election year {most_recent_election} as cycle for candidate {candidate_id}")
+                
                 # Get committees for the candidate to use committee_id filter
                 committees = await self.get_committees(candidate_id=candidate_id, limit=100)
+                logger.debug(f"Found {len(committees) if committees else 0} committees for candidate {candidate_id}, cycle {two_year_transaction_period}")
             
             if committees and len(committees) > 0:
                 # Query contributions for each committee and combine
                 all_contributions = []
-                # Get current election cycle for two_year_transaction_period (must be even year)
-                current_year = datetime.now().year
-                # Round down to nearest even year
-                default_cycle = (current_year // 2) * 2
+                # Use determined cycle or fallback to current election cycle
+                if not two_year_transaction_period:
+                    current_year = datetime.now().year
+                    # Round down to nearest even year
+                    two_year_transaction_period = (current_year // 2) * 2
                 
-                for committee in committees[:10]:  # Limit to first 10 committees to avoid too many requests
+                # Query all committees, but limit per-committee requests to avoid rate limits
+                # For large limits, we'll query more committees
+                max_committees = 50 if limit > 1000 else 10
+                for committee in committees[:max_committees]:
                     comm_id = committee.get('committee_id')
                     if comm_id:
                         params = {
                             "per_page": 100,  # FEC API max is 100
                             "sort": "-contribution_receipt_date",
                             "committee_id": comm_id,
-                            "two_year_transaction_period": two_year_transaction_period or default_cycle
+                            "two_year_transaction_period": two_year_transaction_period,
+                            "_original_limit": limit  # Store original limit for pagination
                         }
                         if contributor_name:
                             params["contributor_name"] = contributor_name
@@ -1109,13 +1243,18 @@ class FECClient:
                             params["max_date"] = max_date
                         
                         try:
+                            logger.debug(f"Querying contributions for committee {comm_id} with cycle {two_year_transaction_period}")
                             data = await self._make_request("schedules/schedule_a", params)
                             committee_contribs = data.get("results", [])
+                            logger.debug(f"API returned {len(committee_contribs)} contributions for committee {comm_id}")
                             
                             # Store contributions in database for caching
                             if committee_contribs:
                                 logger.debug(f"Storing {len(committee_contribs)} contributions from committee {comm_id} in database")
                                 for contrib in committee_contribs:
+                                    # Ensure candidate_id is set when storing contributions fetched via committee
+                                    if candidate_id and not contrib.get('candidate_id'):
+                                        contrib['candidate_id'] = candidate_id
                                     asyncio.create_task(self._store_contribution(contrib))
                             
                             # Merge with local data, avoiding duplicates
@@ -1126,7 +1265,10 @@ class FECClient:
                                     all_contributions.append(contrib)
                                     existing_ids.add(contrib_id)
                             
-                            if len(all_contributions) >= limit:
+                            # Continue querying committees until we have enough contributions
+                            # Don't break early - we want to get all contributions across all committees
+                            if len(all_contributions) >= limit * 2:  # Get extra to account for duplicates
+                                logger.debug(f"Collected {len(all_contributions)} contributions, stopping committee queries")
                                 break
                         except Exception:
                             continue  # Skip if this committee fails
@@ -1155,10 +1297,23 @@ class FECClient:
                 return all_contributions[:limit]
             else:
                 # No committees found, try with two_year_transaction_period
-                # Use current election cycle (must be even year)
-                current_year = datetime.now().year
-                # Round down to nearest even year
-                two_year_transaction_period = (current_year // 2) * 2
+                logger.debug(f"No committees found for candidate {candidate_id}, trying direct API query")
+                # If we haven't determined it from candidate yet, try to get it
+                if not two_year_transaction_period and candidate_id:
+                    candidate = await self.get_candidate(candidate_id)
+                    if candidate and candidate.get('election_years'):
+                        election_years = candidate.get('election_years', [])
+                        if election_years:
+                            most_recent_election = max(election_years)
+                            two_year_transaction_period = most_recent_election
+                            logger.debug(f"Using election year {most_recent_election} as cycle for candidate {candidate_id}")
+                
+                # Fallback to current election cycle if still not set
+                if not two_year_transaction_period:
+                    current_year = datetime.now().year
+                    # Round down to nearest even year
+                    two_year_transaction_period = (current_year // 2) * 2
+                    logger.debug(f"Using default cycle {two_year_transaction_period} for candidate {candidate_id}")
             
             params = {
                 "per_page": 100,  # FEC API max is 100, pagination will handle more
@@ -1167,11 +1322,10 @@ class FECClient:
             }
             
             # Always add two_year_transaction_period if not provided (must be even year)
-            current_year = datetime.now().year
-            # Round down to nearest even year
-            default_cycle = (current_year // 2) * 2
             if not two_year_transaction_period:
-                two_year_transaction_period = default_cycle
+                current_year = datetime.now().year
+                # Round down to nearest even year
+                two_year_transaction_period = (current_year // 2) * 2
             
             # Add two_year_transaction_period - API requires it for schedule_a
             params["two_year_transaction_period"] = two_year_transaction_period
@@ -1191,14 +1345,19 @@ class FECClient:
             if max_date:
                 params["max_date"] = max_date
             
+            logger.debug(f"Querying contributions directly with candidate_id={candidate_id}, cycle={two_year_transaction_period}")
             data = await self._make_request("schedules/schedule_a", params)
             api_results = data.get("results", [])
+            logger.debug(f"Direct API query returned {len(api_results)} contributions for candidate {candidate_id}")
             
             # Store new contributions in database for caching
             if api_results:
                 logger.info(f"Storing {len(api_results)} new contributions from API in database")
                 # Store contributions asynchronously to avoid blocking
                 for contrib in api_results:
+                    # Ensure candidate_id is set when storing contributions
+                    if candidate_id and not contrib.get('candidate_id'):
+                        contrib['candidate_id'] = candidate_id
                     asyncio.create_task(self._store_contribution(contrib))
             
             # Merge local and API results, avoiding duplicates
@@ -1366,7 +1525,16 @@ class FECClient:
                             "committee_type_full": c.committee_type_full,
                             "candidate_ids": c.candidate_ids or [],
                             "party": c.party,
-                            "state": c.state
+                            "state": c.state,
+                            # Include contact information for offline use
+                            "street_address": c.street_address,
+                            "street_address_2": c.street_address_2,
+                            "city": c.city,
+                            "zip": c.zip,
+                            "email": c.email,
+                            "phone": c.phone,
+                            "website": c.website,
+                            "treasurer_name": c.treasurer_name
                         }
                         if c.raw_data:
                             committee_dict.update(c.raw_data)
@@ -1444,7 +1612,11 @@ class FECClient:
                                 pass
                         
                         if existing_contrib:
-                            # Update existing contribution if data is newer or more complete
+                            # Update existing contribution - this handles amendments to previous filings
+                            # FEC allows committees to amend filings, which may update contribution details
+                            # We always update to ensure we have the most current information
+                            
+                            # Always update these fields if new data is available (amendments may correct them)
                             if contrib_name:
                                 existing_contrib.contributor_name = contrib_name
                             if amount > 0:
@@ -1452,25 +1624,32 @@ class FECClient:
                             if contrib_date:
                                 existing_contrib.contribution_date = contrib_date
                             
-                            # Update other fields if they're missing
-                            if not existing_contrib.contributor_city and contribution_data.get('contributor_city'):
+                            # Update other fields - prefer new data over existing (handles amendments)
+                            if contribution_data.get('contributor_city'):
                                 existing_contrib.contributor_city = contribution_data.get('contributor_city')
-                            if not existing_contrib.contributor_state and contribution_data.get('contributor_state'):
+                            if contribution_data.get('contributor_state'):
                                 existing_contrib.contributor_state = contribution_data.get('contributor_state')
-                            if not existing_contrib.contributor_zip and contribution_data.get('contributor_zip'):
+                            if contribution_data.get('contributor_zip'):
                                 existing_contrib.contributor_zip = contribution_data.get('contributor_zip')
-                            if not existing_contrib.contributor_employer and contribution_data.get('contributor_employer'):
+                            if contribution_data.get('contributor_employer'):
                                 existing_contrib.contributor_employer = contribution_data.get('contributor_employer')
-                            if not existing_contrib.contributor_occupation and contribution_data.get('contributor_occupation'):
+                            if contribution_data.get('contributor_occupation'):
                                 existing_contrib.contributor_occupation = contribution_data.get('contributor_occupation')
-                            if not existing_contrib.candidate_id and contribution_data.get('candidate_id'):
+                            if contribution_data.get('candidate_id'):
                                 existing_contrib.candidate_id = contribution_data.get('candidate_id')
-                            if not existing_contrib.committee_id and contribution_data.get('committee_id'):
+                            if contribution_data.get('committee_id'):
                                 existing_contrib.committee_id = contribution_data.get('committee_id')
+                            if contribution_data.get('contribution_type') or contribution_data.get('transaction_type'):
+                                existing_contrib.contribution_type = (
+                                    contribution_data.get('contribution_type') or 
+                                    contribution_data.get('transaction_type')
+                                )
                             
-                            # Update raw_data to preserve all original fields
+                            # Always update raw_data to preserve the most recent version (may contain amendments)
                             if contribution_data:
                                 existing_contrib.raw_data = contribution_data
+                            
+                            logger.debug(f"Updated existing contribution {contrib_id} (may be an amendment)")
                         else:
                             # Create new contribution
                             contribution = Contribution(
@@ -1832,9 +2011,35 @@ class FECClient:
     async def refresh_candidate_contact_info_if_needed(
         self,
         candidate_id: str,
-        stale_threshold_days: int = 30
+        force_refresh: bool = False
     ) -> bool:
         """Refresh candidate contact info from API if missing or stale"""
+        global _contact_info_check_cache
+        
+        # Check short-term cache first to prevent duplicate API calls (skip if force_refresh)
+        now = datetime.utcnow()
+        if not force_refresh:
+            async with _contact_info_check_cache_lock:
+                # Clean up old cache entries
+                expired_keys = [
+                    k for k, (_, checked_at) in _contact_info_check_cache.items()
+                    if (now - checked_at).total_seconds() > _contact_info_check_cache_ttl
+                ]
+                for k in expired_keys:
+                    del _contact_info_check_cache[k]
+                
+                # Check if we recently checked this candidate
+                if candidate_id in _contact_info_check_cache:
+                    has_contact_info, checked_at = _contact_info_check_cache[candidate_id]
+                    cache_age = (now - checked_at).total_seconds()
+                    if cache_age < _contact_info_check_cache_ttl:
+                        if has_contact_info:
+                            logger.debug(f"Skipping contact info refresh for {candidate_id} (recently checked, has contact info)")
+                            return False
+                        # If we recently checked and it had no contact info, still skip to avoid spam
+                        logger.debug(f"Skipping contact info refresh for {candidate_id} (recently checked, no contact info)")
+                        return False
+        
         try:
             async with AsyncSessionLocal() as session:
                 result = await session.execute(
@@ -1843,9 +2048,13 @@ class FECClient:
                 candidate = result.scalar_one_or_none()
                 
                 if not candidate:
+                    # Cache the negative result
+                    async with _contact_info_check_cache_lock:
+                        _contact_info_check_cache[candidate_id] = (False, now)
                     return False
                 
-                # Check if contact info is missing or stale
+                # Check if contact info already exists (from bulk import or previous API call)
+                # Only refresh if contact info is completely missing
                 has_contact_info = any([
                     candidate.street_address,
                     candidate.city,
@@ -1855,13 +2064,22 @@ class FECClient:
                     candidate.website
                 ])
                 
-                is_stale = False
-                if candidate.updated_at:
-                    cutoff_date = datetime.utcnow() - timedelta(days=stale_threshold_days)
-                    is_stale = candidate.updated_at < cutoff_date
+                # If contact info exists, don't refresh (even if stale) unless force_refresh is True
+                # This preserves contact info from bulk import or previous API calls
+                if has_contact_info and not force_refresh:
+                    # Ensure updated_at is set for tracking purposes
+                    if not candidate.updated_at:
+                        candidate.updated_at = datetime.utcnow()
+                        await session.commit()
+                    # Cache the positive result
+                    async with _contact_info_check_cache_lock:
+                        _contact_info_check_cache[candidate_id] = (True, now)
+                    return False  # Already have contact info, don't refresh
                 
-                if has_contact_info and not is_stale:
-                    return False  # Already has fresh contact info
+                # No contact info - need to fetch from API
+                # Cache that we're checking (prevents concurrent checks)
+                async with _contact_info_check_cache_lock:
+                    _contact_info_check_cache[candidate_id] = (False, now)
                 
                 # Fetch from API
                 params = {}
@@ -1883,6 +2101,19 @@ class FECClient:
                 candidate.updated_at = datetime.utcnow()
                 
                 await session.commit()
+                
+                # Update cache with result
+                has_contact_after_refresh = any([
+                    candidate.street_address,
+                    candidate.city,
+                    candidate.zip,
+                    candidate.email,
+                    candidate.phone,
+                    candidate.website
+                ])
+                async with _contact_info_check_cache_lock:
+                    _contact_info_check_cache[candidate_id] = (has_contact_after_refresh, now)
+                
                 logger.info(f"Refreshed contact info for candidate {candidate_id}")
                 return True
                 
@@ -1893,9 +2124,36 @@ class FECClient:
     async def refresh_committee_contact_info_if_needed(
         self,
         committee_id: str,
-        stale_threshold_days: int = 30
+        stale_threshold_days: int = 14  # Cache for 2 weeks
     ) -> bool:
         """Refresh committee contact info from API if missing or stale"""
+        global _contact_info_check_cache
+        
+        # Check short-term cache first to prevent duplicate API calls
+        # Use same cache but with "committee:" prefix to avoid conflicts
+        cache_key = f"committee:{committee_id}"
+        now = datetime.utcnow()
+        async with _contact_info_check_cache_lock:
+            # Clean up old cache entries
+            expired_keys = [
+                k for k, (_, checked_at) in _contact_info_check_cache.items()
+                if (now - checked_at).total_seconds() > _contact_info_check_cache_ttl
+            ]
+            for k in expired_keys:
+                del _contact_info_check_cache[k]
+            
+            # Check if we recently checked this committee
+            if cache_key in _contact_info_check_cache:
+                has_contact_info, checked_at = _contact_info_check_cache[cache_key]
+                cache_age = (now - checked_at).total_seconds()
+                if cache_age < _contact_info_check_cache_ttl:
+                    if has_contact_info:
+                        logger.debug(f"Skipping contact info refresh for committee {committee_id} (recently checked, has contact info)")
+                        return False
+                    # If we recently checked and it had no contact info, still skip to avoid spam
+                    logger.debug(f"Skipping contact info refresh for committee {committee_id} (recently checked, no contact info)")
+                    return False
+        
         try:
             async with AsyncSessionLocal() as session:
                 result = await session.execute(
@@ -1904,9 +2162,13 @@ class FECClient:
                 committee = result.scalar_one_or_none()
                 
                 if not committee:
+                    # Cache the negative result
+                    async with _contact_info_check_cache_lock:
+                        _contact_info_check_cache[cache_key] = (False, now)
                     return False
                 
-                # Check if contact info is missing or stale
+                # Check if contact info already exists (from bulk import or previous API call)
+                # Only refresh if contact info is completely missing
                 has_contact_info = any([
                     committee.street_address,
                     committee.city,
@@ -1916,13 +2178,22 @@ class FECClient:
                     committee.website
                 ])
                 
-                is_stale = False
-                if committee.updated_at:
-                    cutoff_date = datetime.utcnow() - timedelta(days=stale_threshold_days)
-                    is_stale = committee.updated_at < cutoff_date
+                # If contact info exists, don't refresh (even if stale)
+                # This preserves contact info from bulk import or previous API calls
+                if has_contact_info:
+                    # Ensure updated_at is set for tracking purposes
+                    if not committee.updated_at:
+                        committee.updated_at = datetime.utcnow()
+                        await session.commit()
+                    # Cache the positive result
+                    async with _contact_info_check_cache_lock:
+                        _contact_info_check_cache[cache_key] = (True, now)
+                    return False  # Already have contact info, don't refresh
                 
-                if has_contact_info and not is_stale:
-                    return False  # Already has fresh contact info
+                # No contact info - need to fetch from API
+                # Cache that we're checking (prevents concurrent checks)
+                async with _contact_info_check_cache_lock:
+                    _contact_info_check_cache[cache_key] = (False, now)
                 
                 # Fetch from API
                 params = {}
@@ -1946,6 +2217,19 @@ class FECClient:
                 committee.updated_at = datetime.utcnow()
                 
                 await session.commit()
+                
+                # Update cache with result
+                has_contact_after_refresh = any([
+                    committee.street_address,
+                    committee.city,
+                    committee.zip,
+                    committee.email,
+                    committee.phone,
+                    committee.website
+                ])
+                async with _contact_info_check_cache_lock:
+                    _contact_info_check_cache[cache_key] = (has_contact_after_refresh, now)
+                
                 logger.info(f"Refreshed contact info for committee {committee_id}")
                 return True
                 

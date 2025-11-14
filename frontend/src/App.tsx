@@ -9,6 +9,7 @@ import SavedSearches from './pages/SavedSearches';
 import TrendAnalysis from './pages/TrendAnalysis';
 import CommitteeDetail from './pages/CommitteeDetail';
 import Committees from './pages/Committees';
+import Settings from './pages/Settings';
 import './App.css';
 
 function App() {
@@ -71,6 +72,12 @@ function App() {
                   >
                     Committees
                   </Link>
+                  <Link
+                    to="/settings"
+                    className="text-gray-600 hover:text-gray-900 px-3 py-2 rounded-md text-sm font-medium"
+                  >
+                    Settings
+                  </Link>
                 </div>
               </div>
             </div>
@@ -87,6 +94,7 @@ function App() {
           <Route path="/saved-searches" element={<SavedSearches />} />
           <Route path="/committee/:committeeId" element={<CommitteeDetail />} />
           <Route path="/committees" element={<Committees />} />
+          <Route path="/settings" element={<Settings />} />
         </Routes>
       </div>
     </Router>

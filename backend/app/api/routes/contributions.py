@@ -370,6 +370,18 @@ async def get_aggregated_donors(
             # Only include contributions with a valid name
             if not contrib_name:
                 continue
+            
+            # Extract amount from multiple possible field names (FEC API uses contb_receipt_amt)
+            amount = 0.0
+            for amt_key in ['contb_receipt_amt', 'contribution_amount', 'contribution_receipt_amount', 'amount', 'contribution_receipt_amt']:
+                amt_val = contrib.get(amt_key)
+                if amt_val is not None:
+                    try:
+                        amount = float(amt_val)
+                        # Use the first valid numeric value found, even if it's 0
+                        break
+                    except (ValueError, TypeError):
+                        continue
                 
             contrib_dict = {
                 'contribution_id': contrib.get('contribution_id') or contrib.get('sub_id'),
@@ -379,7 +391,7 @@ async def get_aggregated_donors(
                 'contributor_zip': contrib.get('contributor_zip') or contrib.get('zip'),
                 'contributor_employer': contrib.get('contributor_employer') or contrib.get('employer'),
                 'contributor_occupation': contrib.get('contributor_occupation') or contrib.get('occupation'),
-                'contribution_amount': contrib.get('contribution_amount', 0) or 0,
+                'contribution_amount': amount,
                 'contribution_date': contrib.get('contribution_date') or contrib.get('contribution_receipt_date')
             }
             contrib_dicts.append(contrib_dict)
@@ -412,7 +424,8 @@ async def analyze_contributions(
     candidate_id: Optional[str] = Query(None, description="Candidate ID"),
     committee_id: Optional[str] = Query(None, description="Committee ID"),
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
-    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)")
+    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    cycle: Optional[int] = Query(None, description="Election cycle (two_year_transaction_period)")
 ):
     """Analyze contributions with aggregations"""
     try:
@@ -421,7 +434,8 @@ async def analyze_contributions(
             candidate_id=candidate_id,
             committee_id=committee_id,
             min_date=min_date,
-            max_date=max_date
+            max_date=max_date,
+            cycle=cycle
         )
         return analysis
     except HTTPException:

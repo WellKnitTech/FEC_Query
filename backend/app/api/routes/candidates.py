@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Body
 from typing import Optional, List, Dict
 import asyncio
 from app.services.fec_client import FECClient
-from app.models.schemas import CandidateSummary, FinancialSummary, BatchFinancialsRequest
+from app.models.schemas import CandidateSummary, FinancialSummary, BatchFinancialsRequest, ContactInformation
 from app.services.analysis import AnalysisService
 import logging
 
@@ -51,6 +51,26 @@ async def search_candidates(
         candidates = []
         for candidate in results:
             try:
+                # Build contact information if available
+                contact_info = None
+                if any([
+                    candidate.get("street_address"),
+                    candidate.get("city"),
+                    candidate.get("zip"),
+                    candidate.get("email"),
+                    candidate.get("phone"),
+                    candidate.get("website")
+                ]):
+                    contact_info = ContactInformation(
+                        street_address=candidate.get("street_address"),
+                        city=candidate.get("city"),
+                        state=candidate.get("state"),
+                        zip=candidate.get("zip"),
+                        email=candidate.get("email"),
+                        phone=candidate.get("phone"),
+                        website=candidate.get("website")
+                    )
+                
                 # Map API fields to our schema
                 candidate_data = {
                     "candidate_id": candidate.get("candidate_id", ""),
@@ -60,7 +80,8 @@ async def search_candidates(
                     "state": candidate.get("state"),
                     "district": candidate.get("district"),
                     "election_years": candidate.get("election_years"),
-                    "active_through": candidate.get("active_through")
+                    "active_through": candidate.get("active_through"),
+                    "contact_info": contact_info
                 }
                 candidates.append(CandidateSummary(**candidate_data))
             except Exception as e:
@@ -98,6 +119,26 @@ async def get_race_candidates(
         candidates = []
         for candidate in results:
             try:
+                # Build contact information if available
+                contact_info = None
+                if any([
+                    candidate.get("street_address"),
+                    candidate.get("city"),
+                    candidate.get("zip"),
+                    candidate.get("email"),
+                    candidate.get("phone"),
+                    candidate.get("website")
+                ]):
+                    contact_info = ContactInformation(
+                        street_address=candidate.get("street_address"),
+                        city=candidate.get("city"),
+                        state=candidate.get("state"),
+                        zip=candidate.get("zip"),
+                        email=candidate.get("email"),
+                        phone=candidate.get("phone"),
+                        website=candidate.get("website")
+                    )
+                
                 candidate_data = {
                     "candidate_id": candidate.get("candidate_id", ""),
                     "name": candidate.get("name", candidate.get("candidate_name", "Unknown")),
@@ -106,7 +147,9 @@ async def get_race_candidates(
                     "state": candidate.get("state"),
                     "district": candidate.get("district"),
                     "election_years": candidate.get("election_years"),
-                    "active_through": candidate.get("active_through")
+                    "active_through": candidate.get("active_through"),
+                    "contact_info": contact_info,
+                    "contact_info_updated_at": candidate.get("contact_info_updated_at")
                 }
                 candidates.append(CandidateSummary(**candidate_data))
             except Exception as e:
@@ -130,6 +173,26 @@ async def get_candidate(candidate_id: str):
         if not candidate:
             raise HTTPException(status_code=404, detail="Candidate not found")
         
+        # Build contact information if available
+        contact_info = None
+        if any([
+            candidate.get("street_address"),
+            candidate.get("city"),
+            candidate.get("zip"),
+            candidate.get("email"),
+            candidate.get("phone"),
+            candidate.get("website")
+        ]):
+            contact_info = ContactInformation(
+                street_address=candidate.get("street_address"),
+                city=candidate.get("city"),
+                state=candidate.get("state"),
+                zip=candidate.get("zip"),
+                email=candidate.get("email"),
+                phone=candidate.get("phone"),
+                website=candidate.get("website")
+            )
+        
         # Map API response to our schema
         candidate_data = {
             "candidate_id": candidate.get("candidate_id", candidate_id),
@@ -139,7 +202,9 @@ async def get_candidate(candidate_id: str):
             "state": candidate.get("state"),
             "district": candidate.get("district"),
             "election_years": candidate.get("election_years"),
-            "active_through": candidate.get("active_through")
+            "active_through": candidate.get("active_through"),
+            "contact_info": contact_info,
+            "contact_info_updated_at": candidate.get("contact_info_updated_at")
         }
         return CandidateSummary(**candidate_data)
     except HTTPException:
@@ -147,6 +212,61 @@ async def get_candidate(candidate_id: str):
     except Exception as e:
         logger.error(f"Error getting candidate {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get candidate: {str(e)}")
+
+
+@router.post("/{candidate_id}/refresh-contact-info")
+async def refresh_candidate_contact_info(candidate_id: str):
+    """Manually refresh contact information for a candidate from the FEC API"""
+    try:
+        fec_client = get_fec_client()
+        # Force refresh by bypassing the cache and missing-only check
+        refreshed = await fec_client.refresh_candidate_contact_info_if_needed(
+            candidate_id,
+            force_refresh=True
+        )
+        
+        if refreshed:
+            # Get updated candidate data
+            candidate = await fec_client.get_candidate(candidate_id)
+            if candidate:
+                # Build contact information if available
+                contact_info = None
+                if any([
+                    candidate.get("street_address"),
+                    candidate.get("city"),
+                    candidate.get("zip"),
+                    candidate.get("email"),
+                    candidate.get("phone"),
+                    candidate.get("website")
+                ]):
+                    contact_info = ContactInformation(
+                        street_address=candidate.get("street_address"),
+                        city=candidate.get("city"),
+                        state=candidate.get("state"),
+                        zip=candidate.get("zip"),
+                        email=candidate.get("email"),
+                        phone=candidate.get("phone"),
+                        website=candidate.get("website")
+                    )
+                
+                return {
+                    "success": True,
+                    "message": "Contact information refreshed successfully",
+                    "contact_info": contact_info,
+                    "contact_info_updated_at": candidate.get("contact_info_updated_at")
+                }
+        
+        return {
+            "success": True,
+            "message": "Contact information is up to date",
+            "contact_info": None,
+            "contact_info_updated_at": None
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error refreshing contact info for candidate {candidate_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to refresh contact info: {str(e)}")
 
 
 @router.get("/{candidate_id}/financials", response_model=List[FinancialSummary])
@@ -183,7 +303,15 @@ async def get_candidate_financials(
                 "total_contributions": float(total.get("contributions", 0)),
                 "individual_contributions": float(total.get("individual_contributions", 0)),
                 "pac_contributions": float(total.get("pac_contributions", 0)),
-                "party_contributions": float(total.get("party_contributions", 0))
+                "party_contributions": float(total.get("party_contributions", 0)),
+                "loan_contributions": float(
+                    total.get("loan_contributions", 0) or 
+                    total.get("loans_received", 0) or 
+                    total.get("other_loans_received", 0) or
+                    total.get("loans", 0) or
+                    total.get("other_loans", 0) or
+                    0
+                )
             }
             financials.append(FinancialSummary(**financial_data))
         
@@ -253,7 +381,15 @@ async def get_batch_financials(request: BatchFinancialsRequest):
                     "total_contributions": float(total.get("contributions", 0)),
                     "individual_contributions": float(total.get("individual_contributions", 0)),
                     "pac_contributions": float(total.get("pac_contributions", 0)),
-                    "party_contributions": float(total.get("party_contributions", 0))
+                    "party_contributions": float(total.get("party_contributions", 0)),
+                    "loan_contributions": float(
+                    total.get("loan_contributions", 0) or 
+                    total.get("loans_received", 0) or 
+                    total.get("other_loans_received", 0) or
+                    total.get("loans", 0) or
+                    total.get("other_loans", 0) or
+                    0
+                )
                 }
                 financials.append(FinancialSummary(**financial_data))
             

@@ -9,6 +9,16 @@ const api = axios.create({
   },
 });
 
+export interface ContactInformation {
+  street_address?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  email?: string;
+  phone?: string;
+  website?: string;
+}
+
 export interface Candidate {
   candidate_id: string;
   name: string;
@@ -18,11 +28,13 @@ export interface Candidate {
   district?: string;
   election_years?: number[];
   active_through?: number;
+  contact_info?: ContactInformation;
+  contact_info_updated_at?: string; // ISO format timestamp
 }
 
 export interface FinancialSummary {
   candidate_id: string;
-  cycle: number;
+  cycle?: number;
   total_receipts: number;
   total_disbursements: number;
   cash_on_hand: number;
@@ -111,6 +123,16 @@ export const candidateApi = {
 
   getById: async (candidateId: string): Promise<Candidate> => {
     const response = await api.get(`/api/candidates/${candidateId}`);
+    return response.data;
+  },
+
+  refreshContactInfo: async (candidateId: string): Promise<{
+    success: boolean;
+    message: string;
+    contact_info?: ContactInformation;
+    contact_info_updated_at?: string;
+  }> => {
+    const response = await api.post(`/api/candidates/${candidateId}/refresh-contact-info`);
     return response.data;
   },
 
@@ -204,6 +226,7 @@ export const contributionApi = {
     committee_id?: string;
     min_date?: string;
     max_date?: string;
+    cycle?: number;
   }): Promise<ContributionAnalysis> => {
     const response = await api.get('/api/contributions/analysis', { params });
     return response.data;
@@ -306,6 +329,12 @@ export const fraudApi = {
     return response.data;
   },
 };
+
+export interface ApiKeyStatus {
+  has_key: boolean;
+  key_preview?: string;  // Masked key (e.g., "abcd...xyz1")
+  source: 'ui' | 'env';
+}
 
 export interface IndependentExpenditure {
   expenditure_id?: string;
@@ -503,6 +532,7 @@ export interface DataTypeStatus {
   status: 'imported' | 'not_imported' | 'failed' | 'in_progress';
   record_count: number;
   last_imported_at?: string | null;
+  download_date?: string | null;
   error_message?: string | null;
 }
 
@@ -523,9 +553,9 @@ export const bulkDataApi = {
     return response.data;
   },
 
-  download: async (cycle: number): Promise<{ message: string; cycle: number; job_id: string; status: string }> => {
+  download: async (cycle: number, forceDownload: boolean = false): Promise<{ message: string; cycle: number; job_id: string; status: string }> => {
     const response = await api.post('/api/bulk-data/download', null, {
-      params: { cycle },
+      params: { cycle, force_download: forceDownload },
     });
     return response.data;
   },
@@ -559,14 +589,18 @@ export const bulkDataApi = {
   },
   importMultipleDataTypes: async (
     cycle: number,
-    dataTypes: string[]
+    dataTypes: string[],
+    forceDownload: boolean = false
   ): Promise<{ message: string; data_types: string[]; cycle: number; job_id: string; status: string }> => {
-    const response = await api.post('/api/bulk-data/import-multiple', null, {
-      params: {
-        cycle,
-        data_types: dataTypes,
-      },
-    });
+    // FastAPI expects array query params as repeated keys: ?data_types=val1&data_types=val2
+    // axios by default uses brackets: ?data_types[]=val1&data_types[]=val2
+    // So we need to build the query string manually or use paramsSerializer
+    const params = new URLSearchParams();
+    params.append('cycle', cycle.toString());
+    params.append('force_download', forceDownload.toString());
+    dataTypes.forEach(dt => params.append('data_types', dt));
+    
+    const response = await api.post(`/api/bulk-data/import-multiple?${params.toString()}`, null);
     return response.data;
   },
   importAllDataTypes: async (
@@ -745,6 +779,21 @@ export const savedSearchApi = {
 
   delete: async (searchId: number): Promise<void> => {
     await api.delete(`/api/saved-searches/${searchId}`);
+  },
+};
+
+export const settingsApi = {
+  getApiKey: async (): Promise<ApiKeyStatus> => {
+    const response = await api.get('/api/settings/api-key');
+    return response.data;
+  },
+  
+  setApiKey: async (apiKey: string): Promise<void> => {
+    await api.post('/api/settings/api-key', { api_key: apiKey });
+  },
+  
+  deleteApiKey: async (): Promise<void> => {
+    await api.delete('/api/settings/api-key');
   },
 };
 

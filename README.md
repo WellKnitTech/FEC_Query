@@ -178,6 +178,12 @@ FEC_Query/
 - `DATABASE_URL`: Database connection string
 - `CORS_ORIGINS`: Allowed CORS origins (comma-separated)
 - `CACHE_TTL_HOURS`: Cache time-to-live in hours (default: 24)
+- `CACHE_TTL_CANDIDATES_HOURS`: Cache TTL for candidate data (default: 168 = 7 days)
+- `CACHE_TTL_COMMITTEES_HOURS`: Cache TTL for committee data (default: 168 = 7 days)
+- `CACHE_TTL_FINANCIALS_HOURS`: Cache TTL for financial data (default: 24 hours)
+- `CACHE_TTL_CONTRIBUTIONS_HOURS`: Cache TTL for contribution API responses (default: 24 hours)
+- `CACHE_TTL_EXPENDITURES_HOURS`: Cache TTL for expenditure data (default: 24 hours)
+- `CONTRIBUTION_LOOKBACK_DAYS`: Days to look back when fetching new contributions to catch late-filed contributions (default: 30)
 - `BULK_DATA_ENABLED`: Enable bulk CSV data usage (default: true)
 - `BULK_DATA_DIR`: Directory for storing CSV files (default: ./data/bulk)
 - `BULK_DATA_UPDATE_INTERVAL_HOURS`: Hours between update checks (default: 24)

@@ -19,7 +19,8 @@ class AnalysisService:
         candidate_id: Optional[str] = None,
         committee_id: Optional[str] = None,
         min_date: Optional[str] = None,
-        max_date: Optional[str] = None
+        max_date: Optional[str] = None,
+        cycle: Optional[int] = None
     ) -> ContributionAnalysis:
         """Analyze contributions with aggregations"""
         contributions = await self.fec_client.get_contributions(
@@ -27,7 +28,8 @@ class AnalysisService:
             committee_id=committee_id,
             min_date=min_date,
             max_date=max_date,
-            limit=10000
+            limit=10000,
+            two_year_transaction_period=cycle
         )
         
         if not contributions:
@@ -53,8 +55,11 @@ class AnalysisService:
         if 'contributor_state' not in df.columns:
             df['contributor_state'] = None
         
+        # Convert contribution_amount to float, handling None, strings, and other types
+        df['contribution_amount'] = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0.0)
+        
         # Calculate totals
-        total_contributions = df['contribution_amount'].fillna(0).sum()
+        total_contributions = df['contribution_amount'].sum()
         total_contributors = df['contributor_name'].fillna('Unknown').nunique()
         average_contribution = total_contributions / len(df) if len(df) > 0 else 0.0
         
@@ -233,8 +238,11 @@ class AnalysisService:
         if 'expenditure_purpose' not in df.columns:
             df['expenditure_purpose'] = None
         
+        # Convert expenditure_amount to float, handling None, strings, and other types
+        df['expenditure_amount'] = pd.to_numeric(df['expenditure_amount'], errors='coerce').fillna(0.0)
+        
         # Calculate totals
-        total_expenditures = df['expenditure_amount'].fillna(0).sum()
+        total_expenditures = df['expenditure_amount'].sum()
         total_transactions = len(df)
         average_expenditure = total_expenditures / total_transactions if total_transactions > 0 else 0.0
         
@@ -325,6 +333,9 @@ class AnalysisService:
         if 'contributor_employer' not in df.columns:
             df['contributor_employer'] = None
         
+        # Convert contribution_amount to float, handling None, strings, and other types
+        df['contribution_amount'] = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0.0)
+        
         # Filter out null employers
         df_with_employer = df[df['contributor_employer'].notna()].copy()
         
@@ -333,7 +344,7 @@ class AnalysisService:
                 total_by_employer={},
                 top_employers=[],
                 employer_count=0,
-                total_contributions=float(df['contribution_amount'].fillna(0).sum())
+                total_contributions=float(df['contribution_amount'].sum())
             )
         
         # Group by employer
@@ -350,7 +361,7 @@ class AnalysisService:
             total_by_employer=total_by_employer,
             top_employers=top_employers,
             employer_count=int(employer_grouped['employer'].nunique()),
-            total_contributions=float(df['contribution_amount'].fillna(0).sum())
+            total_contributions=float(df['contribution_amount'].sum())
         )
     
     async def analyze_velocity(
@@ -384,6 +395,9 @@ class AnalysisService:
             df['contribution_date'] = None
         if 'contribution_amount' not in df.columns:
             df['contribution_amount'] = 0.0
+        
+        # Convert contribution_amount to float, handling None, strings, and other types
+        df['contribution_amount'] = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0.0)
         
         df['date'] = pd.to_datetime(df['contribution_date'], errors='coerce')
         df = df[df['date'].notna()].copy()
