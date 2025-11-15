@@ -1,8 +1,11 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import Optional
 from app.services.fec_client import FECClient
 from app.models.schemas import FraudAnalysis
 from app.services.fraud_detection import FraudDetectionService
+from app.services.contribution_limits import ContributionLimitsService
+from app.db.database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 
 logger = logging.getLogger(__name__)
@@ -20,20 +23,21 @@ def get_fec_client():
             detail="FEC API key not configured. Please set FEC_API_KEY in your .env file."
         )
 
-def get_fraud_service():
-    """Get fraud detection service instance"""
-    return FraudDetectionService(get_fec_client())
+async def get_fraud_service(db: AsyncSession = Depends(get_db)):
+    """Get fraud detection service instance with contribution limits service"""
+    limits_service = ContributionLimitsService(db)
+    return FraudDetectionService(get_fec_client(), limits_service=limits_service)
 
 
 @router.get("/analyze", response_model=FraudAnalysis)
 async def analyze_fraud(
     candidate_id: str = Query(..., description="Candidate ID"),
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
-    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)")
+    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    fraud_service: FraudDetectionService = Depends(get_fraud_service)
 ):
     """Analyze contributions for fraud patterns"""
     try:
-        fraud_service = get_fraud_service()
         analysis = await fraud_service.analyze_candidate(
             candidate_id=candidate_id,
             min_date=min_date,
@@ -52,11 +56,11 @@ async def analyze_fraud_by_donors(
     candidate_id: str = Query(..., description="Candidate ID"),
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
-    use_aggregation: bool = Query(True, description="Use donor aggregation for analysis")
+    use_aggregation: bool = Query(True, description="Use donor aggregation for analysis"),
+    fraud_service: FraudDetectionService = Depends(get_fraud_service)
 ):
     """Analyze fraud using donor aggregation for more accurate detection"""
     try:
-        fraud_service = get_fraud_service()
         if use_aggregation:
             analysis = await fraud_service.analyze_candidate_with_aggregation(
                 candidate_id=candidate_id,

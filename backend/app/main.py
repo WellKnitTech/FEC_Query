@@ -147,13 +147,40 @@ async def startup_event():
                             logger.error("Application may need to be restarted with a fresh database")
                             continue
                     
-                    # Perform checkpoint
-                    result = await conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
-                    checkpoint_info = result.fetchone()
-                    if checkpoint_info and checkpoint_info[0] == 0:  # 0 = success
-                        logger.debug("WAL checkpoint completed successfully")
-                    else:
-                        logger.warning(f"WAL checkpoint returned: {checkpoint_info}")
+                    # Perform checkpoint - use PASSIVE mode first (non-blocking)
+                    # If that fails, try RESTART mode, then TRUNCATE as last resort
+                    checkpoint_success = False
+                    for checkpoint_mode in ["PASSIVE", "RESTART", "TRUNCATE"]:
+                        try:
+                            if checkpoint_mode == "PASSIVE":
+                                result = await conn.execute(text("PRAGMA wal_checkpoint"))
+                            elif checkpoint_mode == "RESTART":
+                                result = await conn.execute(text("PRAGMA wal_checkpoint(RESTART)"))
+                            else:  # TRUNCATE
+                                result = await conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+                            
+                            checkpoint_info = result.fetchone()
+                            if checkpoint_info:
+                                # Return format: (busy, log, checkpointed)
+                                # busy: 0 = checkpoint completed, 1 = checkpoint still in progress
+                                # log: number of frames in WAL
+                                # checkpointed: number of frames checkpointed
+                                busy, log, checkpointed = checkpoint_info
+                                if busy == 0:
+                                    logger.debug(f"WAL checkpoint completed successfully ({checkpoint_mode}): {checkpointed}/{log} frames checkpointed")
+                                    checkpoint_success = True
+                                    break
+                                else:
+                                    logger.debug(f"WAL checkpoint in progress ({checkpoint_mode}): {checkpointed}/{log} frames checkpointed")
+                                    # If checkpoint is in progress, that's okay - it will complete
+                                    checkpoint_success = True
+                                    break
+                        except Exception as checkpoint_error:
+                            logger.debug(f"WAL checkpoint {checkpoint_mode} failed: {checkpoint_error}, trying next mode...")
+                            continue
+                    
+                    if not checkpoint_success:
+                        logger.warning("All WAL checkpoint modes failed - database may be busy with transactions")
             except Exception as e:
                 if "disk I/O error" in str(e).lower() or "corrupted" in str(e).lower():
                     logger.error(f"Database corruption detected: {e}")

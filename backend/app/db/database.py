@@ -378,6 +378,27 @@ class ApiKeySetting(Base):
     )
 
 
+class ContributionLimit(Base):
+    """FEC contribution limits by year, contributor category, and recipient category"""
+    __tablename__ = "contribution_limits"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    effective_year = Column(Integer, nullable=False, index=True)  # Year limits take effect (Jan 1)
+    contributor_category = Column(String, nullable=False, index=True)  # 'individual', 'multicandidate_pac', 'non_multicandidate_pac', 'party_committee', etc.
+    recipient_category = Column(String, nullable=False, index=True)  # 'candidate', 'pac', 'party_committee', etc.
+    limit_amount = Column(Float, nullable=False)  # Limit amount in dollars
+    limit_type = Column(String, nullable=False)  # 'per_election', 'per_year', 'per_calendar_year'
+    notes = Column(Text, nullable=True)  # Additional notes about the limit
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        UniqueConstraint('effective_year', 'contributor_category', 'recipient_category', 'limit_type', 
+                        name='uq_contribution_limit'),
+        Index('idx_contribution_limit_lookup', 'effective_year', 'contributor_category', 'recipient_category'),
+    )
+
+
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./fec_data.db")
 if DATABASE_URL.startswith("sqlite"):
@@ -389,11 +410,12 @@ if DATABASE_URL.startswith("sqlite"):
         echo=False,
         future=True,
         pool_pre_ping=True,  # Verify connections before using
-        pool_size=10,  # Increased from 5 to handle more concurrent connections
-        max_overflow=20,  # Increased from 10 to allow more overflow connections
-        pool_timeout=60.0,  # Increased timeout for getting connection from pool
+        pool_size=20,  # Increased to handle high concurrency with large database
+        max_overflow=30,  # Increased overflow for burst traffic
+        pool_timeout=120.0,  # Increased timeout for getting connection from pool (2 minutes)
+        pool_recycle=3600,  # Recycle connections after 1 hour to prevent stale connections
         connect_args={
-            "timeout": 60.0,  # 60 second timeout for database operations
+            "timeout": 120.0,  # 120 second timeout for database operations
         }
     )
 else:
@@ -520,6 +542,19 @@ async def init_db():
             logger.info("Creating database tables and indexes...")
             await conn.run_sync(Base.metadata.create_all)
             logger.info("Database tables initialized successfully")
+        
+        # Populate contribution limits after tables are created
+        logger.info("Populating contribution limits...")
+        try:
+            from app.services.contribution_limits import ContributionLimitsService
+            async with AsyncSessionLocal() as session:
+                limits_service = ContributionLimitsService(session)
+                count = await limits_service.populate_historical_limits()
+                logger.info(f"Populated {count} contribution limits")
+        except Exception as e:
+            logger.warning(f"Could not populate contribution limits: {e}")
+            # Don't fail startup if limits can't be populated
+        
         logger.info("Database initialization complete")
     except Exception as e:
         # If indexes already exist, try to drop the conflicting indexes and recreate

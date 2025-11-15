@@ -5,17 +5,71 @@ from collections import defaultdict
 from difflib import SequenceMatcher
 from app.services.fec_client import FECClient
 from app.services.donor_aggregation import DonorAggregationService
+from app.services.contribution_limits import ContributionLimitsService
 from app.models.schemas import FraudPattern, FraudAnalysis
 
 
 class FraudDetectionService:
     """Service for detecting fraud patterns in contributions"""
     
-    def __init__(self, fec_client: FECClient):
+    def __init__(self, fec_client: FECClient, limits_service: Optional[ContributionLimitsService] = None):
         self.fec_client = fec_client
+        self.limits_service = limits_service
         self.reporting_threshold = 200.0  # FEC reporting threshold
         self.smurfing_threshold = 190.0  # Just under reporting threshold
-        self.contribution_limit_individual = 2900.0  # Per election cycle
+        # Default fallback limit (will be overridden by dynamic limits when available)
+        self.contribution_limit_individual = 2900.0  # Per election cycle (fallback)
+    
+    def _determine_contributor_category(self, contribution: Dict[str, Any]) -> str:
+        """
+        Determine contributor category from contribution data.
+        
+        Args:
+            contribution: Contribution dictionary with fields like contribution_type, 
+                         contributor_employer, etc.
+            
+        Returns:
+            Contributor category string
+        """
+        # If we have a limits service, we can use it to help determine category
+        # For now, default to individual - this can be enhanced later with
+        # logic to parse FEC transaction type codes or committee types
+        contribution_type = contribution.get('contribution_type') or contribution.get('transaction_type')
+        
+        # TODO: Add logic to parse FEC transaction type codes to determine
+        # if contributor is a PAC, party committee, etc.
+        # For now, assume individual if we have employer/occupation info
+        if contribution.get('contributor_employer') or contribution.get('contributor_occupation'):
+            return ContributionLimitsService.CONTRIBUTOR_INDIVIDUAL
+        
+        # Default to individual
+        return ContributionLimitsService.CONTRIBUTOR_INDIVIDUAL
+    
+    async def _get_contribution_limit(self, contribution_date: datetime, contribution: Dict[str, Any]) -> float:
+        """
+        Get the appropriate contribution limit for a contribution based on its date and type.
+        
+        Args:
+            contribution_date: Date of the contribution
+            contribution: Contribution dictionary
+            
+        Returns:
+            Limit amount in dollars (uses fallback if limits service not available)
+        """
+        if not self.limits_service:
+            return self.contribution_limit_individual
+        
+        contributor_category = self._determine_contributor_category(contribution)
+        
+        limit = await self.limits_service.get_limit_for_contribution(
+            contribution_date=contribution_date,
+            contributor_type=contributor_category,
+            contribution_type_code=contribution.get('contribution_type'),
+            committee_type=contribution.get('committee_type')
+        )
+        
+        # Fallback to default if limit not found
+        return limit if limit is not None else self.contribution_limit_individual
     
     def _similarity(self, str1: str, str2: str) -> float:
         """Calculate string similarity"""
@@ -61,7 +115,7 @@ class FraudDetectionService:
         patterns.extend(smurfing_patterns)
         
         # Detect threshold clustering
-        threshold_patterns = self._detect_threshold_clustering(df)
+        threshold_patterns = await self._detect_threshold_clustering(df)
         patterns.extend(threshold_patterns)
         
         # Detect temporal anomalies
@@ -163,20 +217,43 @@ class FraudDetectionService:
         
         return patterns
     
-    def _detect_threshold_clustering(self, df: pd.DataFrame) -> List[FraudPattern]:
+    async def _detect_threshold_clustering(self, df: pd.DataFrame) -> List[FraudPattern]:
         """Detect contributions clustered near legal limits"""
         patterns = []
         
         # Convert to numeric and fill NaN values
         contribution_amounts = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0)
         
-        # Check for contributions near individual limit
-        near_limit = df[
-            (contribution_amounts >= self.contribution_limit_individual * 0.9) &
-            (contribution_amounts <= self.contribution_limit_individual * 1.1)
-        ]
+        # Get limits for each contribution based on date
+        # Group by date to minimize database queries
+        df['date'] = pd.to_datetime(df['contribution_date'], errors='coerce')
+        df = df.dropna(subset=['date']).copy()
         
-        if len(near_limit) > 0:
+        if len(df) == 0:
+            return patterns
+        
+        # Get unique dates and determine limits
+        # For efficiency, we'll use the most common limit or check per contribution
+        # For now, use a simpler approach: check each contribution's limit
+        near_limit_rows = []
+        
+        for idx, row in df.iterrows():
+            try:
+                contrib_dict = row.to_dict()
+                limit = await self._get_contribution_limit(row['date'], contrib_dict)
+                
+                amount = contribution_amounts.iloc[idx]
+                if (amount >= limit * 0.9) and (amount <= limit * 1.1):
+                    near_limit_rows.append((idx, row, limit))
+            except Exception as e:
+                # Skip if we can't determine limit
+                continue
+        
+        if len(near_limit_rows) > 0:
+            # Create DataFrame with near-limit contributions
+            near_limit_indices = [idx for idx, _, _ in near_limit_rows]
+            near_limit = df.loc[near_limit_indices].copy()
+            
             # Group by contributor
             grouped = near_limit.groupby('contributor_name').agg({
                 'contribution_amount': ['sum', 'count']
@@ -366,8 +443,8 @@ class FraudDetectionService:
         patterns = []
         
         # Enhanced patterns using aggregated donors
-        patterns.extend(self._detect_aggregate_limit_evasion(aggregated_donors))
-        patterns.extend(self._detect_name_variation_fraud(aggregated_donors))
+        patterns.extend(await self._detect_aggregate_limit_evasion(aggregated_donors, contributions))
+        patterns.extend(await self._detect_name_variation_fraud(aggregated_donors, contributions))
         patterns.extend(self._detect_coordinated_contributions(aggregated_donors))
         patterns.extend(self._detect_rapid_sequential_contributions(aggregated_donors))
         
@@ -382,7 +459,7 @@ class FraudDetectionService:
         # Enhanced smurfing with aggregation
         patterns.extend(self._detect_smurfing_with_aggregation(aggregated_donors))
         # Enhanced threshold clustering with aggregation
-        patterns.extend(self._detect_threshold_clustering_with_aggregation(aggregated_donors))
+        patterns.extend(await self._detect_threshold_clustering_with_aggregation(aggregated_donors, contributions))
         
         # Keep existing temporal and round number patterns
         patterns.extend(self._detect_temporal_anomalies(df))
@@ -404,16 +481,44 @@ class FraudDetectionService:
             aggregation_enabled=True
         )
     
-    def _detect_aggregate_limit_evasion(self, aggregated_donors: List[Dict[str, Any]]) -> List[FraudPattern]:
-        """Detect when aggregated donor exceeds $2,900 limit"""
+    async def _detect_aggregate_limit_evasion(self, aggregated_donors: List[Dict[str, Any]], contributions: List[Dict[str, Any]]) -> List[FraudPattern]:
+        """Detect when aggregated donor exceeds contribution limit"""
         patterns = []
+        
+        # Create a mapping of contribution_id to contribution data for limit lookup
+        contrib_map = {c.get('contribution_id'): c for c in contributions if c.get('contribution_id')}
         
         for donor in aggregated_donors:
             total_amount = donor.get('total_amount', 0)
-            if total_amount > self.contribution_limit_individual:
-                excess = total_amount - self.contribution_limit_individual
-                # Get all contributions for this donor
-                contrib_ids = donor.get('contribution_ids', [])
+            contrib_ids = donor.get('contribution_ids', [])
+            
+            # Get the most recent contribution date to determine which limit applies
+            # For aggregated donors, we'll use the first contribution's date as a proxy
+            # In practice, we might want to check each contribution's limit separately
+            limit = self.contribution_limit_individual  # Default fallback
+            
+            if contrib_ids and self.limits_service:
+                # Try to get limit from first contribution
+                first_contrib_id = contrib_ids[0] if contrib_ids else None
+                if first_contrib_id and first_contrib_id in contrib_map:
+                    contrib = contrib_map[first_contrib_id]
+                    contrib_date = contrib.get('contribution_date')
+                    if contrib_date:
+                        try:
+                            if isinstance(contrib_date, str):
+                                contrib_date = datetime.fromisoformat(contrib_date.replace('Z', '+00:00'))
+                            elif isinstance(contrib_date, datetime):
+                                pass  # Already a datetime
+                            else:
+                                contrib_date = None
+                            
+                            if contrib_date:
+                                limit = await self._get_contribution_limit(contrib_date, contrib)
+                        except Exception:
+                            pass  # Use fallback limit
+            
+            if total_amount > limit:
+                excess = total_amount - limit
                 affected_contributions = [
                     {'contribution_id': cid, 'donor_name': donor.get('canonical_name')}
                     for cid in contrib_ids[:20]  # Limit to first 20
@@ -423,7 +528,7 @@ class FraudDetectionService:
                     pattern_type="aggregate_limit_evasion",
                     severity="high",
                     description=f"Aggregated donor {donor.get('canonical_name', 'Unknown')} exceeded limit by ${excess:.2f} "
-                               f"(Total: ${total_amount:.2f}, Limit: ${self.contribution_limit_individual:.2f})",
+                               f"(Total: ${total_amount:.2f}, Limit: ${limit:.2f})",
                     affected_contributions=affected_contributions,
                     total_amount=total_amount,
                     confidence_score=0.9
@@ -431,17 +536,37 @@ class FraudDetectionService:
         
         return patterns
     
-    def _detect_name_variation_fraud(self, aggregated_donors: List[Dict[str, Any]]) -> List[FraudPattern]:
+    async def _detect_name_variation_fraud(self, aggregated_donors: List[Dict[str, Any]], contributions: List[Dict[str, Any]]) -> List[FraudPattern]:
         """Flag donors with 3+ name variations exceeding limit"""
         patterns = []
+        
+        # Create a mapping of contribution_id to contribution data for limit lookup
+        contrib_map = {c.get('contribution_id'): c for c in contributions if c.get('contribution_id')}
         
         for donor in aggregated_donors:
             all_names = donor.get('all_names', [])
             total_amount = donor.get('total_amount', 0)
+            contrib_ids = donor.get('contribution_ids', [])
             
-            if len(all_names) >= 3 and total_amount > self.contribution_limit_individual:
-                excess = total_amount - self.contribution_limit_individual
-                contrib_ids = donor.get('contribution_ids', [])
+            # Get limit (similar to aggregate_limit_evasion)
+            limit = self.contribution_limit_individual  # Default fallback
+            
+            if contrib_ids and self.limits_service:
+                first_contrib_id = contrib_ids[0] if contrib_ids else None
+                if first_contrib_id and first_contrib_id in contrib_map:
+                    contrib = contrib_map[first_contrib_id]
+                    contrib_date = contrib.get('contribution_date')
+                    if contrib_date:
+                        try:
+                            if isinstance(contrib_date, str):
+                                contrib_date = datetime.fromisoformat(contrib_date.replace('Z', '+00:00'))
+                            if contrib_date:
+                                limit = await self._get_contribution_limit(contrib_date, contrib)
+                        except Exception:
+                            pass
+            
+            if len(all_names) >= 3 and total_amount > limit:
+                excess = total_amount - limit
                 affected_contributions = [
                     {'contribution_id': cid, 'donor_name': name}
                     for cid, name in zip(contrib_ids[:20], all_names[:20])
@@ -575,18 +700,36 @@ class FraudDetectionService:
         
         return patterns
     
-    def _detect_threshold_clustering_with_aggregation(self, aggregated_donors: List[Dict[str, Any]]) -> List[FraudPattern]:
+    async def _detect_threshold_clustering_with_aggregation(self, aggregated_donors: List[Dict[str, Any]], contributions: List[Dict[str, Any]]) -> List[FraudPattern]:
         """Enhanced threshold clustering using aggregated donors"""
         patterns = []
         
+        # Create a mapping of contribution_id to contribution data for limit lookup
+        contrib_map = {c.get('contribution_id'): c for c in contributions if c.get('contribution_id')}
+        
         for donor in aggregated_donors:
             total_amount = donor.get('total_amount', 0)
+            contrib_ids = donor.get('contribution_ids', [])
+            
+            # Get limit (similar to other methods)
+            limit = self.contribution_limit_individual  # Default fallback
+            
+            if contrib_ids and self.limits_service:
+                first_contrib_id = contrib_ids[0] if contrib_ids else None
+                if first_contrib_id and first_contrib_id in contrib_map:
+                    contrib = contrib_map[first_contrib_id]
+                    contrib_date = contrib.get('contribution_date')
+                    if contrib_date:
+                        try:
+                            if isinstance(contrib_date, str):
+                                contrib_date = datetime.fromisoformat(contrib_date.replace('Z', '+00:00'))
+                            if contrib_date:
+                                limit = await self._get_contribution_limit(contrib_date, contrib)
+                        except Exception:
+                            pass
             
             # Check if aggregated total is near or over limit
-            if (total_amount >= self.contribution_limit_individual * 0.9 and
-                total_amount <= self.contribution_limit_individual * 1.1):
-                
-                contrib_ids = donor.get('contribution_ids', [])
+            if (total_amount >= limit * 0.9 and total_amount <= limit * 1.1):
                 affected_contributions = [
                     {'contribution_id': cid, 'donor_name': donor.get('canonical_name')}
                     for cid in contrib_ids[:20]
@@ -596,7 +739,7 @@ class FraudDetectionService:
                     pattern_type="threshold_clustering_aggregated",
                     severity="medium",
                     description=f"Aggregated donor {donor.get('canonical_name', 'Unknown')} has total "
-                               f"contributions near legal limit: ${total_amount:.2f}",
+                               f"contributions near legal limit: ${total_amount:.2f} (Limit: ${limit:.2f})",
                     affected_contributions=affected_contributions,
                     total_amount=total_amount,
                     confidence_score=0.75
