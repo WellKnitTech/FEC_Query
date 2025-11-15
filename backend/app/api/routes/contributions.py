@@ -28,13 +28,13 @@ def get_analysis_service():
 
 @router.get("/", response_model=List[Contribution])
 async def get_contributions(
-    candidate_id: Optional[str] = Query(None, description="Candidate ID"),
-    committee_id: Optional[str] = Query(None, description="Committee ID"),
-    contributor_name: Optional[str] = Query(None, description="Contributor name"),
-    min_amount: Optional[float] = Query(None, description="Minimum contribution amount"),
-    max_amount: Optional[float] = Query(None, description="Maximum contribution amount"),
-    min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
-    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    candidate_id: Optional[str] = Query(None, description="Candidate ID", max_length=20, regex="^[A-Z0-9]*$"),
+    committee_id: Optional[str] = Query(None, description="Committee ID", max_length=20, regex="^[A-Z0-9]*$"),
+    contributor_name: Optional[str] = Query(None, description="Contributor name", max_length=200),
+    min_amount: Optional[float] = Query(None, description="Minimum contribution amount", ge=0),
+    max_amount: Optional[float] = Query(None, description="Maximum contribution amount", ge=0),
+    min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)", regex="^\\d{4}-\\d{2}-\\d{2}$"),
+    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)", regex="^\\d{4}-\\d{2}-\\d{2}$"),
     limit: int = Query(100, ge=1, le=10000, description="Maximum results")
 ):
     """Get contributions"""
@@ -100,10 +100,21 @@ async def get_contributions(
 
 @router.get("/unique-contributors")
 async def get_unique_contributors(
-    search_term: str = Query(..., description="Search term for contributor name (e.g., 'Smith')"),
+    search_term: str = Query(..., description="Search term for contributor name (e.g., 'Smith')", min_length=1, max_length=200),
     limit: int = Query(100, ge=1, le=1000, description="Maximum results")
 ):
     """Get unique contributor names matching a search term"""
+    # Validate and sanitize search term
+    search_term = search_term.strip()
+    if not search_term or len(search_term) > 200:
+        raise HTTPException(
+            status_code=400,
+            detail="Search term must be between 1 and 200 characters"
+        )
+    # Remove any potentially dangerous characters (basic sanitization)
+    # SQLAlchemy will handle parameterization, but we'll sanitize for safety
+    search_term = search_term.replace(";", "").replace("--", "").replace("/*", "").replace("*/", "")
+    
     try:
         from app.db.database import AsyncSessionLocal
         from app.db.database import Contribution

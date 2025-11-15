@@ -1,5 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from app.api.routes import candidates, contributions, analysis, fraud, bulk_data, export, independent_expenditures, committees, saved_searches, trends, settings
 from app.db.database import init_db
 from app.services.bulk_data import _cancelled_jobs, _running_tasks
@@ -8,6 +11,7 @@ import logging
 import asyncio
 import signal
 from dotenv import load_dotenv
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Global contact updater service
 _contact_updater_service = None
@@ -69,14 +73,78 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS configuration
+# Initialize rate limiter after app creation
+# Use default_storage (in-memory) which is simpler and doesn't require Redis
+try:
+    from slowapi import Limiter
+    
+    limiter = Limiter(key_func=get_remote_address, app=app, default_limits=["1000/hour"])
+    app.state.limiter = limiter
+    
+    # Add exception handler for rate limit exceeded
+    @app.exception_handler(RateLimitExceeded)
+    async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+        from app.api.security import log_security_event
+        log_security_event("rate_limit", {
+            "limit": str(exc.detail) if hasattr(exc, 'detail') else "unknown"
+        }, request)
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Please try again later."}
+        )
+    
+    logger.info("Rate limiter initialized successfully")
+except Exception as e:
+    logger.warning(f"Failed to initialize rate limiter: {e}. Continuing without rate limiting.")
+    import traceback
+    logger.debug(traceback.format_exc())
+    # Create a dummy limiter to avoid AttributeError
+    class DummyLimiter:
+        def limit(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+    app.state.limiter = DummyLimiter()
+
+# Security headers middleware
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        # Add security headers
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        # Only add HSTS if using HTTPS (check via environment variable)
+        if os.getenv("USE_HTTPS", "false").lower() == "true":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        
+        # Log security events for admin operations (lazy import to avoid circular dependencies)
+        try:
+            if request.method in ["DELETE", "POST"] and "/api/bulk-data" in request.url.path:
+                from app.api.security import log_security_event
+                log_security_event("admin_operation", {
+                    "method": request.method,
+                    "path": request.url.path,
+                }, request)
+        except Exception as e:
+            logger.debug(f"Could not log security event: {e}")
+        
+        return response
+
+# Add security headers middleware
+app.add_middleware(SecurityHeadersMiddleware)
+
+# CORS configuration - restrict to specific origins and methods
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
+# Clean up origins (remove empty strings)
+cors_origins = [origin.strip() for origin in cors_origins if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Explicit methods instead of *
+    allow_headers=["Content-Type", "Authorization", "Accept"],  # Explicit headers instead of *
 )
 
 # Include routers

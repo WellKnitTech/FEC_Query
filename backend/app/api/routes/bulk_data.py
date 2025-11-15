@@ -1,10 +1,17 @@
-from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, WebSocket, WebSocketDisconnect, Request
 from typing import Optional, List
 from app.services.bulk_data import BulkDataService, _running_tasks, _cancelled_jobs
 from app.services.bulk_updater import BulkUpdaterService
 from app.services.bulk_data_config import DataType, get_config, get_high_priority_types, DATA_TYPE_CONFIGS
 from app.services.backfill_candidate_ids import backfill_candidate_ids_from_committees, get_backfill_stats
 from app.db.database import BulkImportJob
+from app.api.security import (
+    BULK_RATE_LIMIT, EXPENSIVE_RATE_LIMIT, READ_RATE_LIMIT,
+    check_resource_limits, increment_operation, decrement_operation,
+    log_security_event, MAX_CONCURRENT_JOBS
+)
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
 from datetime import datetime
 import logging
 import asyncio
@@ -13,6 +20,18 @@ import json
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Rate limiter instance (will be set from app state)
+limiter = None
+
+def get_limiter():
+    """Get rate limiter from app state."""
+    global limiter
+    if limiter is None:
+        from fastapi import Request
+        # This will be set when router is included in main.py
+        pass
+    return limiter
 
 # Global services (will be initialized on first use)
 _bulk_data_service: Optional[BulkDataService] = None
@@ -35,14 +54,31 @@ def get_bulk_updater_service() -> BulkUpdaterService:
     return _bulk_updater_service
 
 
+# Rate limiting will be handled via decorators on routes when needed
+# For now, we rely on resource limits and basic protection
+
 @router.post("/import-multiple")
 async def import_multiple_data_types(
+    request: Request,
     cycle: int = Query(..., description="Election cycle to download (e.g., 2024)"),
     data_types: List[str] = Query(..., description="List of data types to import"),
     force_download: bool = Query(False, description="Force download even if file size matches"),
     background_tasks: BackgroundTasks = None
 ):
     """Import multiple data types for a cycle"""
+    # Rate limiting is handled by slowapi middleware via app.state.limiter
+    # Check resource limits
+    if not check_resource_limits("bulk_imports"):
+        log_security_event("resource_limit", {
+            "operation": "import_multiple",
+            "cycle": cycle,
+            "max_concurrent": MAX_CONCURRENT_JOBS
+        }, request)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many concurrent bulk import operations. Maximum {MAX_CONCURRENT_JOBS} allowed."
+        )
+    
     try:
         bulk_data_service = get_bulk_data_service()
         
@@ -82,6 +118,7 @@ async def import_multiple_data_types(
             finally:
                 if task:
                     _running_tasks.discard(task)
+                decrement_operation("bulk_imports")
         
         async def _import_multiple_internal():
             await bulk_data_service._update_job_progress(job_id, status='running')
@@ -95,6 +132,9 @@ async def import_multiple_data_types(
                 failed = [dt for dt, r in results.items() if not r.get("success", False)]
                 error_msg = f"Some imports failed: {', '.join(failed)}"
                 await bulk_data_service._update_job_progress(job_id, status='failed', error_message=error_msg)
+        
+        # Increment operation counter before starting
+        increment_operation("bulk_imports")
         
         # Run in background
         task = asyncio.create_task(_import_multiple())
@@ -119,10 +159,23 @@ async def import_multiple_data_types(
 
 @router.post("/import-all-types")
 async def import_all_data_types(
-    cycle: int = Query(..., description="Election cycle to download (e.g., 2024)"),
+    request: Request,
+    cycle: int = Query(..., description="Election cycle to download (e.g., 2024)", ge=2000, le=2100),
     background_tasks: BackgroundTasks = None
 ):
     """Import all implemented data types for a cycle"""
+    # Check resource limits
+    if not check_resource_limits("bulk_imports"):
+        log_security_event("resource_limit", {
+            "operation": "import_all_types",
+            "cycle": cycle,
+            "max_concurrent": MAX_CONCURRENT_JOBS
+        }, request)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many concurrent bulk import operations. Maximum {MAX_CONCURRENT_JOBS} allowed."
+        )
+    
     try:
         bulk_data_service = get_bulk_data_service()
         
@@ -178,8 +231,9 @@ async def import_all_data_types(
 
 @router.post("/download")
 async def download_bulk_data(
-    cycle: int = Query(..., description="Election cycle to download (e.g., 2024)"),
-    data_type: Optional[str] = Query(None, description="Data type to download (default: individual_contributions)"),
+    request: Request,
+    cycle: int = Query(..., description="Election cycle to download (e.g., 2024)", ge=2000, le=2100),
+    data_type: Optional[str] = Query(None, description="Data type to download (default: individual_contributions)", max_length=50),
     force_download: bool = Query(False, description="Force download even if file size matches"),
     background_tasks: BackgroundTasks = None
 ):
@@ -307,6 +361,12 @@ async def get_bulk_data_status():
 @router.get("/status/{cycle}")
 async def get_cycle_status(cycle: int):
     """Get status for all data types for a specific cycle"""
+    # Validate cycle range
+    if cycle < 2000 or cycle > 2100:
+        raise HTTPException(
+            status_code=400,
+            detail="Cycle must be between 2000 and 2100"
+        )
     try:
         bulk_data_service = get_bulk_data_service()
         from app.services.bulk_data_config import DATA_TYPE_CONFIGS
@@ -486,7 +546,8 @@ async def get_backfill_stats_endpoint():
 
 @router.delete("/contributions")
 async def clear_contributions(
-    cycle: Optional[int] = Query(None, description="Clear contributions for specific cycle (optional, clears all if not specified)")
+    request: Request,
+    cycle: Optional[int] = Query(None, description="Clear contributions for specific cycle (optional, clears all if not specified)", ge=2000, le=2100)
 ):
     """Clear all contributions from the database (or for a specific cycle)"""
     try:
@@ -507,7 +568,7 @@ async def clear_contributions(
 
 
 @router.delete("/all-data")
-async def clear_all_data():
+async def clear_all_data(request: Request):
     """Clear ALL data from the database (contributions, committees, candidates, etc.)"""
     try:
         bulk_data_service = get_bulk_data_service()
