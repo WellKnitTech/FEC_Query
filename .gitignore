@@ -62,4 +62,3 @@ backend/*.backup.*
 
 # Stray files
 backend/=*
-backend/data/bulk/headers/oppexp_header_file.csv
