@@ -48,13 +48,13 @@ Thumbs.db
 # Logs
 *.log
 
-# Bulk data files (too large for git)
+# Bulk data files (too large for git - do not commit)
 backend/data/bulk/*.txt
 backend/data/bulk/*.zip
 backend/data/bulk/*.csv
-# Keep .gitkeep and headers directory
+backend/data/bulk/headers/
+# Keep only .gitkeep to preserve directory structure
 !backend/data/bulk/.gitkeep
-!backend/data/bulk/headers/
 
 # Database dumps and backups
 backend/database_dump.sql
