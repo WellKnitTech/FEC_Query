@@ -378,6 +378,27 @@ class ApiKeySetting(Base):
     )
 
 
+class ContributionLimit(Base):
+    """FEC contribution limits by year, contributor category, and recipient category"""
+    __tablename__ = "contribution_limits"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    effective_year = Column(Integer, nullable=False, index=True)  # Year limits take effect (Jan 1)
+    contributor_category = Column(String, nullable=False, index=True)  # 'individual', 'multicandidate_pac', 'non_multicandidate_pac', 'party_committee', etc.
+    recipient_category = Column(String, nullable=False, index=True)  # 'candidate', 'pac', 'party_committee', etc.
+    limit_amount = Column(Float, nullable=False)  # Limit amount in dollars
+    limit_type = Column(String, nullable=False)  # 'per_election', 'per_year', 'per_calendar_year'
+    notes = Column(Text, nullable=True)  # Additional notes about the limit
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        UniqueConstraint('effective_year', 'contributor_category', 'recipient_category', 'limit_type', 
+                        name='uq_contribution_limit'),
+        Index('idx_contribution_limit_lookup', 'effective_year', 'contributor_category', 'recipient_category'),
+    )
+
+
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./fec_data.db")
 if DATABASE_URL.startswith("sqlite"):
@@ -521,6 +542,19 @@ async def init_db():
             logger.info("Creating database tables and indexes...")
             await conn.run_sync(Base.metadata.create_all)
             logger.info("Database tables initialized successfully")
+        
+        # Populate contribution limits after tables are created
+        logger.info("Populating contribution limits...")
+        try:
+            from app.services.contribution_limits import ContributionLimitsService
+            async with AsyncSessionLocal() as session:
+                limits_service = ContributionLimitsService(session)
+                count = await limits_service.populate_historical_limits()
+                logger.info(f"Populated {count} contribution limits")
+        except Exception as e:
+            logger.warning(f"Could not populate contribution limits: {e}")
+            # Don't fail startup if limits can't be populated
+        
         logger.info("Database initialization complete")
     except Exception as e:
         # If indexes already exist, try to drop the conflicting indexes and recreate
