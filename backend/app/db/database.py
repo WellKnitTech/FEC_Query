@@ -399,6 +399,21 @@ class ContributionLimit(Base):
     )
 
 
+class AvailableCycle(Base):
+    """Stored available cycles from FEC API"""
+    __tablename__ = "available_cycles"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    cycle = Column(Integer, unique=True, nullable=False, index=True)  # Election cycle year
+    last_updated = Column(DateTime, default=datetime.utcnow, index=True)  # When this cycle was last verified
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_cycle', 'cycle'),
+        Index('idx_last_updated', 'last_updated'),
+    )
+
+
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./fec_data.db")
 if DATABASE_URL.startswith("sqlite"):

@@ -265,12 +265,13 @@ export interface ContributionVelocity {
 }
 
 export const analysisApi = {
-  getMoneyFlow: async (candidateId: string, maxDepth?: number, minAmount?: number, signal?: AbortSignal): Promise<MoneyFlowGraph> => {
+  getMoneyFlow: async (candidateId: string, maxDepth?: number, minAmount?: number, aggregateByEmployer?: boolean, signal?: AbortSignal): Promise<MoneyFlowGraph> => {
     const response = await api.get('/api/analysis/money-flow', {
       params: {
         candidate_id: candidateId,
         max_depth: maxDepth,
         min_amount: minAmount,
+        aggregate_by_employer: aggregateByEmployer,
       },
       ...createRequestConfig(signal),
     });
@@ -566,6 +567,11 @@ export const bulkDataApi = {
 
   getCycles: async (): Promise<{ cycles: BulkDataCycle[]; count: number }> => {
     const response = await api.get('/api/bulk-data/cycles');
+    return response.data;
+  },
+
+  refreshCycles: async (): Promise<{ message: string; cycles: number[]; count: number }> => {
+    const response = await api.post('/api/bulk-data/cycles/refresh');
     return response.data;
   },
 

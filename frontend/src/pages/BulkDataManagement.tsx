@@ -226,6 +226,25 @@ export default function BulkDataManagement() {
     }
   };
 
+  const handleRefreshCycles = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      setSuccess(null);
+      setOperationInProgress('Searching for cycles from FEC API...');
+      
+      const result = await bulkDataApi.refreshCycles();
+      setSuccess(`Found ${result.count} available cycles. Cycles updated in database.`);
+      await loadStatus(); // Refresh status to show updated cycles
+    } catch (err: any) {
+      setError(extractErrorMessage(err) || 'Failed to refresh cycles');
+      console.error(err);
+    } finally {
+      setLoading(false);
+      setOperationInProgress(null);
+    }
+  };
+
   const handleClearContributions = async () => {
     if (!window.confirm('Are you sure you want to clear all contributions? This action cannot be undone.')) {
       return;
@@ -580,6 +599,14 @@ export default function BulkDataManagement() {
                 className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Refresh Status
+              </button>
+              <button
+                onClick={handleRefreshCycles}
+                disabled={loading}
+                className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 border border-transparent rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Search for additional cycles from FEC API (only needed every couple years)"
+              >
+                Search for Cycles
               </button>
             </div>
           </div>

@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from sqlalchemy import select, and_, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from app.db.database import AsyncSessionLocal, Contribution, BulkDataMetadata, Committee, BulkImportJob, BulkDataImportStatus
+from app.db.database import AsyncSessionLocal, Contribution, BulkDataMetadata, Committee, BulkImportJob, BulkDataImportStatus, AvailableCycle
 from app.services.fec_client import FECClient
 from app.services.bulk_data_config import (
     DataType, DataTypeConfig, FileFormat, get_config, get_high_priority_types
@@ -1219,30 +1219,105 @@ class BulkDataService:
             
             await session.commit()
     
-    async def get_available_cycles(self, use_fec_api: bool = True) -> List[Dict]:
+    async def get_available_cycles_from_db(self) -> Optional[List[int]]:
+        """Get available cycles from database. Returns None if DB is empty or very old."""
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(AvailableCycle).order_by(AvailableCycle.cycle.desc())
+            )
+            cycles = result.scalars().all()
+            
+            if not cycles:
+                return None
+            
+            # Check if the data is too old (more than 2 years)
+            # Get the most recent last_updated timestamp
+            result = await session.execute(
+                select(AvailableCycle.last_updated).order_by(AvailableCycle.last_updated.desc()).limit(1)
+            )
+            most_recent_update = result.scalar_one_or_none()
+            
+            if most_recent_update:
+                age_years = (datetime.utcnow() - most_recent_update).days / 365.25
+                if age_years > 2:
+                    logger.info(f"Available cycles in DB are {age_years:.1f} years old, should refresh")
+                    return None
+            
+            return [c.cycle for c in cycles]
+    
+    async def refresh_available_cycles_from_fec(self) -> List[int]:
+        """Fetch available cycles from FEC API and store in database. Returns the list of cycles."""
+        logger.info("Refreshing available cycles from FEC API and storing in database")
+        
+        # Fetch from FEC API
+        available_cycles = await self.get_available_cycles_from_fec()
+        
+        # Store in database
+        async with AsyncSessionLocal() as session:
+            # Get existing cycles
+            result = await session.execute(select(AvailableCycle))
+            existing_cycles = {c.cycle for c in result.scalars().all()}
+            
+            now = datetime.utcnow()
+            
+            # Update or insert cycles
+            for cycle in available_cycles:
+                if cycle in existing_cycles:
+                    # Update last_updated
+                    result = await session.execute(
+                        select(AvailableCycle).where(AvailableCycle.cycle == cycle)
+                    )
+                    cycle_record = result.scalar_one_or_none()
+                    if cycle_record:
+                        cycle_record.last_updated = now
+                else:
+                    # Insert new cycle
+                    cycle_record = AvailableCycle(cycle=cycle, last_updated=now)
+                    session.add(cycle_record)
+            
+            # Remove cycles that are no longer available (optional - we'll keep old cycles)
+            # This allows users to still see historical cycles even if FEC removes them
+            
+            await session.commit()
+        
+        logger.info(f"Stored {len(available_cycles)} available cycles in database")
+        return available_cycles
+    
+    async def get_available_cycles(self, use_fec_api: bool = False) -> List[Dict]:
         """Get list of cycles with available bulk data
         
         Args:
-            use_fec_api: If True, query FEC API to check which cycles actually have data.
-                        If False or API check fails, falls back to all even years 2000-current+6
+            use_fec_api: If True, force refresh from FEC API. If False, use DB (only refresh if DB is empty or >2 years old)
         """
-        # Try to get available cycles from FEC API
-        fec_available_cycles = []
-        if use_fec_api:
-            try:
-                fec_available_cycles = await self.get_available_cycles_from_fec()
-                # Log is handled inside get_available_cycles_from_fec() to distinguish cache hits from API calls
-            except Exception as e:
-                logger.warning(f"Failed to check FEC API for available cycles, falling back to default: {e}")
-                # Fall back to generating all even years
-                current_year = datetime.now().year
-                future_years = current_year + 6
-                fec_available_cycles = list(range(2000, future_years + 1, 2))
+        # First, try to get from database
+        db_cycles = await self.get_available_cycles_from_db()
+        
+        # If DB has cycles and they're recent, use them
+        if db_cycles is not None and not use_fec_api:
+            logger.debug(f"Using {len(db_cycles)} cycles from database")
+            fec_available_cycles = db_cycles
         else:
-            # Generate all possible cycles from 2000 to current year + 6 (even years)
-            current_year = datetime.now().year
-            future_years = current_year + 6
-            fec_available_cycles = list(range(2000, future_years + 1, 2))
+            # DB is empty, old, or user requested refresh - fetch from API
+            if use_fec_api:
+                logger.info("User requested refresh from FEC API")
+            else:
+                logger.info("Database cycles are empty or too old, fetching from FEC API")
+            
+            try:
+                fec_available_cycles = await self.refresh_available_cycles_from_fec()
+            except Exception as e:
+                logger.warning(f"Failed to refresh cycles from FEC API, trying DB fallback: {e}")
+                # Try DB one more time as fallback
+                db_cycles = await self.get_available_cycles_from_db()
+                if db_cycles is not None:
+                    logger.info(f"Using {len(db_cycles)} cycles from database as fallback")
+                    fec_available_cycles = db_cycles
+                else:
+                    # Last resort: generate all even years
+                    logger.warning("No cycles in DB, falling back to generating all even years")
+                    current_year = datetime.now().year
+                    future_years = current_year + 6
+                    fec_available_cycles = list(range(2000, future_years + 1, 2))
         
         # Get metadata for cycles that have been downloaded
         async with AsyncSessionLocal() as session:

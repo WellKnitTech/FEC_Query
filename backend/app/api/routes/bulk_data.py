@@ -427,22 +427,41 @@ async def get_cycle_status(cycle: int):
 
 @router.get("/cycles")
 async def get_available_cycles(
-    use_fec_api: bool = Query(True, description="Query FEC API to check which cycles have data available")
+    use_fec_api: bool = Query(False, description="Force refresh from FEC API (default: use database)")
 ):
-    """List available cycles with bulk data. Queries FEC API to determine which cycles actually have data."""
+    """List available cycles with bulk data. Uses database by default, only queries FEC API if DB is empty or >2 years old."""
     try:
         bulk_data_service = get_bulk_data_service()
         cycles = await bulk_data_service.get_available_cycles(use_fec_api=use_fec_api)
         return {
             "cycles": cycles,
             "count": len(cycles),
-            "source": "fec_api" if use_fec_api else "fallback"
+            "source": "fec_api" if use_fec_api else "database"
         }
     except Exception as e:
         logger.error(f"Error getting available cycles: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get cycles: {str(e)}"
+        )
+
+
+@router.post("/cycles/refresh")
+async def refresh_available_cycles():
+    """Manually refresh available cycles from FEC API and update database."""
+    try:
+        bulk_data_service = get_bulk_data_service()
+        cycles = await bulk_data_service.refresh_available_cycles_from_fec()
+        return {
+            "message": f"Successfully refreshed {len(cycles)} available cycles",
+            "cycles": cycles,
+            "count": len(cycles)
+        }
+    except Exception as e:
+        logger.error(f"Error refreshing available cycles: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to refresh cycles: {str(e)}"
         )
 
 
@@ -592,45 +611,38 @@ async def clear_all_data(request: Request):
 @router.post("/import-all")
 async def import_all_cycles(
     background_tasks: BackgroundTasks,
-    start_year: Optional[int] = Query(None, description="Start year (default: auto-detect from FEC)"),
-    end_year: Optional[int] = Query(None, description="End year (default: auto-detect from FEC)"),
-    use_fec_api: bool = Query(True, description="Use FEC API to determine available cycles")
+    start_year: Optional[int] = Query(None, description="Start year (default: auto-detect from database)"),
+    end_year: Optional[int] = Query(None, description="End year (default: auto-detect from database)"),
+    use_fec_api: bool = Query(False, description="Force refresh from FEC API (default: use database)")
 ):
-    """Import all available cycles - always runs in background. Uses FEC API to determine which cycles have data."""
+    """Import all available cycles - always runs in background. Uses database by default to determine which cycles have data."""
     try:
         from datetime import datetime
         bulk_data_service = get_bulk_data_service()
         bulk_updater_service = get_bulk_updater_service()
         
-        # Get available cycles from FEC API or fallback
-        if use_fec_api:
-            try:
-                available_cycles = await bulk_data_service.get_available_cycles_from_fec()
-                if available_cycles:
-                    # Filter by start_year and end_year if provided
-                    if start_year:
-                        available_cycles = [c for c in available_cycles if c >= start_year]
-                    if end_year:
-                        available_cycles = [c for c in available_cycles if c <= end_year]
-                    cycles = available_cycles
-                else:
-                    # Fallback if API returns empty
-                    current_year = datetime.now().year
-                    if end_year is None:
-                        end_year = current_year + 6
-                    if start_year is None:
-                        start_year = 2000
-                    cycles = list(range(start_year, end_year + 1, 2))
-            except Exception as e:
-                logger.warning(f"Failed to get cycles from FEC API, using fallback: {e}")
+        # Get available cycles from database (or FEC API if requested)
+        try:
+            cycles_data = await bulk_data_service.get_available_cycles(use_fec_api=use_fec_api)
+            available_cycles = [c["cycle"] for c in cycles_data]
+            
+            if available_cycles:
+                # Filter by start_year and end_year if provided
+                if start_year:
+                    available_cycles = [c for c in available_cycles if c >= start_year]
+                if end_year:
+                    available_cycles = [c for c in available_cycles if c <= end_year]
+                cycles = available_cycles
+            else:
+                # Fallback if no cycles found
                 current_year = datetime.now().year
                 if end_year is None:
                     end_year = current_year + 6
                 if start_year is None:
                     start_year = 2000
                 cycles = list(range(start_year, end_year + 1, 2))
-        else:
-            # Use fallback logic
+        except Exception as e:
+            logger.warning(f"Failed to get cycles, using fallback: {e}")
             current_year = datetime.now().year
             if end_year is None:
                 end_year = current_year + 6
