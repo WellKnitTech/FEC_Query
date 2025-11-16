@@ -28,37 +28,53 @@ export default function CommitteeDetail() {
 
   useEffect(() => {
     if (committeeId) {
+      const abortController = new AbortController();
+      
+      const loadCommitteeData = async () => {
+        if (!committeeId) return;
+        
+        setLoading(true);
+        setError(null);
+
+        try {
+          const [committeeData, financialsData, contributionsData, expendituresData, transfersData] = await Promise.all([
+            committeeApi.getById(committeeId, abortController.signal),
+            committeeApi.getFinancials(committeeId, undefined, abortController.signal),
+            committeeApi.getContributions(committeeId, { limit: 1000 }, abortController.signal),
+            committeeApi.getExpenditures(committeeId, { limit: 1000 }, abortController.signal),
+            committeeApi.getTransfers(committeeId, { limit: 500 }, abortController.signal),
+          ]);
+
+          if (!abortController.signal.aborted) {
+            setCommittee(committeeData);
+            setFinancials(financialsData);
+            setContributions(contributionsData);
+            setExpenditures(expendituresData);
+            setTransfers(transfersData);
+          }
+        } catch (err: any) {
+          // Don't set error if request was aborted
+          if (err.name === 'AbortError' || abortController.signal.aborted) {
+            return;
+          }
+          if (!abortController.signal.aborted) {
+            setError(err?.response?.data?.detail || err?.message || 'Failed to load committee data');
+            console.error(err);
+          }
+        } finally {
+          if (!abortController.signal.aborted) {
+            setLoading(false);
+          }
+        }
+      };
+      
       loadCommitteeData();
+      
+      return () => {
+        abortController.abort();
+      };
     }
   }, [committeeId]);
-
-  const loadCommitteeData = async () => {
-    if (!committeeId) return;
-    
-    setLoading(true);
-    setError(null);
-
-    try {
-      const [committeeData, financialsData, contributionsData, expendituresData, transfersData] = await Promise.all([
-        committeeApi.getById(committeeId),
-        committeeApi.getFinancials(committeeId),
-        committeeApi.getContributions(committeeId, { limit: 1000 }),
-        committeeApi.getExpenditures(committeeId, { limit: 1000 }),
-        committeeApi.getTransfers(committeeId, { limit: 500 }),
-      ]);
-
-      setCommittee(committeeData);
-      setFinancials(financialsData);
-      setContributions(contributionsData);
-      setExpenditures(expendituresData);
-      setTransfers(transfersData);
-    } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || 'Failed to load committee data');
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   if (loading) {
     return (

@@ -52,6 +52,10 @@ export default function IndependentExpenditures() {
       setExpenditures(expData);
       setAnalysis(analysisData);
     } catch (err: any) {
+      // Ignore abort errors for manual searches
+      if (err.name === 'AbortError') {
+        return;
+      }
       setError(err?.response?.data?.detail || err?.message || 'Failed to load independent expenditures');
       console.error(err);
     } finally {
@@ -61,7 +65,55 @@ export default function IndependentExpenditures() {
 
   useEffect(() => {
     // Auto-search on mount with empty filters to show recent data
-    handleSearch();
+    const abortController = new AbortController();
+    
+    const performSearch = async () => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const [expData, analysisData] = await Promise.all([
+          independentExpenditureApi.get({
+            candidate_id: candidateId || undefined,
+            committee_id: committeeId || undefined,
+            support_oppose: supportOppose || undefined,
+            min_date: minDate || undefined,
+            max_date: maxDate || undefined,
+            limit: 1000,
+          }, abortController.signal),
+          independentExpenditureApi.analyze({
+            candidate_id: candidateId || undefined,
+            committee_id: committeeId || undefined,
+            min_date: minDate || undefined,
+            max_date: maxDate || undefined,
+          }, abortController.signal),
+        ]);
+
+        if (!abortController.signal.aborted) {
+          setExpenditures(expData);
+          setAnalysis(analysisData);
+        }
+      } catch (err: any) {
+        // Don't set error if request was aborted
+        if (err.name === 'AbortError' || abortController.signal.aborted) {
+          return;
+        }
+        if (!abortController.signal.aborted) {
+          setError(err?.response?.data?.detail || err?.message || 'Failed to load independent expenditures');
+          console.error(err);
+        }
+      } finally {
+        if (!abortController.signal.aborted) {
+          setLoading(false);
+        }
+      }
+    };
+    
+    performSearch();
+    
+    return () => {
+      abortController.abort();
+    };
   }, []);
 
   return (

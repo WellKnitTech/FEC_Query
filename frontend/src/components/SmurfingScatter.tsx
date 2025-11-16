@@ -30,6 +30,10 @@ export default function SmurfingScatter({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!candidateId && !committeeId) return;
+    
+    const abortController = new AbortController();
+    
     const fetchContributions = async () => {
       setLoading(true);
       setError(null);
@@ -40,20 +44,32 @@ export default function SmurfingScatter({
           min_date: minDate,
           max_date: maxDate,
           limit: 10000,
-        });
-        setContributions(data);
+        }, abortController.signal);
+        if (!abortController.signal.aborted) {
+          setContributions(data);
+        }
       } catch (err: any) {
+        // Don't set error if request was aborted
+        if (err.name === 'AbortError' || abortController.signal.aborted) {
+          return;
+        }
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contributions';
-        setError(errorMessage);
-        console.error('Error loading contributions:', err);
+        if (!abortController.signal.aborted) {
+          setError(errorMessage);
+          console.error('Error loading contributions:', err);
+        }
       } finally {
-        setLoading(false);
+        if (!abortController.signal.aborted) {
+          setLoading(false);
+        }
       }
     };
 
-    if (candidateId || committeeId) {
-      fetchContributions();
-    }
+    fetchContributions();
+    
+    return () => {
+      abortController.abort();
+    };
   }, [candidateId, committeeId, minDate, maxDate]);
 
   if (loading) {

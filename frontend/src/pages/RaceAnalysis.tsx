@@ -15,6 +15,20 @@ import ExportButton from '../components/ExportButton';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
 
+const CACHE_KEY = 'raceAnalysis_cache';
+
+interface CachedRaceData {
+  searchParams: {
+    office: string;
+    state: string;
+    district: string;
+    year?: number;
+  };
+  candidates: Candidate[];
+  financials: Record<string, FinancialSummary[]>;
+  timestamp: number;
+}
+
 export default function RaceAnalysis() {
   const navigate = useNavigate();
   const [office, setOffice] = useState('H');
@@ -53,6 +67,48 @@ export default function RaceAnalysis() {
     });
   };
 
+  // Load cached data on mount
+  useEffect(() => {
+    try {
+      const cachedDataStr = sessionStorage.getItem(CACHE_KEY);
+      if (cachedDataStr) {
+        const cachedData: CachedRaceData = JSON.parse(cachedDataStr);
+        // Restore search parameters
+        setOffice(cachedData.searchParams.office);
+        setState(cachedData.searchParams.state);
+        setDistrict(cachedData.searchParams.district);
+        setYear(cachedData.searchParams.year);
+        // Restore results
+        setCandidates(cachedData.candidates);
+        setFinancials(cachedData.financials);
+      }
+    } catch (err) {
+      console.error('Error loading cached race data:', err);
+      // If cache is corrupted, clear it
+      sessionStorage.removeItem(CACHE_KEY);
+    }
+  }, []);
+
+  // Save search results to cache
+  const saveToCache = (candidatesData: Candidate[], financialsData: Record<string, FinancialSummary[]>) => {
+    try {
+      const cacheData: CachedRaceData = {
+        searchParams: {
+          office,
+          state,
+          district,
+          year,
+        },
+        candidates: candidatesData,
+        financials: financialsData,
+        timestamp: Date.now(),
+      };
+      sessionStorage.setItem(CACHE_KEY, JSON.stringify(cacheData));
+    } catch (err) {
+      console.error('Error saving race data to cache:', err);
+    }
+  };
+
   const handleSearch = async () => {
     setLoading(true);
     setError(null);
@@ -67,14 +123,16 @@ export default function RaceAnalysis() {
         year,
         limit: 100,
       });
+      
       // Sort candidates by last name
       const sortedCandidates = sortCandidatesByLastName(results);
       setCandidates(sortedCandidates);
 
       // Fetch financials for all candidates using batch endpoint
+      let financialsMap: Record<string, FinancialSummary[]> = {};
       try {
         const candidateIds = sortedCandidates.map(c => c.candidate_id);
-        const financialsMap = await candidateApi.getBatchFinancials(candidateIds);
+        financialsMap = await candidateApi.getBatchFinancials(candidateIds);
         setFinancials(financialsMap);
       } catch (err) {
         // Fallback to individual calls if batch fails
@@ -89,13 +147,19 @@ export default function RaceAnalysis() {
         });
 
         const financialResults = await Promise.all(financialPromises);
-        const financialsMap: Record<string, FinancialSummary[]> = {};
         financialResults.forEach(({ candidateId, financials: fs }) => {
           financialsMap[candidateId] = fs;
         });
         setFinancials(financialsMap);
       }
+
+      // Cache the results
+      saveToCache(sortedCandidates, financialsMap);
     } catch (err: any) {
+      // Ignore abort errors for manual searches
+      if (err.name === 'AbortError') {
+        return;
+      }
       setError(err?.response?.data?.detail || err?.message || 'Failed to load race candidates');
       console.error(err);
     } finally {
@@ -209,11 +273,6 @@ export default function RaceAnalysis() {
   };
 
   const filteredCandidates = getFilteredAndSortedCandidates();
-
-  useEffect(() => {
-    // Auto-search on mount with default values
-    handleSearch();
-  }, []);
 
   const selectedFinancials = Array.from(selectedCandidates)
     .map((id) => {

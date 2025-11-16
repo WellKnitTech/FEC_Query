@@ -15,24 +15,40 @@ export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 10
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!candidateId) return;
+    
+    const abortController = new AbortController();
+    
     const fetchGraph = async () => {
       setLoading(true);
       setError(null);
       try {
-        const data = await analysisApi.getMoneyFlow(candidateId, maxDepth, minAmount);
-        setGraph(data);
+        const data = await analysisApi.getMoneyFlow(candidateId, maxDepth, minAmount, abortController.signal);
+        if (!abortController.signal.aborted) {
+          setGraph(data);
+        }
       } catch (err: any) {
+        // Don't set error if request was aborted
+        if (err.name === 'AbortError' || abortController.signal.aborted) {
+          return;
+        }
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load money flow graph';
-        setError(errorMessage);
-        console.error('Error loading money flow graph:', err);
+        if (!abortController.signal.aborted) {
+          setError(errorMessage);
+          console.error('Error loading money flow graph:', err);
+        }
       } finally {
-        setLoading(false);
+        if (!abortController.signal.aborted) {
+          setLoading(false);
+        }
       }
     };
 
-    if (candidateId) {
-      fetchGraph();
-    }
+    fetchGraph();
+    
+    return () => {
+      abortController.abort();
+    };
   }, [candidateId, maxDepth, minAmount]);
 
   useEffect(() => {

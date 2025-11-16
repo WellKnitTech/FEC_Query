@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { AxiosRequestConfig } from 'axios';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -8,6 +8,11 @@ const api = axios.create({
     'Content-Type': 'application/json',
   },
 });
+
+// Helper function to create axios config with AbortController
+export const createRequestConfig = (signal?: AbortSignal): AxiosRequestConfig => {
+  return signal ? { signal } : {};
+};
 
 export interface ContactInformation {
   street_address?: string;
@@ -116,38 +121,39 @@ export const candidateApi = {
     party?: string;
     year?: number;
     limit?: number;
-  }): Promise<Candidate[]> => {
-    const response = await api.get('/api/candidates/search', { params });
+  }, signal?: AbortSignal): Promise<Candidate[]> => {
+    const response = await api.get('/api/candidates/search', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 
-  getById: async (candidateId: string): Promise<Candidate> => {
-    const response = await api.get(`/api/candidates/${candidateId}`);
+  getById: async (candidateId: string, signal?: AbortSignal): Promise<Candidate> => {
+    const response = await api.get(`/api/candidates/${candidateId}`, createRequestConfig(signal));
     return response.data;
   },
 
-  refreshContactInfo: async (candidateId: string): Promise<{
+  refreshContactInfo: async (candidateId: string, signal?: AbortSignal): Promise<{
     success: boolean;
     message: string;
     contact_info?: ContactInformation;
     contact_info_updated_at?: string;
   }> => {
-    const response = await api.post(`/api/candidates/${candidateId}/refresh-contact-info`);
+    const response = await api.post(`/api/candidates/${candidateId}/refresh-contact-info`, undefined, createRequestConfig(signal));
     return response.data;
   },
 
-  getFinancials: async (candidateId: string, cycle?: number): Promise<FinancialSummary[]> => {
+  getFinancials: async (candidateId: string, cycle?: number, signal?: AbortSignal): Promise<FinancialSummary[]> => {
     const response = await api.get(`/api/candidates/${candidateId}/financials`, {
       params: cycle ? { cycle } : {},
+      ...createRequestConfig(signal),
     });
     return response.data;
   },
 
-  getBatchFinancials: async (candidateIds: string[], cycle?: number): Promise<Record<string, FinancialSummary[]>> => {
+  getBatchFinancials: async (candidateIds: string[], cycle?: number, signal?: AbortSignal): Promise<Record<string, FinancialSummary[]>> => {
     const response = await api.post('/api/candidates/financials/batch', {
       candidate_ids: candidateIds,
       ...(cycle ? { cycle } : {}),
-    });
+    }, createRequestConfig(signal));
     return response.data;
   },
 
@@ -157,8 +163,8 @@ export const candidateApi = {
     district?: string;
     year?: number;
     limit?: number;
-  }): Promise<Candidate[]> => {
-    const response = await api.get('/api/candidates/race', { params });
+  }, signal?: AbortSignal): Promise<Candidate[]> => {
+    const response = await api.get('/api/candidates/race', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 };
@@ -195,14 +201,15 @@ export const contributionApi = {
     min_date?: string;
     max_date?: string;
     limit?: number;
-  }): Promise<Contribution[]> => {
-    const response = await api.get('/api/contributions/', { params });
+  }, signal?: AbortSignal): Promise<Contribution[]> => {
+    const response = await api.get('/api/contributions/', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 
-  getUniqueContributors: async (searchTerm: string, limit?: number): Promise<UniqueContributor[]> => {
+  getUniqueContributors: async (searchTerm: string, limit?: number, signal?: AbortSignal): Promise<UniqueContributor[]> => {
     const response = await api.get('/api/contributions/unique-contributors', {
       params: { search_term: searchTerm, limit },
+      ...createRequestConfig(signal),
     });
     return response.data;
   },
@@ -216,8 +223,8 @@ export const contributionApi = {
     min_date?: string;
     max_date?: string;
     limit?: number;
-  }): Promise<AggregatedDonor[]> => {
-    const response = await api.get('/api/contributions/aggregated-donors', { params });
+  }, signal?: AbortSignal): Promise<AggregatedDonor[]> => {
+    const response = await api.get('/api/contributions/aggregated-donors', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 
@@ -227,8 +234,8 @@ export const contributionApi = {
     min_date?: string;
     max_date?: string;
     cycle?: number;
-  }): Promise<ContributionAnalysis> => {
-    const response = await api.get('/api/contributions/analysis', { params });
+  }, signal?: AbortSignal): Promise<ContributionAnalysis> => {
+    const response = await api.get('/api/contributions/analysis', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 };
@@ -258,13 +265,14 @@ export interface ContributionVelocity {
 }
 
 export const analysisApi = {
-  getMoneyFlow: async (candidateId: string, maxDepth?: number, minAmount?: number): Promise<MoneyFlowGraph> => {
+  getMoneyFlow: async (candidateId: string, maxDepth?: number, minAmount?: number, signal?: AbortSignal): Promise<MoneyFlowGraph> => {
     const response = await api.get('/api/analysis/money-flow', {
       params: {
         candidate_id: candidateId,
         max_depth: maxDepth,
         min_amount: minAmount,
       },
+      ...createRequestConfig(signal),
     });
     return response.data;
   },
@@ -274,8 +282,8 @@ export const analysisApi = {
     committee_id?: string;
     min_date?: string;
     max_date?: string;
-  }): Promise<ExpenditureBreakdown> => {
-    const response = await api.get('/api/analysis/expenditure-breakdown', { params });
+  }, signal?: AbortSignal): Promise<ExpenditureBreakdown> => {
+    const response = await api.get('/api/analysis/expenditure-breakdown', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 
@@ -284,8 +292,8 @@ export const analysisApi = {
     committee_id?: string;
     min_date?: string;
     max_date?: string;
-  }): Promise<EmployerAnalysis> => {
-    const response = await api.get('/api/analysis/employer-breakdown', { params });
+  }, signal?: AbortSignal): Promise<EmployerAnalysis> => {
+    const response = await api.get('/api/analysis/employer-breakdown', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 
@@ -294,20 +302,21 @@ export const analysisApi = {
     committee_id?: string;
     min_date?: string;
     max_date?: string;
-  }): Promise<ContributionVelocity> => {
-    const response = await api.get('/api/analysis/velocity', { params });
+  }, signal?: AbortSignal): Promise<ContributionVelocity> => {
+    const response = await api.get('/api/analysis/velocity', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 };
 
 export const fraudApi = {
-  analyze: async (candidateId: string, minDate?: string, maxDate?: string): Promise<FraudAnalysis> => {
+  analyze: async (candidateId: string, minDate?: string, maxDate?: string, signal?: AbortSignal): Promise<FraudAnalysis> => {
     const response = await api.get('/api/fraud/analyze', {
       params: {
         candidate_id: candidateId,
         min_date: minDate,
         max_date: maxDate,
       },
+      ...createRequestConfig(signal),
     });
     return response.data;
   },
@@ -316,7 +325,8 @@ export const fraudApi = {
     candidateId: string,
     minDate?: string,
     maxDate?: string,
-    useAggregation: boolean = true
+    useAggregation: boolean = true,
+    signal?: AbortSignal
   ): Promise<FraudAnalysis> => {
     const response = await api.get('/api/fraud/analyze-donors', {
       params: {
@@ -325,6 +335,7 @@ export const fraudApi = {
         max_date: maxDate,
         use_aggregation: useAggregation,
       },
+      ...createRequestConfig(signal),
     });
     return response.data;
   },
@@ -395,19 +406,20 @@ export const committeeApi = {
     committee_type?: string;
     state?: string;
     limit?: number;
-  }): Promise<CommitteeSummary[]> => {
-    const response = await api.get('/api/committees/search', { params });
+  }, signal?: AbortSignal): Promise<CommitteeSummary[]> => {
+    const response = await api.get('/api/committees/search', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 
-  getById: async (committeeId: string): Promise<CommitteeSummary> => {
-    const response = await api.get(`/api/committees/${committeeId}`);
+  getById: async (committeeId: string, signal?: AbortSignal): Promise<CommitteeSummary> => {
+    const response = await api.get(`/api/committees/${committeeId}`, createRequestConfig(signal));
     return response.data;
   },
 
-  getFinancials: async (committeeId: string, cycle?: number): Promise<CommitteeFinancials[]> => {
+  getFinancials: async (committeeId: string, cycle?: number, signal?: AbortSignal): Promise<CommitteeFinancials[]> => {
     const response = await api.get(`/api/committees/${committeeId}/financials`, {
       params: cycle ? { cycle } : {},
+      ...createRequestConfig(signal),
     });
     return response.data;
   },
@@ -418,9 +430,10 @@ export const committeeApi = {
       min_date?: string;
       max_date?: string;
       limit?: number;
-    }
+    },
+    signal?: AbortSignal
   ): Promise<Contribution[]> => {
-    const response = await api.get(`/api/committees/${committeeId}/contributions`, { params });
+    const response = await api.get(`/api/committees/${committeeId}/contributions`, { params, ...createRequestConfig(signal) });
     return response.data;
   },
 
@@ -430,9 +443,10 @@ export const committeeApi = {
       min_date?: string;
       max_date?: string;
       limit?: number;
-    }
+    },
+    signal?: AbortSignal
   ): Promise<any[]> => {
-    const response = await api.get(`/api/committees/${committeeId}/expenditures`, { params });
+    const response = await api.get(`/api/committees/${committeeId}/expenditures`, { params, ...createRequestConfig(signal) });
     return response.data;
   },
 
@@ -442,9 +456,10 @@ export const committeeApi = {
       min_date?: string;
       max_date?: string;
       limit?: number;
-    }
+    },
+    signal?: AbortSignal
   ): Promise<CommitteeTransfer[]> => {
-    const response = await api.get(`/api/committees/${committeeId}/transfers`, { params });
+    const response = await api.get(`/api/committees/${committeeId}/transfers`, { params, ...createRequestConfig(signal) });
     return response.data;
   },
 };
@@ -459,8 +474,8 @@ export const independentExpenditureApi = {
     min_amount?: number;
     max_amount?: number;
     limit?: number;
-  }): Promise<IndependentExpenditure[]> => {
-    const response = await api.get('/api/independent-expenditures/', { params });
+  }, signal?: AbortSignal): Promise<IndependentExpenditure[]> => {
+    const response = await api.get('/api/independent-expenditures/', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 
@@ -469,17 +484,18 @@ export const independentExpenditureApi = {
     committee_id?: string;
     min_date?: string;
     max_date?: string;
-  }): Promise<IndependentExpenditureAnalysis> => {
-    const response = await api.get('/api/independent-expenditures/analysis', { params });
+  }, signal?: AbortSignal): Promise<IndependentExpenditureAnalysis> => {
+    const response = await api.get('/api/independent-expenditures/analysis', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 
-  getCandidateSummary: async (candidateId: string, minDate?: string, maxDate?: string): Promise<any> => {
+  getCandidateSummary: async (candidateId: string, minDate?: string, maxDate?: string, signal?: AbortSignal): Promise<any> => {
     const response = await api.get(`/api/independent-expenditures/${candidateId}/summary`, {
       params: {
         min_date: minDate,
         max_date: maxDate,
       },
+      ...createRequestConfig(signal),
     });
     return response.data;
   },
@@ -700,13 +716,15 @@ export const trendApi = {
   getCandidateTrends: async (
     candidateId: string,
     minCycle?: number,
-    maxCycle?: number
+    maxCycle?: number,
+    signal?: AbortSignal
   ): Promise<TrendAnalysis> => {
     const response = await api.get(`/api/trends/candidate/${candidateId}`, {
       params: {
         ...(minCycle ? { min_cycle: minCycle } : {}),
         ...(maxCycle ? { max_cycle: maxCycle } : {}),
       },
+      ...createRequestConfig(signal),
     });
     return response.data;
   },
@@ -714,35 +732,39 @@ export const trendApi = {
   getRaceTrends: async (
     candidateIds: string[],
     minCycle?: number,
-    maxCycle?: number
+    maxCycle?: number,
+    signal?: AbortSignal
   ): Promise<any> => {
     const response = await api.post('/api/trends/race', {
       candidate_ids: candidateIds,
       ...(minCycle ? { min_cycle: minCycle } : {}),
       ...(maxCycle ? { max_cycle: maxCycle } : {}),
-    });
+    }, createRequestConfig(signal));
     return response.data;
   },
 
   getContributionTrends: async (
     candidateId: string,
     minCycle?: number,
-    maxCycle?: number
+    maxCycle?: number,
+    signal?: AbortSignal
   ): Promise<any> => {
     const response = await api.get(`/api/trends/contribution-velocity/${candidateId}`, {
       params: {
         ...(minCycle ? { min_cycle: minCycle } : {}),
         ...(maxCycle ? { max_cycle: maxCycle } : {}),
       },
+      ...createRequestConfig(signal),
     });
     return response.data;
   },
 };
 
 export const savedSearchApi = {
-  list: async (searchType?: string): Promise<SavedSearch[]> => {
+  list: async (searchType?: string, signal?: AbortSignal): Promise<SavedSearch[]> => {
     const response = await api.get('/api/saved-searches/', {
       params: searchType ? { search_type: searchType } : {},
+      ...createRequestConfig(signal),
     });
     return response.data;
   },

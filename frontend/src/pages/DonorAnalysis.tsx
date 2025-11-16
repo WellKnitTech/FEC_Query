@@ -329,6 +329,10 @@ export default function DonorAnalysis() {
 
   // Fetch committee names for top committees
   useEffect(() => {
+    if (topCommittees.length === 0) return;
+    
+    const abortController = new AbortController();
+    
     const fetchCommitteeNames = async () => {
       const uniqueCommitteeIds = [...new Set(topCommittees.map(c => c.committeeId))];
       const names: Record<string, string> = {};
@@ -336,25 +340,37 @@ export default function DonorAnalysis() {
       await Promise.all(
         uniqueCommitteeIds.map(async (committeeId) => {
           try {
-            const committee = await committeeApi.getById(committeeId);
-            names[committeeId] = committee.name || committeeId;
-          } catch (err) {
-            // If fetch fails, use the ID as fallback
-            names[committeeId] = committeeId;
+            const committee = await committeeApi.getById(committeeId, abortController.signal);
+            if (!abortController.signal.aborted) {
+              names[committeeId] = committee.name || committeeId;
+            }
+          } catch (err: any) {
+            // If fetch fails or aborted, use the ID as fallback
+            if (err.name !== 'AbortError' && !abortController.signal.aborted) {
+              names[committeeId] = committeeId;
+            }
           }
         })
       );
       
-      setCommitteeNames(names);
+      if (!abortController.signal.aborted) {
+        setCommitteeNames(names);
+      }
     };
 
-    if (topCommittees.length > 0) {
-      fetchCommitteeNames();
-    }
+    fetchCommitteeNames();
+    
+    return () => {
+      abortController.abort();
+    };
   }, [topCommittees]);
 
   // Fetch candidate names for top candidates
   useEffect(() => {
+    if (topCandidates.length === 0) return;
+    
+    const abortController = new AbortController();
+    
     const fetchCandidateNames = async () => {
       const uniqueCandidateIds = [...new Set(topCandidates.map(c => c.candidateId))];
       const names: Record<string, string> = {};
@@ -362,25 +378,37 @@ export default function DonorAnalysis() {
       await Promise.all(
         uniqueCandidateIds.map(async (candidateId) => {
           try {
-            const candidate = await candidateApi.getById(candidateId);
-            names[candidateId] = candidate.name || candidateId;
-          } catch (err) {
-            // If fetch fails, use the ID as fallback
-            names[candidateId] = candidateId;
+            const candidate = await candidateApi.getById(candidateId, abortController.signal);
+            if (!abortController.signal.aborted) {
+              names[candidateId] = candidate.name || candidateId;
+            }
+          } catch (err: any) {
+            // If fetch fails or aborted, use the ID as fallback
+            if (err.name !== 'AbortError' && !abortController.signal.aborted) {
+              names[candidateId] = candidateId;
+            }
           }
         })
       );
       
-      setCandidateNames(names);
+      if (!abortController.signal.aborted) {
+        setCandidateNames(names);
+      }
     };
 
-    if (topCandidates.length > 0) {
-      fetchCandidateNames();
-    }
+    fetchCandidateNames();
+    
+    return () => {
+      abortController.abort();
+    };
   }, [topCandidates]);
 
   // Fetch committee names for all contributions
   useEffect(() => {
+    if (contributions.length === 0) return;
+    
+    const abortController = new AbortController();
+    
     const fetchAllCommitteeNames = async () => {
       const uniqueCommitteeIds = [...new Set(
         contributions
@@ -397,25 +425,37 @@ export default function DonorAnalysis() {
       await Promise.all(
         missingIds.map(async (committeeId) => {
           try {
-            const committee = await committeeApi.getById(committeeId);
-            names[committeeId] = committee.name || committeeId;
-          } catch (err) {
-            // If fetch fails, use the ID as fallback
-            names[committeeId] = committeeId;
+            const committee = await committeeApi.getById(committeeId, abortController.signal);
+            if (!abortController.signal.aborted) {
+              names[committeeId] = committee.name || committeeId;
+            }
+          } catch (err: any) {
+            // If fetch fails or aborted, use the ID as fallback
+            if (err.name !== 'AbortError' && !abortController.signal.aborted) {
+              names[committeeId] = committeeId;
+            }
           }
         })
       );
       
-      setCommitteeNames(names);
+      if (!abortController.signal.aborted) {
+        setCommitteeNames(names);
+      }
     };
 
-    if (contributions.length > 0) {
-      fetchAllCommitteeNames();
-    }
+    fetchAllCommitteeNames();
+    
+    return () => {
+      abortController.abort();
+    };
   }, [contributions, committeeNames]);
 
   // Fetch candidate names for all contributions
   useEffect(() => {
+    if (contributions.length === 0) return;
+    
+    const abortController = new AbortController();
+    
     const fetchAllCandidateNames = async () => {
       const uniqueCandidateIds = [...new Set(
         contributions
@@ -432,21 +472,29 @@ export default function DonorAnalysis() {
       await Promise.all(
         missingIds.map(async (candidateId) => {
           try {
-            const candidate = await candidateApi.getById(candidateId);
-            names[candidateId] = candidate.name || candidateId;
-          } catch (err) {
-            // If fetch fails, use the ID as fallback
-            names[candidateId] = candidateId;
+            const candidate = await candidateApi.getById(candidateId, abortController.signal);
+            if (!abortController.signal.aborted) {
+              names[candidateId] = candidate.name || candidateId;
+            }
+          } catch (err: any) {
+            // If fetch fails or aborted, use the ID as fallback
+            if (err.name !== 'AbortError' && !abortController.signal.aborted) {
+              names[candidateId] = candidateId;
+            }
           }
         })
       );
       
-      setCandidateNames(names);
+      if (!abortController.signal.aborted) {
+        setCandidateNames(names);
+      }
     };
 
-    if (contributions.length > 0) {
-      fetchAllCandidateNames();
-    }
+    fetchAllCandidateNames();
+    
+    return () => {
+      abortController.abort();
+    };
   }, [contributions, candidateNames]);
 
   // Contribution frequency analysis

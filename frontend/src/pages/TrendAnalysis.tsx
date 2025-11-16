@@ -32,7 +32,44 @@ export default function TrendAnalysis() {
   useEffect(() => {
     // Auto-search if candidateId is in URL
     if (candidateId) {
+      const abortController = new AbortController();
+      
+      const handleSearch = async () => {
+        if (!candidateId.trim()) return;
+
+        setLoading(true);
+        setError(null);
+
+        try {
+          const [candidateData, trendsData] = await Promise.all([
+            candidateApi.getById(candidateId, abortController.signal),
+            trendApi.getCandidateTrends(candidateId, minCycle, maxCycle, abortController.signal),
+          ]);
+
+          if (!abortController.signal.aborted) {
+            setCandidate(candidateData);
+            setTrends(trendsData);
+          }
+        } catch (err: any) {
+          // Don't set error if request was aborted
+          if (err.name === 'AbortError' || abortController.signal.aborted) {
+            return;
+          }
+          if (!abortController.signal.aborted) {
+            setError(err?.response?.data?.detail || err?.message || 'Failed to load trends');
+          }
+        } finally {
+          if (!abortController.signal.aborted) {
+            setLoading(false);
+          }
+        }
+      };
+      
       handleSearch();
+      
+      return () => {
+        abortController.abort();
+      };
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

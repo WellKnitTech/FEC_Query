@@ -15,26 +15,42 @@ export default function FraudAlerts({ candidateId, minDate, maxDate }: FraudAler
   const [useAggregation, setUseAggregation] = useState<boolean>(true);
 
   useEffect(() => {
+    if (!candidateId) return;
+    
+    const abortController = new AbortController();
+    
     const fetchAnalysis = async () => {
       setLoading(true);
       setError(null);
       try {
         const data = useAggregation
-          ? await fraudApi.analyzeWithAggregation(candidateId, minDate, maxDate, true)
-          : await fraudApi.analyze(candidateId, minDate, maxDate);
-        setAnalysis(data);
+          ? await fraudApi.analyzeWithAggregation(candidateId, minDate, maxDate, true, abortController.signal)
+          : await fraudApi.analyze(candidateId, minDate, maxDate, abortController.signal);
+        if (!abortController.signal.aborted) {
+          setAnalysis(data);
+        }
       } catch (err: any) {
+        // Don't set error if request was aborted
+        if (err.name === 'AbortError' || abortController.signal.aborted) {
+          return;
+        }
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load fraud analysis';
-        setError(errorMessage);
-        console.error('Error loading fraud analysis:', err);
+        if (!abortController.signal.aborted) {
+          setError(errorMessage);
+          console.error('Error loading fraud analysis:', err);
+        }
       } finally {
-        setLoading(false);
+        if (!abortController.signal.aborted) {
+          setLoading(false);
+        }
       }
     };
 
-    if (candidateId) {
-      fetchAnalysis();
-    }
+    fetchAnalysis();
+    
+    return () => {
+      abortController.abort();
+    };
   }, [candidateId, minDate, maxDate, useAggregation]);
 
   if (loading) {

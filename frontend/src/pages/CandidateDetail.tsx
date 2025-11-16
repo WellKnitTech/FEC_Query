@@ -22,22 +22,38 @@ export default function CandidateDetail() {
   const [cycle, setCycle] = useState<number | undefined>(undefined);
 
   useEffect(() => {
+    const abortController = new AbortController();
+    
     const fetchCandidate = async () => {
       if (!candidateId) return;
       
       setLoading(true);
       setError(null);
       try {
-        const data = await candidateApi.getById(candidateId);
-        setCandidate(data);
+        const data = await candidateApi.getById(candidateId, abortController.signal);
+        if (!abortController.signal.aborted) {
+          setCandidate(data);
+        }
       } catch (err: any) {
-        setError(err?.response?.data?.detail || err?.message || 'Failed to load candidate data');
+        // Don't set error if request was aborted
+        if (err.name === 'AbortError' || abortController.signal.aborted) {
+          return;
+        }
+        if (!abortController.signal.aborted) {
+          setError(err?.response?.data?.detail || err?.message || 'Failed to load candidate data');
+        }
       } finally {
-        setLoading(false);
+        if (!abortController.signal.aborted) {
+          setLoading(false);
+        }
       }
     };
 
     fetchCandidate();
+    
+    return () => {
+      abortController.abort();
+    };
   }, [candidateId]);
 
   const handleRefreshContactInfo = async () => {

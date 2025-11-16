@@ -10,21 +10,37 @@ export default function SavedSearches() {
   const [filterType, setFilterType] = useState<string>('');
 
   useEffect(() => {
+    const abortController = new AbortController();
+    
+    const loadSearches = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await savedSearchApi.list(filterType || undefined, abortController.signal);
+        if (!abortController.signal.aborted) {
+          setSearches(data);
+        }
+      } catch (err: any) {
+        // Don't set error if request was aborted
+        if (err.name === 'AbortError' || abortController.signal.aborted) {
+          return;
+        }
+        if (!abortController.signal.aborted) {
+          setError(err?.response?.data?.detail || err?.message || 'Failed to load saved searches');
+        }
+      } finally {
+        if (!abortController.signal.aborted) {
+          setLoading(false);
+        }
+      }
+    };
+    
     loadSearches();
+    
+    return () => {
+      abortController.abort();
+    };
   }, [filterType]);
-
-  const loadSearches = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await savedSearchApi.list(filterType || undefined);
-      setSearches(data);
-    } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || 'Failed to load saved searches');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handleDelete = async (searchId: number) => {
     if (!confirm('Are you sure you want to delete this saved search?')) return;
