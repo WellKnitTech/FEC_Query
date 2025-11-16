@@ -1090,7 +1090,7 @@ export default function DonorAnalysis() {
                       className="p-4 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer"
                       onClick={() => {
                         // Filter by state - could add state filter in future
-                        console.log('State clicked:', state);
+                        // State clicked - handle state selection if needed
                       }}
                     >
                       <div className="font-semibold text-gray-900">{state}</div>

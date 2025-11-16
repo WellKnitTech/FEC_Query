@@ -89,8 +89,7 @@ export default function BulkDataManagement() {
         }
       },
       () => {
-        // WebSocket failed, fallback to polling
-        console.log(`WebSocket failed for job ${jobId}, falling back to polling`);
+        // WebSocket failed, falling back to polling
         startPolling(jobId);
       }
     );

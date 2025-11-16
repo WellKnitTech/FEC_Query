@@ -31,14 +31,10 @@ export default function GeographicHeatmap({
           min_date: minDate,
           max_date: maxDate,
         };
-        console.log('[GeographicHeatmap] Fetching geographic data with params:', params);
+        // Fetching geographic data
         
         const data = await analysisApi.getGeographic(params);
-        console.log('[GeographicHeatmap] Received geographic data:', {
-          total_contributions: data.total_contributions,
-          states_count: Object.keys(data.contributions_by_state).length,
-          cities_count: Object.keys(data.contributions_by_city).length,
-        });
+        // Geographic data received
         setGeographicData(data);
       } catch (err: any) {
         const errorMessage = err?.response?.data?.detail || err?.message || 'Unknown error';
