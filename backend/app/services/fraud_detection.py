@@ -24,21 +24,58 @@ class FraudDetectionService:
         """
         Determine contributor category from contribution data.
         
+        Uses FEC transaction type codes and committee types to determine if the
+        contributor is an individual, PAC, party committee, etc.
+        
         Args:
             contribution: Contribution dictionary with fields like contribution_type, 
-                         contributor_employer, etc.
+                         contributor_employer, committee_type, etc.
             
         Returns:
             Contributor category string
         """
-        # If we have a limits service, we can use it to help determine category
-        # For now, default to individual - this can be enhanced later with
-        # logic to parse FEC transaction type codes or committee types
-        contribution_type = contribution.get('contribution_type') or contribution.get('transaction_type')
+        # Use the contribution limits service helper if available
+        if self.limits_service:
+            contribution_type_code = contribution.get('contribution_type') or contribution.get('transaction_type')
+            committee_type = contribution.get('committee_type')
+            has_employer_occupation = bool(
+                contribution.get('contributor_employer') or 
+                contribution.get('contributor_occupation')
+            )
+            
+            return ContributionLimitsService._infer_contributor_category(
+                contribution_type_code=contribution_type_code,
+                committee_type=committee_type,
+                has_employer_occupation=has_employer_occupation
+            )
         
-        # TODO: Add logic to parse FEC transaction type codes to determine
-        # if contributor is a PAC, party committee, etc.
-        # For now, assume individual if we have employer/occupation info
+        # Fallback: use simple heuristics if limits service not available
+        contribution_type = contribution.get('contribution_type') or contribution.get('transaction_type')
+        committee_type = contribution.get('committee_type')
+        
+        # Check committee type first
+        if committee_type:
+            committee_type_upper = committee_type.upper()
+            if committee_type_upper in ['X', 'Y']:
+                return ContributionLimitsService.CONTRIBUTOR_PARTY_COMMITTEE
+            if committee_type_upper in ['H', 'S', 'P']:
+                return ContributionLimitsService.CONTRIBUTOR_CANDIDATE_COMMITTEE
+            if committee_type_upper in ['N', 'Q', 'O', 'V', 'W']:
+                return ContributionLimitsService.CONTRIBUTOR_MULTICANDIDATE_PAC
+        
+        # Check transaction type code
+        if contribution_type:
+            code_str = str(contribution_type).strip()
+            if code_str.startswith('1'):  # Individual
+                return ContributionLimitsService.CONTRIBUTOR_INDIVIDUAL
+            elif code_str.startswith('2'):  # Party
+                return ContributionLimitsService.CONTRIBUTOR_PARTY_COMMITTEE
+            elif code_str.startswith('3'):  # Multicandidate PAC
+                return ContributionLimitsService.CONTRIBUTOR_MULTICANDIDATE_PAC
+            elif code_str.startswith('4'):  # Non-multicandidate PAC
+                return ContributionLimitsService.CONTRIBUTOR_NON_MULTICANDIDATE_PAC
+        
+        # If we have employer/occupation info, it's likely an individual
         if contribution.get('contributor_employer') or contribution.get('contributor_occupation'):
             return ContributionLimitsService.CONTRIBUTOR_INDIVIDUAL
         
@@ -64,8 +101,12 @@ class FraudDetectionService:
         limit = await self.limits_service.get_limit_for_contribution(
             contribution_date=contribution_date,
             contributor_type=contributor_category,
-            contribution_type_code=contribution.get('contribution_type'),
-            committee_type=contribution.get('committee_type')
+            contribution_type_code=contribution.get('contribution_type') or contribution.get('transaction_type'),
+            committee_type=contribution.get('committee_type'),
+            has_employer_occupation=bool(
+                contribution.get('contributor_employer') or 
+                contribution.get('contributor_occupation')
+            )
         )
         
         # Fallback to default if limit not found
