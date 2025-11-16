@@ -4,6 +4,7 @@ from typing import Optional, List, Dict
 from pydantic import BaseModel
 from app.services.fec_client import FECClient
 from app.services.report_generator import ReportGenerator
+from app.services.analysis import AnalysisService
 import logging
 import io
 import csv
@@ -41,6 +42,10 @@ def get_fec_client():
 def get_report_generator():
     """Get report generator instance"""
     return ReportGenerator(get_fec_client())
+
+def get_analysis_service():
+    """Get analysis service instance"""
+    return AnalysisService(get_fec_client())
 
 
 @router.get("/candidate/{candidate_id}")
@@ -356,4 +361,133 @@ async def export_contributions_excel(
     except Exception as e:
         logger.error(f"Error exporting contributions Excel: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to export contributions: {str(e)}")
+
+
+@router.get("/out-of-state-contributions/csv")
+async def export_out_of_state_contributions_csv(
+    candidate_id: str = Query(..., description="Candidate ID"),
+    min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    cycle: Optional[int] = Query(None, description="Election cycle"),
+    limit: int = Query(10000, ge=1, le=100000, description="Maximum results")
+):
+    """Export out-of-state contributions as CSV"""
+    try:
+        analysis_service = get_analysis_service()
+        contributions = await analysis_service.get_out_of_state_contributions(
+            candidate_id=candidate_id,
+            min_date=min_date,
+            max_date=max_date,
+            cycle=cycle,
+            limit=limit
+        )
+        
+        output = StringIO()
+        writer = csv.writer(output)
+        
+        # Write headers
+        writer.writerow([
+            'Contribution ID', 'Candidate ID', 'Committee ID', 'Contributor Name',
+            'Contributor City', 'Contributor State', 'Contributor Zip',
+            'Contributor Employer', 'Contributor Occupation', 'Amount',
+            'Date', 'Type', 'Receipt Type'
+        ])
+        
+        # Write data
+        for contrib in contributions:
+            writer.writerow([
+                contrib.get('contribution_id') or contrib.get('sub_id', ''),
+                contrib.get('candidate_id', ''),
+                contrib.get('committee_id', ''),
+                contrib.get('contributor_name', ''),
+                contrib.get('contributor_city', ''),
+                contrib.get('contributor_state', ''),
+                contrib.get('contributor_zip', ''),
+                contrib.get('contributor_employer', ''),
+                contrib.get('contributor_occupation', ''),
+                contrib.get('contribution_amount', 0),
+                contrib.get('contribution_date') or contrib.get('contribution_receipt_date', ''),
+                contrib.get('contribution_type', ''),
+                contrib.get('receipt_type', '')
+            ])
+        
+        output.seek(0)
+        buffer = BytesIO(output.getvalue().encode('utf-8'))
+        filename = f"out_of_state_contributions_{candidate_id}.csv"
+        
+        return StreamingResponse(
+            buffer,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except Exception as e:
+        logger.error(f"Error exporting out-of-state contributions CSV: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to export out-of-state contributions: {str(e)}")
+
+
+@router.get("/out-of-state-donors/csv")
+async def export_out_of_state_donors_csv(
+    candidate_id: str = Query(..., description="Candidate ID"),
+    min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    cycle: Optional[int] = Query(None, description="Election cycle"),
+    limit: int = Query(1000, ge=1, le=10000, description="Maximum results")
+):
+    """Export aggregated out-of-state donors as CSV"""
+    try:
+        analysis_service = get_analysis_service()
+        donors = await analysis_service.get_aggregated_out_of_state_donors(
+            candidate_id=candidate_id,
+            min_date=min_date,
+            max_date=max_date,
+            cycle=cycle,
+            limit=limit
+        )
+        
+        output = StringIO()
+        writer = csv.writer(output)
+        
+        # Write headers
+        writer.writerow([
+            'Donor Key', 'Canonical Name', 'All Name Variations', 'Total Amount',
+            'Contribution Count', 'State', 'City', 'Employer', 'Occupation',
+            'First Contribution Date', 'Last Contribution Date', 'Match Confidence',
+            'Contribution IDs'
+        ])
+        
+        # Write data
+        for donor in donors:
+            all_names = donor.get('all_names', [])
+            all_names_str = '; '.join(all_names) if all_names else ''
+            contribution_ids = donor.get('contribution_ids', [])
+            contribution_ids_str = '; '.join(contribution_ids) if contribution_ids else ''
+            
+            writer.writerow([
+                donor.get('donor_key', ''),
+                donor.get('canonical_name', ''),
+                all_names_str,
+                donor.get('total_amount', 0),
+                donor.get('contribution_count', 0),
+                donor.get('canonical_state', ''),
+                donor.get('canonical_city', ''),
+                donor.get('canonical_employer', ''),
+                donor.get('canonical_occupation', ''),
+                donor.get('first_contribution_date', ''),
+                donor.get('last_contribution_date', ''),
+                donor.get('match_confidence', 0),
+                contribution_ids_str
+            ])
+        
+        output.seek(0)
+        buffer = BytesIO(output.getvalue().encode('utf-8'))
+        filename = f"out_of_state_donors_{candidate_id}.csv"
+        
+        return StreamingResponse(
+            buffer,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except Exception as e:
+        logger.error(f"Error exporting out-of-state donors CSV: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to export out-of-state donors: {str(e)}")
 

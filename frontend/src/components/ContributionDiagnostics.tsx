@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { contributionApi, ContributionDiagnostics as ContributionDiagnosticsType } from '../services/api';
 import { useNavigate } from 'react-router-dom';
+import { formatDate } from '../utils/dateUtils';
 
 interface ContributionDiagnosticsProps {
   candidateId: string;
@@ -98,8 +99,8 @@ export default function ContributionDiagnostics({
           <div>
             <div className="text-sm text-gray-600 mb-1">Date Range</div>
             <div className="text-gray-900">
-              {new Date(diagnostics.date_range.min_date).toLocaleDateString()} -{' '}
-              {new Date(diagnostics.date_range.max_date).toLocaleDateString()}
+              {formatDate(diagnostics.date_range.min_date)} -{' '}
+              {formatDate(diagnostics.date_range.max_date)}
             </div>
           </div>
         )}

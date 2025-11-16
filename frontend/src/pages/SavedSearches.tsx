@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { savedSearchApi, SavedSearch } from '../services/api';
+import { formatDate } from '../utils/dateUtils';
 
 export default function SavedSearches() {
   const navigate = useNavigate();
@@ -148,7 +149,7 @@ export default function SavedSearches() {
                       <div className="flex-1">
                         <h4 className="font-semibold text-gray-900">{search.name}</h4>
                         <p className="text-sm text-gray-600 mt-1">
-                          Created: {search.created_at ? new Date(search.created_at).toLocaleDateString() : 'N/A'}
+                          Created: {formatDate(search.created_at)}
                         </p>
                         <div className="text-xs text-gray-500 mt-1">
                           {Object.entries(search.search_params || {})

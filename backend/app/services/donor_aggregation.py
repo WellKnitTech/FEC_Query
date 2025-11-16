@@ -3,6 +3,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from datetime import datetime
+from app.utils.date_utils import serialize_date
 from rapidfuzz import fuzz
 
 logger = logging.getLogger(__name__)
@@ -236,15 +237,38 @@ class DonorAggregationService:
                 if c.get('contributor_name')
             ))
             
-            # Calculate dates
-            dates = [
-                c.get('contribution_date')
-                for c in contribs
-                if c.get('contribution_date')
-            ]
+            # Calculate dates - parse and compare properly
+            parsed_dates = []
+            for c in contribs:
+                date_str = c.get('contribution_date') or c.get('contribution_receipt_date')
+                if date_str:
+                    try:
+                        # Try parsing as ISO format (YYYY-MM-DD)
+                        if isinstance(date_str, str):
+                            # Handle both date-only and datetime strings
+                            if 'T' in date_str:
+                                parsed = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                            elif len(date_str) == 10 and date_str.count('-') == 2:
+                                parsed = datetime.strptime(date_str, '%Y-%m-%d')
+                            else:
+                                # Try other common formats
+                                parsed = datetime.fromisoformat(date_str)
+                            parsed_dates.append(parsed)
+                        elif isinstance(date_str, datetime):
+                            parsed_dates.append(date_str)
+                    except (ValueError, TypeError) as e:
+                        logger.debug(f"Could not parse date '{date_str}' for donor {canonical.get('contributor_name', 'unknown')}: {e}")
+                        continue
             
-            first_date = min(dates) if dates else None
-            last_date = max(dates) if dates else None
+            first_date = min(parsed_dates) if parsed_dates else None
+            last_date = max(parsed_dates) if parsed_dates else None
+            
+            # Log if no dates found for debugging
+            if not parsed_dates and contribs:
+                logger.debug(f"No valid dates found for donor {canonical.get('contributor_name', 'unknown')} with {len(contribs)} contributions")
+                # Check what date fields are available
+                sample_contrib = contribs[0]
+                logger.debug(f"Sample contribution date fields: contribution_date={sample_contrib.get('contribution_date')}, contribution_receipt_date={sample_contrib.get('contribution_receipt_date')}")
             
             # Calculate match confidence (average of all pairwise confidences)
             if len(contribs) > 1:
@@ -267,6 +291,10 @@ class DonorAggregationService:
                         # Skip invalid amounts
                         continue
             
+            # Format dates as YYYY-MM-DD strings using centralized utility
+            first_date_str = serialize_date(first_date)
+            last_date_str = serialize_date(last_date)
+            
             aggregated.append({
                 'donor_key': key,
                 'canonical_name': canonical.get('contributor_name', ''),
@@ -276,8 +304,8 @@ class DonorAggregationService:
                 'canonical_occupation': canonical.get('contributor_occupation'),
                 'total_amount': total_amount,
                 'contribution_count': len(contribs),
-                'first_contribution_date': first_date.isoformat() if isinstance(first_date, datetime) else (first_date if first_date else None),
-                'last_contribution_date': last_date.isoformat() if isinstance(last_date, datetime) else (last_date if last_date else None),
+                'first_contribution_date': first_date_str,
+                'last_contribution_date': last_date_str,
                 'contribution_ids': [c.get('contribution_id') for c in contribs if c.get('contribution_id')],
                 'all_names': all_names[:self.max_name_variations],
                 'match_confidence': round(match_confidence, 3)

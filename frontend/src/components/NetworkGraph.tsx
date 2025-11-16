@@ -13,6 +13,7 @@ export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 10
   const [graph, setGraph] = useState<MoneyFlowGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [aggregateByEmployer, setAggregateByEmployer] = useState<boolean>(true);
 
   useEffect(() => {
     if (!candidateId) return;
@@ -23,7 +24,7 @@ export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 10
       setLoading(true);
       setError(null);
       try {
-        const data = await analysisApi.getMoneyFlow(candidateId, maxDepth, minAmount, abortController.signal);
+        const data = await analysisApi.getMoneyFlow(candidateId, maxDepth, minAmount, aggregateByEmployer, abortController.signal);
         if (!abortController.signal.aborted) {
           setGraph(data);
         }
@@ -49,7 +50,7 @@ export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 10
     return () => {
       abortController.abort();
     };
-  }, [candidateId, maxDepth, minAmount]);
+  }, [candidateId, maxDepth, minAmount, aggregateByEmployer]);
 
   useEffect(() => {
     if (!graph || !networkRef.current) return;
@@ -60,6 +61,8 @@ export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 10
         ? '#3B82F6' 
         : node.type === 'committee' 
         ? '#10B981' 
+        : node.type === 'employer'
+        ? '#8B5CF6'
         : '#F59E0B';
       
       return {
@@ -74,7 +77,7 @@ export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 10
           },
         },
         shape: node.type === 'candidate' ? 'diamond' : node.type === 'committee' ? 'box' : 'dot',
-        size: node.type === 'candidate' ? 30 : node.type === 'committee' ? 20 : 15,
+        size: node.type === 'candidate' ? 30 : node.type === 'committee' ? 20 : node.type === 'employer' ? 18 : 15,
         title: `${node.name}${node.amount ? ` - $${node.amount.toLocaleString()}` : ''}`,
       };
     });
@@ -177,18 +180,36 @@ export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 10
     <div className="bg-white rounded-lg shadow p-6">
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-xl font-semibold">Money Flow Network</h2>
-        <div className="flex gap-4 text-sm">
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-blue-500 rounded"></div>
-            <span>Candidate</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-green-500 rounded"></div>
-            <span>Committee</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-yellow-500 rounded-full"></div>
-            <span>Donor</span>
+        <div className="flex items-center gap-4">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={aggregateByEmployer}
+              onChange={(e) => setAggregateByEmployer(e.target.checked)}
+              className="rounded"
+            />
+            <span className="text-sm text-gray-600">Group by Employer</span>
+          </label>
+          <div className="flex gap-4 text-sm">
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-4 bg-blue-500 rounded"></div>
+              <span>Candidate</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-4 bg-green-500 rounded"></div>
+              <span>Committee</span>
+            </div>
+            {aggregateByEmployer ? (
+              <div className="flex items-center gap-2">
+                <div className="w-4 h-4 bg-purple-500 rounded-full"></div>
+                <span>Employer</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <div className="w-4 h-4 bg-yellow-500 rounded-full"></div>
+                <span>Donor</span>
+              </div>
+            )}
           </div>
         </div>
       </div>

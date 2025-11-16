@@ -808,6 +808,16 @@ class BulkDataService:
                     chunk['contributor_occupation'] = clean_str_field(chunk['OCCUPATION'])
                     chunk['contribution_type'] = clean_str_field(chunk['TRAN_TP'])
                     
+                    # Extract additional FEC fields
+                    chunk['amendment_indicator'] = clean_str_field(chunk.get('AMNDT_IND', pd.Series([''] * len(chunk))))
+                    chunk['report_type'] = clean_str_field(chunk.get('RPT_TP', pd.Series([''] * len(chunk))))
+                    chunk['transaction_id'] = clean_str_field(chunk.get('TRAN_ID', pd.Series([''] * len(chunk))))
+                    chunk['entity_type'] = clean_str_field(chunk.get('ENTITY_TP', pd.Series([''] * len(chunk))))
+                    chunk['other_id'] = clean_str_field(chunk.get('OTHER_ID', pd.Series([''] * len(chunk))))
+                    chunk['file_number'] = clean_str_field(chunk.get('FILE_NUM', pd.Series([''] * len(chunk))))
+                    chunk['memo_code'] = clean_str_field(chunk.get('MEMO_CD', pd.Series([''] * len(chunk))))
+                    chunk['memo_text'] = clean_str_field(chunk.get('MEMO_TEXT', pd.Series([''] * len(chunk))))
+                    
                     # Vectorized amount parsing
                     chunk['contribution_amount'] = pd.to_numeric(
                         chunk['TRANSACTION_AMT'].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip(),
@@ -823,21 +833,37 @@ class BulkDataService:
                         'contribution_id', 'candidate_id', 'committee_id', 'contributor_name',
                         'contributor_city', 'contributor_state', 'contributor_zip',
                         'contributor_employer', 'contributor_occupation', 'contribution_amount',
-                        'contribution_date', 'contribution_type'
+                        'contribution_date', 'contribution_type', 'amendment_indicator',
+                        'report_type', 'transaction_id', 'entity_type', 'other_id',
+                        'file_number', 'memo_code', 'memo_text'
                     ]].copy()
                     
                     # Convert to dict records
                     records = records_df.to_dict('records')
                     
                     # Build raw_data efficiently using vectorized operations
-                    # Create a DataFrame with just the raw_data fields
+                    # Create a DataFrame with ALL 20 source fields from Schedule A
                     raw_data_df = pd.DataFrame({
-                        'SUB_ID': chunk['SUB_ID'].astype(str).where(chunk['SUB_ID'].notna(), None),
-                        'CAND_ID': chunk['CAND_ID'].astype(str).where(chunk['CAND_ID'].notna(), None),
                         'CMTE_ID': chunk['CMTE_ID'].astype(str).where(chunk['CMTE_ID'].notna(), None),
+                        'AMNDT_IND': chunk['AMNDT_IND'].astype(str).where(chunk['AMNDT_IND'].notna(), None),
+                        'RPT_TP': chunk['RPT_TP'].astype(str).where(chunk['RPT_TP'].notna(), None),
+                        'TRAN_ID': chunk['TRAN_ID'].astype(str).where(chunk['TRAN_ID'].notna(), None),
+                        'ENTITY_TP': chunk['ENTITY_TP'].astype(str).where(chunk['ENTITY_TP'].notna(), None),
                         'NAME': chunk['NAME'].astype(str).where(chunk['NAME'].notna(), None),
-                        'TRANSACTION_AMT': chunk['TRANSACTION_AMT'].astype(str).where(chunk['TRANSACTION_AMT'].notna(), None),
+                        'CITY': chunk['CITY'].astype(str).where(chunk['CITY'].notna(), None),
+                        'STATE': chunk['STATE'].astype(str).where(chunk['STATE'].notna(), None),
+                        'ZIP_CODE': chunk['ZIP_CODE'].astype(str).where(chunk['ZIP_CODE'].notna(), None),
+                        'EMPLOYER': chunk['EMPLOYER'].astype(str).where(chunk['EMPLOYER'].notna(), None),
+                        'OCCUPATION': chunk['OCCUPATION'].astype(str).where(chunk['OCCUPATION'].notna(), None),
                         'TRANSACTION_DT': chunk['TRANSACTION_DT'].astype(str).where(chunk['TRANSACTION_DT'].notna(), None),
+                        'TRANSACTION_AMT': chunk['TRANSACTION_AMT'].astype(str).where(chunk['TRANSACTION_AMT'].notna(), None),
+                        'OTHER_ID': chunk['OTHER_ID'].astype(str).where(chunk['OTHER_ID'].notna(), None),
+                        'CAND_ID': chunk['CAND_ID'].astype(str).where(chunk['CAND_ID'].notna(), None),
+                        'TRAN_TP': chunk['TRAN_TP'].astype(str).where(chunk['TRAN_TP'].notna(), None),
+                        'FILE_NUM': chunk['FILE_NUM'].astype(str).where(chunk['FILE_NUM'].notna(), None),
+                        'MEMO_CD': chunk['MEMO_CD'].astype(str).where(chunk['MEMO_CD'].notna(), None),
+                        'MEMO_TEXT': chunk['MEMO_TEXT'].astype(str).where(chunk['MEMO_TEXT'].notna(), None),
+                        'SUB_ID': chunk['SUB_ID'].astype(str).where(chunk['SUB_ID'].notna(), None),
                     })
                     
                     # Convert to dict records and add to main records
@@ -855,12 +881,16 @@ class BulkDataService:
                                     (contribution_id, candidate_id, committee_id, contributor_name, 
                                      contributor_city, contributor_state, contributor_zip, 
                                      contributor_employer, contributor_occupation, contribution_amount,
-                                     contribution_date, contribution_type, raw_data, created_at)
+                                     contribution_date, contribution_type, amendment_indicator,
+                                     report_type, transaction_id, entity_type, other_id,
+                                     file_number, memo_code, memo_text, raw_data, created_at)
                                     VALUES 
                                     (:contribution_id, :candidate_id, :committee_id, :contributor_name,
                                      :contributor_city, :contributor_state, :contributor_zip,
                                      :contributor_employer, :contributor_occupation, :contribution_amount,
-                                     :contribution_date, :contribution_type, :raw_data, :created_at)
+                                     :contribution_date, :contribution_type, :amendment_indicator,
+                                     :report_type, :transaction_id, :entity_type, :other_id,
+                                     :file_number, :memo_code, :memo_text, :raw_data, :created_at)
                                 """),
                                 [
                                     {
@@ -919,12 +949,16 @@ class BulkDataService:
                                             (contribution_id, candidate_id, committee_id, contributor_name, 
                                              contributor_city, contributor_state, contributor_zip, 
                                              contributor_employer, contributor_occupation, contribution_amount,
-                                             contribution_date, contribution_type, raw_data, created_at)
+                                             contribution_date, contribution_type, amendment_indicator,
+                                             report_type, transaction_id, entity_type, other_id,
+                                             file_number, memo_code, memo_text, raw_data, created_at)
                                             VALUES 
                                             (:contribution_id, :candidate_id, :committee_id, :contributor_name,
                                              :contributor_city, :contributor_state, :contributor_zip,
                                              :contributor_employer, :contributor_occupation, :contribution_amount,
-                                             :contribution_date, :contribution_type, :raw_data, :created_at)
+                                             :contribution_date, :contribution_type, :amendment_indicator,
+                                             :report_type, :transaction_id, :entity_type, :other_id,
+                                             :file_number, :memo_code, :memo_text, :raw_data, :created_at)
                                         """),
                                         {
                                             **record,

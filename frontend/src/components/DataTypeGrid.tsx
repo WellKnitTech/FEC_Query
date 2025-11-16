@@ -1,5 +1,6 @@
 import { CycleStatus } from '../services/api';
 import DataTypeStatusBadge from './DataTypeStatusBadge';
+import { formatDate } from '../utils/dateUtils';
 
 interface DataTypeGridProps {
   cycleStatus: CycleStatus | null;
@@ -39,15 +40,6 @@ export default function DataTypeGrid({
 
   const implementedTypes = cycleStatus.data_types.filter((dt) => dt.is_implemented);
   const allImplementedSelected = implementedTypes.length > 0 && implementedTypes.every((dt) => selectedTypes.has(dt.data_type));
-
-  const formatDate = (dateStr: string | null | undefined) => {
-    if (!dateStr) return 'N/A';
-    try {
-      return new Date(dateStr).toLocaleDateString();
-    } catch {
-      return 'N/A';
-    }
-  };
 
   const formatNumber = (num: number) => {
     return num.toLocaleString();

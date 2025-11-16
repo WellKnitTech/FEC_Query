@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { BulkImportJobStatus } from '../services/api';
+import { formatDateTime } from '../utils/dateUtils';
 
 interface ProgressTrackerProps {
   jobStatus: BulkImportJobStatus;
@@ -25,8 +26,7 @@ export default function ProgressTracker({ jobStatus, onCancel }: ProgressTracker
   };
 
   const formatTime = (isoString?: string) => {
-    if (!isoString) return 'N/A';
-    return new Date(isoString).toLocaleString();
+    return formatDateTime(isoString, 'N/A');
   };
 
   // Get current stage from progress_data

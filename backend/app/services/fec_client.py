@@ -952,6 +952,225 @@ class FECClient:
             logger.debug(f"Error getting latest contribution date: {e}")
             return None
     
+    async def _fetch_contribution_by_id(
+        self,
+        contribution_id: str,
+        committee_id: Optional[str] = None,
+        candidate_id: Optional[str] = None
+    ) -> Optional[Dict]:
+        """
+        Fetch a single contribution from FEC API by contribution ID (sub_id).
+        
+        Args:
+            contribution_id: The contribution sub_id to fetch
+            committee_id: Optional committee ID to narrow the search
+            candidate_id: Optional candidate ID to narrow the search
+            
+        Returns:
+            Dictionary with contribution data, or None if not found
+        """
+        try:
+            params = {
+                "per_page": 1,
+                "sub_id": contribution_id
+            }
+            
+            # Add optional filters to narrow search
+            if committee_id:
+                params["committee_id"] = committee_id
+            if candidate_id:
+                params["candidate_id"] = candidate_id
+            
+            # Add two_year_transaction_period if we have candidate_id
+            if candidate_id:
+                current_year = datetime.now().year
+                two_year_transaction_period = (current_year // 2) * 2
+                params["two_year_transaction_period"] = two_year_transaction_period
+            
+            logger.debug(f"Fetching contribution {contribution_id} from FEC API")
+            data = await self._make_request("schedules/schedule_a", params, use_cache=False)
+            results = data.get("results", [])
+            
+            if results:
+                contrib = results[0]
+                logger.debug(f"Found contribution {contribution_id} in FEC API")
+                return contrib
+            else:
+                logger.debug(f"Contribution {contribution_id} not found in FEC API")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Error fetching contribution {contribution_id} from FEC API: {e}")
+            return None
+    
+    async def get_contribution_date(
+        self,
+        contribution_id: str,
+        contribution_obj: Optional[Contribution] = None,
+        committee_id: Optional[str] = None,
+        candidate_id: Optional[str] = None,
+        raw_data: Optional[Dict] = None
+    ) -> Optional[datetime]:
+        """
+        Get contribution date following the pattern: DB -> raw_data -> API -> store in DB.
+        This is the centralized method for all date extraction that ensures API responses are stored.
+        
+        Args:
+            contribution_id: The contribution sub_id
+            contribution_obj: Optional Contribution object (if already loaded)
+            committee_id: Optional committee ID for API queries
+            candidate_id: Optional candidate ID for API queries
+            raw_data: Optional raw_data dict (if already loaded)
+            
+        Returns:
+            datetime object if date found, None otherwise
+        """
+        from app.utils.date_utils import extract_date_from_raw_data
+        
+        # Step 1: Check database field first
+        if contribution_obj and contribution_obj.contribution_date:
+            logger.debug(f"get_contribution_date: Found date in DB field for {contribution_id}")
+            return contribution_obj.contribution_date
+        
+        # Step 2: Check raw_data
+        if raw_data is None and contribution_obj and contribution_obj.raw_data:
+            raw_data = contribution_obj.raw_data
+        
+        if raw_data:
+            date_from_raw = extract_date_from_raw_data(raw_data)
+            if date_from_raw:
+                logger.debug(f"get_contribution_date: Found date in raw_data for {contribution_id}")
+                # If we found date in raw_data, update DB field for future queries (in background to avoid blocking)
+                # Schedule background update to avoid blocking the current query
+                if contribution_obj:
+                    asyncio.create_task(
+                        self._update_contribution_date_from_raw_data(contribution_id, date_from_raw)
+                    )
+                return date_from_raw
+        
+        # Step 3: Schedule API query in background (non-blocking)
+        # Don't block - schedule background task to fetch and store
+        logger.info(f"get_contribution_date: Date not in DB or raw_data, scheduling API fetch for {contribution_id}")
+        asyncio.create_task(
+            self._backfill_contribution_date(contribution_id, committee_id, candidate_id)
+        )
+        
+        # Return None immediately - date will be available on next query after background task completes
+        return None
+    
+    async def _update_contribution_date_from_raw_data(
+        self,
+        contribution_id: str,
+        date_value: datetime
+    ):
+        """
+        Background task to update contribution_date field from raw_data.
+        This ensures dates found in raw_data are persisted to the DB field.
+        """
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(Contribution).where(Contribution.contribution_id == contribution_id)
+                )
+                contrib = result.scalar_one_or_none()
+                if contrib and not contrib.contribution_date:
+                    contrib.contribution_date = date_value
+                    await session.commit()
+                    logger.debug(f"_update_contribution_date_from_raw_data: Updated DB field for {contribution_id}")
+        except Exception as e:
+            logger.warning(f"_update_contribution_date_from_raw_data: Error updating date for {contribution_id}: {e}")
+    
+    async def _store_api_response_in_db(
+        self,
+        contribution_id: str,
+        api_response: Dict,
+        extracted_date: Optional[datetime] = None
+    ):
+        """
+        Store FEC API response in database to avoid future API calls.
+        This ensures we never query the API twice for the same contribution.
+        
+        Args:
+            contribution_id: The contribution sub_id
+            api_response: The full API response dictionary
+            extracted_date: Optional extracted date from the API response
+        """
+        try:
+            async with AsyncSessionLocal() as session:
+                # Find the contribution
+                result = await session.execute(
+                    select(Contribution).where(Contribution.contribution_id == contribution_id)
+                )
+                contrib = result.scalar_one_or_none()
+                
+                if contrib:
+                    # Update the date if we found one
+                    if extracted_date:
+                        contrib.contribution_date = extracted_date
+                        logger.info(f"_store_api_response_in_db: Storing date {extracted_date} for {contribution_id}")
+                    
+                    # Store the complete API response in raw_data
+                    # Merge with existing raw_data to preserve any existing fields
+                    if contrib.raw_data and isinstance(contrib.raw_data, dict):
+                        # Merge API response into existing raw_data (API data takes precedence)
+                        contrib.raw_data.update(api_response)
+                    else:
+                        # If no existing raw_data, use the API response directly
+                        contrib.raw_data = api_response
+                    
+                    # Mark JSON column as modified so SQLAlchemy detects the change
+                    from sqlalchemy.orm.attributes import flag_modified
+                    flag_modified(contrib, 'raw_data')
+                    
+                    # Commit the update
+                    await session.commit()
+                    logger.info(f"_store_api_response_in_db: Successfully stored API response for contribution {contribution_id}")
+                else:
+                    logger.warning(f"_store_api_response_in_db: Contribution {contribution_id} not found in database")
+        except Exception as e:
+            logger.error(f"_store_api_response_in_db: Error storing API response for {contribution_id}: {e}", exc_info=True)
+    
+    async def _backfill_contribution_date(
+        self,
+        contribution_id: str,
+        committee_id: Optional[str] = None,
+        candidate_id: Optional[str] = None
+    ):
+        """
+        Background task to fetch contribution date from FEC API and update database.
+        This runs asynchronously and doesn't block the main query.
+        Always stores the API response in DB to avoid future API calls.
+        
+        Args:
+            contribution_id: The contribution sub_id to fetch
+            committee_id: Optional committee ID to narrow the search
+            candidate_id: Optional candidate ID to narrow the search
+        """
+        try:
+            logger.info(f"_backfill_contribution_date: Starting background fetch for contribution_id: {contribution_id}")
+            
+            # Fetch from FEC API
+            api_contrib = await self._fetch_contribution_by_id(contribution_id, committee_id, candidate_id)
+            
+            if not api_contrib:
+                logger.warning(f"_backfill_contribution_date: FEC API returned no data for contribution_id: {contribution_id}")
+                return
+            
+            # Extract date from API response
+            from app.utils.date_utils import extract_date_from_raw_data
+            api_date = extract_date_from_raw_data(api_contrib)
+            
+            # Always store API response in DB (even if no date found) to avoid future API calls
+            await self._store_api_response_in_db(contribution_id, api_contrib, api_date)
+            
+            if api_date:
+                logger.info(f"_backfill_contribution_date: Successfully fetched and stored date {api_date} for {contribution_id}")
+            else:
+                logger.warning(f"_backfill_contribution_date: No date found for {contribution_id} (API response was still stored)")
+                        
+        except Exception as e:
+            logger.error(f"_backfill_contribution_date: Error in background task for contribution_id {contribution_id}: {e}", exc_info=True)
+    
     async def _query_local_contributions(
         self,
         candidate_id: Optional[str] = None,
@@ -970,8 +1189,28 @@ class FECClient:
         
         try:
             async with AsyncSessionLocal() as session:
-                # Build query
-                query = select(Contribution)
+                # Build query - use load_only to only load columns that exist
+                # Some columns (amendment_indicator, report_type, etc.) may not exist if migrations haven't been run
+                from sqlalchemy.orm import load_only
+                query = select(Contribution).options(
+                    load_only(
+                        Contribution.id,
+                        Contribution.contribution_id,
+                        Contribution.candidate_id,
+                        Contribution.committee_id,
+                        Contribution.contributor_name,
+                        Contribution.contributor_city,
+                        Contribution.contributor_state,
+                        Contribution.contributor_zip,
+                        Contribution.contributor_employer,
+                        Contribution.contributor_occupation,
+                        Contribution.contribution_amount,
+                        Contribution.contribution_date,
+                        Contribution.contribution_type,
+                        Contribution.raw_data,
+                        Contribution.created_at
+                    )
+                )
                 conditions = []
                 
                 if candidate_id:
@@ -1041,6 +1280,35 @@ class FECClient:
                         # Use the candidate_id from the contribution, or fall back to query parameter
                         final_candidate_id = contrib_candidate_id or candidate_id
                         
+                        # Extract date using centralized method: DB -> raw_data -> API (background) -> store
+                        # This method ensures:
+                        # 1. Checks DB field first
+                        # 2. Checks raw_data second
+                        # 3. If missing, schedules background API fetch (non-blocking)
+                        # 4. API response is always stored in DB for future queries
+                        contrib_date = await self.get_contribution_date(
+                            contribution_id=c.contribution_id,
+                            contribution_obj=c,
+                            committee_id=c.committee_id,
+                            candidate_id=final_candidate_id
+                        )
+                        
+                        # Format date as string
+                        date_str = None
+                        if contrib_date:
+                            if isinstance(contrib_date, datetime):
+                                date_str = contrib_date.strftime("%Y-%m-%d")
+                                logger.debug(f"_query_local_contributions: Formatted datetime to string: {date_str}")
+                            else:
+                                from app.utils.date_utils import serialize_date
+                                date_str = serialize_date(contrib_date)
+                                if date_str:
+                                    logger.debug(f"_query_local_contributions: Serialized date to string: {date_str}")
+                                else:
+                                    logger.warning(f"_query_local_contributions: serialize_date returned None for: {contrib_date}")
+                        else:
+                            logger.warning(f"_query_local_contributions: contrib_date is None, date_str will be None")
+                        
                         contrib_dict = {
                             "sub_id": c.contribution_id,
                             "contribution_id": c.contribution_id,
@@ -1053,8 +1321,8 @@ class FECClient:
                             "contributor_employer": c.contributor_employer,
                             "contributor_occupation": c.contributor_occupation,
                             "contribution_amount": amount,
-                            "contribution_receipt_date": c.contribution_date.strftime("%Y-%m-%d") if c.contribution_date else None,
-                            "contribution_date": c.contribution_date.strftime("%Y-%m-%d") if c.contribution_date else None,
+                            "contribution_receipt_date": date_str,
+                            "contribution_date": date_str,
                             "contribution_type": c.contribution_type,
                             "receipt_type": None
                         }
@@ -1616,25 +1884,30 @@ class FECClient:
                             contribution_data.get('contributor_name_1')
                         )
                         
-                        # Parse contribution date
-                        contrib_date = None
-                        date_str = (
-                            contribution_data.get('contribution_receipt_date') or 
-                            contribution_data.get('contribution_date') or 
-                            contribution_data.get('receipt_date')
-                        )
-                        if date_str:
-                            try:
-                                # Try parsing various date formats
-                                if isinstance(date_str, str):
-                                    if 'T' in date_str:
-                                        contrib_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                        # Parse contribution date using centralized utility
+                        # This handles multiple date fields and formats (MMDDYYYY, YYYY-MM-DD, ISO, etc.)
+                        from app.utils.date_utils import extract_date_from_raw_data
+                        contrib_date = extract_date_from_raw_data(contribution_data)
+                        
+                        # If centralized extraction didn't find a date, try direct field access as fallback
+                        if not contrib_date:
+                            date_str = (
+                                contribution_data.get('contribution_receipt_date') or 
+                                contribution_data.get('contribution_date') or 
+                                contribution_data.get('receipt_date')
+                            )
+                            if date_str:
+                                try:
+                                    # Try parsing various date formats
+                                    if isinstance(date_str, str):
+                                        if 'T' in date_str:
+                                            contrib_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                                        else:
+                                            contrib_date = datetime.strptime(date_str, '%Y-%m-%d')
                                     else:
-                                        contrib_date = datetime.strptime(date_str, '%Y-%m-%d')
-                                else:
-                                    contrib_date = date_str
-                            except (ValueError, TypeError):
-                                pass
+                                        contrib_date = date_str
+                                except (ValueError, TypeError):
+                                    pass
                         
                         if existing_contrib:
                             # Update existing contribution - this handles amendments to previous filings

@@ -43,6 +43,15 @@ class Contribution(BaseModel):
     contribution_date: Optional[str] = None
     contribution_type: Optional[str] = None
     receipt_type: Optional[str] = None
+    # Additional FEC fields from Schedule A
+    amendment_indicator: Optional[str] = None  # AMNDT_IND
+    report_type: Optional[str] = None  # RPT_TP
+    transaction_id: Optional[str] = None  # TRAN_ID
+    entity_type: Optional[str] = None  # ENTITY_TP
+    other_id: Optional[str] = None  # OTHER_ID
+    file_number: Optional[str] = None  # FILE_NUM
+    memo_code: Optional[str] = None  # MEMO_CD
+    memo_text: Optional[str] = None  # MEMO_TEXT
 
 
 class ContributionAnalysis(BaseModel):
@@ -216,6 +225,22 @@ class AggregatedDonor(BaseModel):
     contribution_ids: List[str]
     all_names: List[str]  # All name variations found
     match_confidence: float  # 0.0-1.0
+
+
+class DonorStateAnalysis(BaseModel):
+    """Analysis of individual donors by state"""
+    donors_by_state: Dict[str, int]  # Count of unique donors per state
+    donor_percentages_by_state: Dict[str, float]  # Percentage of donors per state
+    amounts_by_state: Dict[str, float]  # Contribution amounts by state
+    amount_percentages_by_state: Dict[str, float]  # Percentage of amounts per state
+    candidate_state: Optional[str] = None  # Candidate's state for comparison
+    in_state_donor_percentage: float = 0.0  # Percentage of donors from candidate's state
+    in_state_amount_percentage: float = 0.0  # Percentage of contribution amount from candidate's state
+    out_of_state_donor_percentage: float = 0.0  # Percentage of donors from outside candidate's state
+    out_of_state_amount_percentage: float = 0.0  # Percentage of amount from outside candidate's state
+    total_unique_donors: int = 0  # Total count of unique donors
+    total_contributions: float = 0.0  # Total contribution amount
+    is_highly_out_of_state: bool = False  # Flag if >50% of donors/amounts are from outside state
 
 
 # Update forward references

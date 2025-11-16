@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { candidateApi, Candidate } from '../services/api';
+import { formatDateTime } from '../utils/dateUtils';
 import FinancialSummary from '../components/FinancialSummary';
+import DonorStateAnalysis from '../components/DonorStateAnalysis';
 import ContributionAnalysis from '../components/ContributionAnalysis';
 import NetworkGraph from '../components/NetworkGraph';
 import FraudAlerts from '../components/FraudAlerts';
@@ -77,15 +79,6 @@ export default function CandidateDetail() {
     }
   };
 
-  const formatDate = (dateString?: string) => {
-    if (!dateString) return 'Never';
-    try {
-      const date = new Date(dateString);
-      return date.toLocaleString();
-    } catch {
-      return dateString;
-    }
-  };
 
   if (loading) {
     return (
@@ -209,12 +202,13 @@ export default function CandidateDetail() {
         )}
         
         <div className="text-sm text-gray-500 border-t pt-4">
-          Last updated: {formatDate(candidate.contact_info_updated_at)}
+          Last updated: {formatDateTime(candidate.contact_info_updated_at)}
         </div>
       </div>
 
       <div className="space-y-6">
         <FinancialSummary candidateId={candidateId!} onCycleChange={setCycle} />
+        <DonorStateAnalysis candidateId={candidateId} candidate={candidate} cycle={cycle} />
         <ContributionAnalysis candidateId={candidateId} cycle={cycle} />
         <CumulativeChart candidateId={candidateId} />
         <ContributionVelocity candidateId={candidateId} />

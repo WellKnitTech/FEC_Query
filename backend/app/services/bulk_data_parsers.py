@@ -898,6 +898,27 @@ class GenericBulkDataParser:
                     chunk['payee_name'] = clean_str_field(chunk.get('NAME', pd.Series([''] * len(chunk))))
                     chunk['expenditure_purpose'] = clean_str_field(chunk.get('PURPOSE', pd.Series([''] * len(chunk))))
                     
+                    # Extract additional FEC fields
+                    chunk['amendment_indicator'] = clean_str_field(chunk.get('AMNDT_IND', pd.Series([''] * len(chunk))))
+                    chunk['report_year'] = pd.to_numeric(
+                        chunk.get('RPT_YR', pd.Series([''] * len(chunk))).astype(str).str.strip(),
+                        errors='coerce'
+                    )
+                    chunk['report_type'] = clean_str_field(chunk.get('RPT_TP', pd.Series([''] * len(chunk))))
+                    chunk['image_number'] = clean_str_field(chunk.get('IMAGE_NUM', pd.Series([''] * len(chunk))))
+                    chunk['line_number'] = clean_str_field(chunk.get('LINE_NUM', pd.Series([''] * len(chunk))))
+                    chunk['form_type_code'] = clean_str_field(chunk.get('FORM_TP_CD', pd.Series([''] * len(chunk))))
+                    chunk['schedule_type_code'] = clean_str_field(chunk.get('SCHED_TP_CD', pd.Series([''] * len(chunk))))
+                    chunk['transaction_pgi'] = clean_str_field(chunk.get('TRANSACTION_PGI', pd.Series([''] * len(chunk))))
+                    chunk['category'] = clean_str_field(chunk.get('CATEGORY', pd.Series([''] * len(chunk))))
+                    chunk['category_description'] = clean_str_field(chunk.get('CATEGORY_DESC', pd.Series([''] * len(chunk))))
+                    chunk['memo_code'] = clean_str_field(chunk.get('MEMO_CD', pd.Series([''] * len(chunk))))
+                    chunk['memo_text'] = clean_str_field(chunk.get('MEMO_TEXT', pd.Series([''] * len(chunk))))
+                    chunk['entity_type'] = clean_str_field(chunk.get('ENTITY_TP', pd.Series([''] * len(chunk))))
+                    chunk['file_number'] = clean_str_field(chunk.get('FILE_NUM', pd.Series([''] * len(chunk))))
+                    chunk['transaction_id'] = clean_str_field(chunk.get('TRAN_ID', pd.Series([''] * len(chunk))))
+                    chunk['back_reference_transaction_id'] = clean_str_field(chunk.get('BACK_REF_TRAN_ID', pd.Series([''] * len(chunk))))
+                    
                     # Vectorized amount parsing
                     chunk['expenditure_amount'] = pd.to_numeric(
                         chunk.get('TRANSACTION_AMT', pd.Series([''] * len(chunk))).astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip(),
@@ -929,12 +950,19 @@ class GenericBulkDataParser:
                     
                     chunk['expenditure_date'] = parse_date_vectorized(chunk.get('TRANSACTION_DT', pd.Series([''] * len(chunk))))
                     
-                    # Build raw_data vectorized
+                    # Build raw_data vectorized - includes all source fields
                     raw_data_df = pd.DataFrame({col: chunk[col].astype(str).where(chunk[col].notna(), None) for col in columns if col in chunk.columns})
                     raw_data_records = raw_data_df.to_dict('records')
                     
-                    # Convert to records
-                    records_df = chunk[['expenditure_id', 'committee_id', 'payee_name', 'expenditure_amount', 'expenditure_date', 'expenditure_purpose']].copy()
+                    # Convert to records - include all new fields
+                    records_df = chunk[[
+                        'expenditure_id', 'committee_id', 'payee_name', 'expenditure_amount', 
+                        'expenditure_date', 'expenditure_purpose', 'amendment_indicator',
+                        'report_year', 'report_type', 'image_number', 'line_number',
+                        'form_type_code', 'schedule_type_code', 'transaction_pgi',
+                        'category', 'category_description', 'memo_code', 'memo_text',
+                        'entity_type', 'file_number', 'transaction_id', 'back_reference_transaction_id'
+                    ]].copy()
                     records = records_df.to_dict('records')
                     
                     # Add cycle, raw_data, and data_age_days
@@ -978,6 +1006,22 @@ class GenericBulkDataParser:
                                     'expenditure_amount': insert_stmt.excluded.expenditure_amount,
                                     'expenditure_date': insert_stmt.excluded.expenditure_date,
                                     'expenditure_purpose': insert_stmt.excluded.expenditure_purpose,
+                                    'amendment_indicator': insert_stmt.excluded.amendment_indicator,
+                                    'report_year': insert_stmt.excluded.report_year,
+                                    'report_type': insert_stmt.excluded.report_type,
+                                    'image_number': insert_stmt.excluded.image_number,
+                                    'line_number': insert_stmt.excluded.line_number,
+                                    'form_type_code': insert_stmt.excluded.form_type_code,
+                                    'schedule_type_code': insert_stmt.excluded.schedule_type_code,
+                                    'transaction_pgi': insert_stmt.excluded.transaction_pgi,
+                                    'category': insert_stmt.excluded.category,
+                                    'category_description': insert_stmt.excluded.category_description,
+                                    'memo_code': insert_stmt.excluded.memo_code,
+                                    'memo_text': insert_stmt.excluded.memo_text,
+                                    'entity_type': insert_stmt.excluded.entity_type,
+                                    'file_number': insert_stmt.excluded.file_number,
+                                    'transaction_id': insert_stmt.excluded.transaction_id,
+                                    'back_reference_transaction_id': insert_stmt.excluded.back_reference_transaction_id,
                                     'raw_data': insert_stmt.excluded.raw_data,
                                     'data_age_days': insert_stmt.excluded.data_age_days,
                                     'updated_at': func.datetime('now', 'utc')

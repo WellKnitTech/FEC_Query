@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { fraudApi, FraudAnalysis } from '../services/api';
+import { formatDate } from '../utils/dateUtils';
 
 interface FraudAlertsProps {
   candidateId: string;
@@ -208,7 +209,7 @@ export default function FraudAlerts({ candidateId, minDate, maxDate }: FraudAler
                             <div className="font-medium">{contrib.contributor_name || 'Unknown'}</div>
                             <div className="text-gray-600">
                               ${contrib.contribution_amount?.toLocaleString()} on{' '}
-                              {contrib.contribution_date || 'Unknown date'}
+                              {formatDate(contrib.contribution_date)}
                               {contrib.contributor_city && contrib.contributor_state && (
                                 <> from {contrib.contributor_city}, {contrib.contributor_state}</>
                               )}

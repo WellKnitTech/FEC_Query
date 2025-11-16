@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { contributionApi, Contribution } from '../services/api';
 import { Line } from 'react-chartjs-2';
+import { getDateTimestamp } from '../utils/dateUtils';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -99,8 +100,8 @@ export default function CumulativeChart({
 
   // Sort contributions by date
   const sortedContributions = [...contributions].sort((a, b) => {
-    const dateA = a.contribution_date ? new Date(a.contribution_date).getTime() : 0;
-    const dateB = b.contribution_date ? new Date(b.contribution_date).getTime() : 0;
+    const dateA = getDateTimestamp(a.contribution_date);
+    const dateB = getDateTimestamp(b.contribution_date);
     return dateA - dateB;
   });
 

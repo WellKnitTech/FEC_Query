@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { contributionApi, Contribution } from '../services/api';
 import { Scatter } from 'react-chartjs-2';
+import { parseDate, formatDate } from '../utils/dateUtils';
 import {
   Chart as ChartJS,
   LinearScale,
@@ -166,13 +167,15 @@ export default function SmurfingScatter({
 
       for (const contrib of groupContribs) {
         if (contrib.contribution_date) {
-          const date = new Date(contrib.contribution_date);
-          scatterData.push({
-            x: date.getTime(),
-            y: contrib.contribution_amount,
-            label: contrib.contributor_name || 'Unknown',
-            group: groupName,
-          });
+          const date = parseDate(contrib.contribution_date);
+          if (date) {
+            scatterData.push({
+              x: date.getTime(),
+              y: contrib.contribution_amount,
+              label: contrib.contributor_name || 'Unknown',
+              group: groupName,
+            });
+          }
         }
       }
     }
@@ -185,10 +188,14 @@ export default function SmurfingScatter({
       const color = groupColors.get(groupName) || 'rgba(128, 128, 128, 0.6)';
       const data = contribs
         .filter((c) => c.contribution_date)
-        .map((c) => ({
-          x: new Date(c.contribution_date!).getTime(),
-          y: c.contribution_amount,
-        }));
+        .map((c) => {
+          const date = parseDate(c.contribution_date!);
+          return date ? {
+            x: date.getTime(),
+            y: c.contribution_amount,
+          } : null;
+        })
+        .filter((d): d is { x: number; y: number } => d !== null);
 
       return {
         label: `${groupName} (${contribs.length} contributions)`,
@@ -250,7 +257,7 @@ export default function SmurfingScatter({
                 ticks: {
                   callback: (value) => {
                     const date = new Date(value as number);
-                    return date.toLocaleDateString();
+                    return formatDate(date.toISOString().split('T')[0]);
                   },
                 },
               },
@@ -270,7 +277,7 @@ export default function SmurfingScatter({
                     const point = context.raw as { x: number; y: number };
                     const date = new Date(point.x);
                     return [
-                      `Date: ${date.toLocaleDateString()}`,
+                      `Date: ${formatDate(date.toISOString().split('T')[0])}`,
                       `Amount: $${point.y.toFixed(2)}`,
                       `Group: ${context.dataset.label}`,
                     ];

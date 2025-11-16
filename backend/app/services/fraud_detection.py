@@ -118,6 +118,140 @@ class FraudDetectionService:
             return 0.0
         return SequenceMatcher(None, str1.lower(), str2.lower()).ratio()
     
+    def _format_date_for_display(self, date_value: Any) -> Optional[str]:
+        """Format date value to string for frontend display"""
+        from app.utils.date_utils import serialize_date
+        return serialize_date(date_value)
+    
+    def _extract_date_from_contribution(self, contrib: Dict[str, Any]) -> Optional[str]:
+        """Extract and format date from contribution dict, checking multiple sources"""
+        from app.utils.date_utils import serialize_date, extract_date_from_raw_data
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        contrib_id = contrib.get('contribution_id') or contrib.get('sub_id') or 'unknown'
+        logger.debug(f"_extract_date_from_contribution: Processing contribution_id: {contrib_id}")
+        
+        # First try main date fields
+        date_value = (
+            contrib.get('contribution_date') or 
+            contrib.get('contribution_receipt_date') or 
+            contrib.get('receipt_date')
+        )
+        
+        if date_value:
+            logger.debug(f"_extract_date_from_contribution: Found date in main fields: {date_value} (type: {type(date_value).__name__})")
+            formatted = serialize_date(date_value)
+            if formatted:
+                logger.debug(f"_extract_date_from_contribution: Successfully formatted date: {formatted}")
+                return formatted
+            else:
+                logger.debug(f"_extract_date_from_contribution: serialize_date returned None for: {date_value}")
+        else:
+            logger.debug(f"_extract_date_from_contribution: No date in main fields for contribution_id: {contrib_id}")
+        
+        # If main fields don't have a valid date, try raw_data
+        raw_data = contrib.get('raw_data')
+        if raw_data:
+            logger.debug(f"_extract_date_from_contribution: Checking raw_data for contribution_id: {contrib_id}")
+            date_obj = extract_date_from_raw_data(raw_data)
+            if date_obj:
+                formatted = serialize_date(date_obj)
+                logger.debug(f"_extract_date_from_contribution: Extracted and formatted date from raw_data: {formatted}")
+                return formatted
+            else:
+                logger.warning(f"_extract_date_from_contribution: Could not extract date from raw_data for contribution_id: {contrib_id}")
+        else:
+            logger.debug(f"_extract_date_from_contribution: No raw_data for contribution_id: {contrib_id}")
+        
+        logger.warning(f"_extract_date_from_contribution: No date found for contribution_id: {contrib_id}")
+        return None
+    
+    def _enrich_contribution_details(
+        self, 
+        contribution_id: Optional[str], 
+        contrib_map: Dict[str, Dict[str, Any]], 
+        fallback_name: Optional[str] = None,
+        fallback_date: Optional[str] = None,
+        fallback_city: Optional[str] = None,
+        fallback_state: Optional[str] = None,
+        fallback_amount: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        Enrich contribution details from the contributions map.
+        
+        Args:
+            contribution_id: The contribution ID to look up (can be None)
+            contrib_map: Dictionary mapping contribution_id to contribution data
+            fallback_name: Optional fallback name if contribution not found
+            fallback_date: Optional fallback date if contribution not found
+            fallback_city: Optional fallback city if contribution not found
+            fallback_state: Optional fallback state if contribution not found
+            fallback_amount: Optional fallback amount if contribution not found
+            
+        Returns:
+            Dictionary with full contribution details for frontend display
+        """
+        if not contribution_id:
+            # Return data with fallbacks if no contribution ID provided
+            formatted_fallback_date = self._format_date_for_display(fallback_date) if fallback_date else None
+            return {
+                'contribution_id': None,
+                'contributor_name': fallback_name or 'Unknown',
+                'contribution_amount': fallback_amount or 0,
+                'contribution_date': formatted_fallback_date,
+                'contributor_city': fallback_city,
+                'contributor_state': fallback_state,
+            }
+        
+        contrib = contrib_map.get(contribution_id)
+        if contrib:
+            # Extract date from contribution, checking multiple sources including raw_data
+            formatted_date = self._extract_date_from_contribution(contrib)
+            
+            # Fallback to formatted fallback_date if available
+            if not formatted_date and fallback_date:
+                formatted_date = self._format_date_for_display(fallback_date)
+            
+            # Also try to get amount from multiple field names
+            amount = contrib.get('contribution_amount', 0) or contrib.get('contb_receipt_amt', 0) or 0
+            try:
+                amount = float(amount) if amount else 0
+            except (ValueError, TypeError):
+                amount = 0
+            
+            return {
+                'contribution_id': contribution_id,
+                'contributor_name': (
+                    contrib.get('contributor_name') or 
+                    contrib.get('contributor') or 
+                    contrib.get('name') or 
+                    fallback_name or 
+                    'Unknown'
+                ),
+                'contribution_amount': amount or fallback_amount or 0,
+                'contribution_date': formatted_date or (self._format_date_for_display(fallback_date) if fallback_date else None),
+                'contributor_city': contrib.get('contributor_city') or contrib.get('city') or fallback_city,
+                'contributor_state': contrib.get('contributor_state') or contrib.get('state') or fallback_state,
+            }
+        else:
+            # Return data with fallbacks if contribution not found
+            # Log a warning if we have an ID but can't find the contribution
+            if contribution_id:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"Could not find contribution with ID {contribution_id} in contrib_map (map has {len(contrib_map)} entries)")
+            
+            formatted_fallback_date = self._format_date_for_display(fallback_date) if fallback_date else None
+            return {
+                'contribution_id': contribution_id,
+                'contributor_name': fallback_name or 'Unknown',
+                'contribution_amount': fallback_amount or 0,
+                'contribution_date': formatted_fallback_date,
+                'contributor_city': fallback_city,
+                'contributor_state': fallback_state,
+            }
+    
     async def analyze_candidate(
         self,
         candidate_id: str,
@@ -462,10 +596,14 @@ class FraudDetectionService:
             )
         
         # Aggregate donors first
+        # Also create a comprehensive contrib_map with all fields for later lookups
         contrib_dicts = []
         for contrib in contributions:
+            # Get contribution ID (try multiple field names)
+            contrib_id = contrib.get('contribution_id') or contrib.get('sub_id')
+            
             contrib_dict = {
-                'contribution_id': contrib.get('contribution_id'),
+                'contribution_id': contrib_id,
                 'contributor_name': contrib.get('contributor_name'),
                 'contributor_city': contrib.get('contributor_city'),
                 'contributor_state': contrib.get('contributor_state'),
@@ -473,7 +611,7 @@ class FraudDetectionService:
                 'contributor_employer': contrib.get('contributor_employer'),
                 'contributor_occupation': contrib.get('contributor_occupation'),
                 'contribution_amount': contrib.get('contribution_amount', 0) or 0,
-                'contribution_date': contrib.get('contribution_date')
+                'contribution_date': contrib.get('contribution_date') or contrib.get('contribution_receipt_date') or contrib.get('receipt_date')
             }
             contrib_dicts.append(contrib_dict)
         
@@ -486,8 +624,8 @@ class FraudDetectionService:
         # Enhanced patterns using aggregated donors
         patterns.extend(await self._detect_aggregate_limit_evasion(aggregated_donors, contributions))
         patterns.extend(await self._detect_name_variation_fraud(aggregated_donors, contributions))
-        patterns.extend(self._detect_coordinated_contributions(aggregated_donors))
-        patterns.extend(self._detect_rapid_sequential_contributions(aggregated_donors))
+        patterns.extend(self._detect_coordinated_contributions(aggregated_donors, contributions))
+        patterns.extend(self._detect_rapid_sequential_contributions(aggregated_donors, contributions))
         
         # Also run existing patterns on aggregated data
         df = pd.DataFrame(contributions)
@@ -498,7 +636,7 @@ class FraudDetectionService:
                 df[col] = None
         
         # Enhanced smurfing with aggregation
-        patterns.extend(self._detect_smurfing_with_aggregation(aggregated_donors))
+        patterns.extend(self._detect_smurfing_with_aggregation(aggregated_donors, contributions))
         # Enhanced threshold clustering with aggregation
         patterns.extend(await self._detect_threshold_clustering_with_aggregation(aggregated_donors, contributions))
         
@@ -527,7 +665,22 @@ class FraudDetectionService:
         patterns = []
         
         # Create a mapping of contribution_id to contribution data for limit lookup
-        contrib_map = {c.get('contribution_id'): c for c in contributions if c.get('contribution_id')}
+        # Handle both contribution_id and sub_id as keys
+        # Also ensure date fields are preserved
+        contrib_map = {}
+        for c in contributions:
+            contrib_id = c.get('contribution_id') or c.get('sub_id')
+            if contrib_id:
+                # Create a copy with all relevant fields, ensuring date is included
+                contrib_copy = dict(c)
+                # Ensure contribution_date is set from any of the possible field names
+                if not contrib_copy.get('contribution_date'):
+                    contrib_copy['contribution_date'] = (
+                        c.get('contribution_receipt_date') or 
+                        c.get('receipt_date') or 
+                        c.get('contribution_date')
+                    )
+                contrib_map[contrib_id] = contrib_copy
         
         for donor in aggregated_donors:
             total_amount = donor.get('total_amount', 0)
@@ -560,8 +713,21 @@ class FraudDetectionService:
             
             if total_amount > limit:
                 excess = total_amount - limit
+                # Calculate average amount per contribution for fallback
+                contribution_count = donor.get('contribution_count', 1)
+                avg_contrib_amount = total_amount / contribution_count if contribution_count > 0 else 0
+                fallback_date = donor.get('first_contribution_date') or donor.get('last_contribution_date')
+                
                 affected_contributions = [
-                    {'contribution_id': cid, 'donor_name': donor.get('canonical_name')}
+                    self._enrich_contribution_details(
+                        cid, 
+                        contrib_map, 
+                        fallback_name=donor.get('canonical_name'),
+                        fallback_date=fallback_date,
+                        fallback_city=donor.get('canonical_city'),
+                        fallback_state=donor.get('canonical_state'),
+                        fallback_amount=avg_contrib_amount
+                    )
                     for cid in contrib_ids[:20]  # Limit to first 20
                 ]
                 
@@ -582,7 +748,22 @@ class FraudDetectionService:
         patterns = []
         
         # Create a mapping of contribution_id to contribution data for limit lookup
-        contrib_map = {c.get('contribution_id'): c for c in contributions if c.get('contribution_id')}
+        # Handle both contribution_id and sub_id as keys
+        # Also ensure date fields are preserved
+        contrib_map = {}
+        for c in contributions:
+            contrib_id = c.get('contribution_id') or c.get('sub_id')
+            if contrib_id:
+                # Create a copy with all relevant fields, ensuring date is included
+                contrib_copy = dict(c)
+                # Ensure contribution_date is set from any of the possible field names
+                if not contrib_copy.get('contribution_date'):
+                    contrib_copy['contribution_date'] = (
+                        c.get('contribution_receipt_date') or 
+                        c.get('receipt_date') or 
+                        c.get('contribution_date')
+                    )
+                contrib_map[contrib_id] = contrib_copy
         
         for donor in aggregated_donors:
             all_names = donor.get('all_names', [])
@@ -608,10 +789,24 @@ class FraudDetectionService:
             
             if len(all_names) >= 3 and total_amount > limit:
                 excess = total_amount - limit
-                affected_contributions = [
-                    {'contribution_id': cid, 'donor_name': name}
-                    for cid, name in zip(contrib_ids[:20], all_names[:20])
-                ]
+                affected_contributions = []
+                contribution_count = donor.get('contribution_count', 1)
+                avg_contrib_amount = total_amount / contribution_count if contribution_count > 0 else 0
+                fallback_date = donor.get('first_contribution_date') or donor.get('last_contribution_date')
+                
+                for cid, name in zip(contrib_ids[:20], all_names[:20]):
+                    contrib_detail = self._enrich_contribution_details(
+                        cid,
+                        contrib_map,
+                        fallback_name=name,
+                        fallback_date=fallback_date,
+                        fallback_city=donor.get('canonical_city'),
+                        fallback_state=donor.get('canonical_state'),
+                        fallback_amount=avg_contrib_amount
+                    )
+                    # Override name with the specific variation
+                    contrib_detail['contributor_name'] = name
+                    affected_contributions.append(contrib_detail)
                 
                 patterns.append(FraudPattern(
                     pattern_type="name_variation_fraud",
@@ -625,9 +820,12 @@ class FraudDetectionService:
         
         return patterns
     
-    def _detect_coordinated_contributions(self, aggregated_donors: List[Dict[str, Any]]) -> List[FraudPattern]:
+    def _detect_coordinated_contributions(self, aggregated_donors: List[Dict[str, Any]], contributions: List[Dict[str, Any]]) -> List[FraudPattern]:
         """Detect multiple people from same employer/location making similar contributions"""
         patterns = []
+        
+        # Create a mapping of contribution_id to contribution data
+        contrib_map = {c.get('contribution_id'): c for c in contributions if c.get('contribution_id')}
         
         # Group by employer + state
         employer_groups = defaultdict(list)
@@ -648,12 +846,36 @@ class FraudDetectionService:
                     
                     affected_contributions = []
                     for donor in donors[:10]:  # Limit to first 10
-                        affected_contributions.append({
-                            'donor_name': donor.get('canonical_name'),
-                            'amount': donor.get('total_amount'),
-                            'employer': employer,
-                            'state': state
-                        })
+                        # Get first contribution ID for this donor to enrich details
+                        contrib_ids = donor.get('contribution_ids', [])
+                        if contrib_ids:
+                            contribution_count = donor.get('contribution_count', 1)
+                            total_donor_amount = donor.get('total_amount', 0)
+                            avg_contrib_amount = total_donor_amount / contribution_count if contribution_count > 0 else 0
+                            fallback_date = donor.get('first_contribution_date') or donor.get('last_contribution_date')
+                            
+                            contrib_detail = self._enrich_contribution_details(
+                                contrib_ids[0],
+                                contrib_map,
+                                fallback_name=donor.get('canonical_name'),
+                                fallback_date=fallback_date,
+                                fallback_city=donor.get('canonical_city'),
+                                fallback_state=donor.get('canonical_state'),
+                                fallback_amount=avg_contrib_amount
+                            )
+                            # Add employer info
+                            contrib_detail['contributor_employer'] = employer
+                            affected_contributions.append(contrib_detail)
+                        else:
+                            # Fallback if no contribution IDs
+                            affected_contributions.append({
+                                'contributor_name': donor.get('canonical_name', 'Unknown'),
+                                'contribution_amount': donor.get('total_amount', 0),
+                                'contribution_date': None,
+                                'contributor_city': None,
+                                'contributor_state': state,
+                                'contributor_employer': employer,
+                            })
                     
                     patterns.append(FraudPattern(
                         pattern_type="coordinated_contributions",
@@ -667,9 +889,12 @@ class FraudDetectionService:
         
         return patterns
     
-    def _detect_rapid_sequential_contributions(self, aggregated_donors: List[Dict[str, Any]]) -> List[FraudPattern]:
+    def _detect_rapid_sequential_contributions(self, aggregated_donors: List[Dict[str, Any]], contributions: List[Dict[str, Any]]) -> List[FraudPattern]:
         """Detect same person making many contributions in short time period"""
         patterns = []
+        
+        # Create a mapping of contribution_id to contribution data
+        contrib_map = {c.get('contribution_id'): c for c in contributions if c.get('contribution_id')}
         
         for donor in aggregated_donors:
             contribution_count = donor.get('contribution_count', 0)
@@ -687,8 +912,19 @@ class FraudDetectionService:
                             avg_per_day = contribution_count / max(days_diff, 1)
                             if avg_per_day > 0.5:  # More than 1 contribution every 2 days
                                 contrib_ids = donor.get('contribution_ids', [])
+                                avg_contrib_amount = donor.get('total_amount', 0) / contribution_count if contribution_count > 0 else 0
+                                fallback_date = first_date.isoformat() if isinstance(first_date, datetime) else (first_date if first_date else None) or last_date.isoformat() if isinstance(last_date, datetime) else (last_date if last_date else None)
+                                
                                 affected_contributions = [
-                                    {'contribution_id': cid, 'donor_name': donor.get('canonical_name')}
+                                    self._enrich_contribution_details(
+                                        cid,
+                                        contrib_map,
+                                        fallback_name=donor.get('canonical_name'),
+                                        fallback_date=fallback_date,
+                                        fallback_city=donor.get('canonical_city'),
+                                        fallback_state=donor.get('canonical_state'),
+                                        fallback_amount=avg_contrib_amount
+                                    )
                                     for cid in contrib_ids[:20]
                                 ]
                                 
@@ -707,9 +943,12 @@ class FraudDetectionService:
         
         return patterns
     
-    def _detect_smurfing_with_aggregation(self, aggregated_donors: List[Dict[str, Any]]) -> List[FraudPattern]:
+    def _detect_smurfing_with_aggregation(self, aggregated_donors: List[Dict[str, Any]], contributions: List[Dict[str, Any]]) -> List[FraudPattern]:
         """Enhanced smurfing detection using aggregated donors"""
         patterns = []
+        
+        # Create a mapping of contribution_id to contribution data
+        contrib_map = {c.get('contribution_id'): c for c in contributions if c.get('contribution_id')}
         
         for donor in aggregated_donors:
             total_amount = donor.get('total_amount', 0)
@@ -723,8 +962,21 @@ class FraudDetectionService:
                     total_amount >= self.reporting_threshold * 2):
                     
                     contrib_ids = donor.get('contribution_ids', [])
+                    # Calculate average amount per contribution for fallback
+                    avg_contrib_amount = total_amount / contribution_count if contribution_count > 0 else 0
+                    # Use first contribution date as fallback (or last if first not available)
+                    fallback_date = donor.get('first_contribution_date') or donor.get('last_contribution_date')
+                    
                     affected_contributions = [
-                        {'contribution_id': cid, 'donor_name': donor.get('canonical_name')}
+                        self._enrich_contribution_details(
+                            cid,
+                            contrib_map,
+                            fallback_name=donor.get('canonical_name'),
+                            fallback_date=fallback_date,
+                            fallback_city=donor.get('canonical_city'),
+                            fallback_state=donor.get('canonical_state'),
+                            fallback_amount=avg_contrib_amount
+                        )
                         for cid in contrib_ids[:10]
                     ]
                     
@@ -746,7 +998,22 @@ class FraudDetectionService:
         patterns = []
         
         # Create a mapping of contribution_id to contribution data for limit lookup
-        contrib_map = {c.get('contribution_id'): c for c in contributions if c.get('contribution_id')}
+        # Handle both contribution_id and sub_id as keys
+        # Also ensure date fields are preserved
+        contrib_map = {}
+        for c in contributions:
+            contrib_id = c.get('contribution_id') or c.get('sub_id')
+            if contrib_id:
+                # Create a copy with all relevant fields, ensuring date is included
+                contrib_copy = dict(c)
+                # Ensure contribution_date is set from any of the possible field names
+                if not contrib_copy.get('contribution_date'):
+                    contrib_copy['contribution_date'] = (
+                        c.get('contribution_receipt_date') or 
+                        c.get('receipt_date') or 
+                        c.get('contribution_date')
+                    )
+                contrib_map[contrib_id] = contrib_copy
         
         for donor in aggregated_donors:
             total_amount = donor.get('total_amount', 0)
@@ -771,8 +1038,20 @@ class FraudDetectionService:
             
             # Check if aggregated total is near or over limit
             if (total_amount >= limit * 0.9 and total_amount <= limit * 1.1):
+                contribution_count = donor.get('contribution_count', 1)
+                avg_contrib_amount = total_amount / contribution_count if contribution_count > 0 else 0
+                fallback_date = donor.get('first_contribution_date') or donor.get('last_contribution_date')
+                
                 affected_contributions = [
-                    {'contribution_id': cid, 'donor_name': donor.get('canonical_name')}
+                    self._enrich_contribution_details(
+                        cid,
+                        contrib_map,
+                        fallback_name=donor.get('canonical_name'),
+                        fallback_date=fallback_date,
+                        fallback_city=donor.get('canonical_city'),
+                        fallback_state=donor.get('canonical_state'),
+                        fallback_amount=avg_contrib_amount
+                    )
                     for cid in contrib_ids[:20]
                 ]
                 

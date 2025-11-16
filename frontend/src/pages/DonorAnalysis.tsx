@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { contributionApi, Contribution, exportApi, candidateApi, committeeApi, UniqueContributor, AggregatedDonor } from '../services/api';
 import { Line, Bar } from 'react-chartjs-2';
+import { parseDate, formatDate, getDateTimestamp } from '../utils/dateUtils';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -256,7 +257,8 @@ export default function DonorAnalysis() {
     const byMonth: Record<string, number> = {};
     contributions.forEach((c) => {
       if (c.contribution_date) {
-        const date = new Date(c.contribution_date);
+        const date = parseDate(c.contribution_date);
+        if (!date) return;
         const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
         byMonth[monthKey] = (byMonth[monthKey] || 0) + c.contribution_amount;
       }
@@ -501,13 +503,13 @@ export default function DonorAnalysis() {
   const contributionFrequency = useMemo(() => {
     if (contributions.length === 0) return null;
     const dates = contributions
-      .map((c) => c.contribution_date)
-      .filter(Boolean)
-      .map((d) => new Date(d!));
+      .map((c) => parseDate(c.contribution_date))
+      .filter((d): d is Date => d !== null);
     if (dates.length === 0) return null;
 
-    const firstDate = new Date(Math.min(...dates.map((d) => d.getTime())));
-    const lastDate = new Date(Math.max(...dates.map((d) => d.getTime())));
+    const timestamps = dates.map((d) => d.getTime());
+    const firstDate = new Date(Math.min(...timestamps));
+    const lastDate = new Date(Math.max(...timestamps));
     const daysDiff = Math.ceil((lastDate.getTime() - firstDate.getTime()) / (1000 * 60 * 60 * 24));
     return daysDiff > 0 ? contributions.length / daysDiff : 0;
   }, [contributions]);
@@ -554,8 +556,8 @@ export default function DonorAnalysis() {
       
       switch (sortColumn) {
         case 'date':
-          aVal = a.contribution_date ? new Date(a.contribution_date).getTime() : 0;
-          bVal = b.contribution_date ? new Date(b.contribution_date).getTime() : 0;
+          aVal = getDateTimestamp(a.contribution_date);
+          bVal = getDateTimestamp(b.contribution_date);
           break;
         case 'amount':
           aVal = a.contribution_amount || 0;
@@ -1439,9 +1441,9 @@ export default function DonorAnalysis() {
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                           {donor.first_contribution_date && donor.last_contribution_date ? (
                             <div>
-                              <div>{new Date(donor.first_contribution_date).toLocaleDateString()}</div>
+                              <div>{formatDate(donor.first_contribution_date)}</div>
                               <div className="text-xs text-gray-400">to</div>
-                              <div>{new Date(donor.last_contribution_date).toLocaleDateString()}</div>
+                              <div>{formatDate(donor.last_contribution_date)}</div>
                             </div>
                           ) : 'N/A'}
                         </td>

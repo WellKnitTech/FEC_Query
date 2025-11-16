@@ -10,6 +10,7 @@ from app.api.security import (
     check_resource_limits, increment_operation, decrement_operation,
     log_security_event, MAX_CONCURRENT_JOBS
 )
+from app.utils.date_utils import serialize_datetime
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from datetime import datetime
@@ -404,8 +405,8 @@ async def get_cycle_status(cycle: int):
                 "is_implemented": is_implemented,
                 "status": status_record.status if status_record else "not_imported",
                 "record_count": status_record.record_count if status_record else 0,
-                "last_imported_at": status_record.last_imported_at.isoformat() if status_record and status_record.last_imported_at else None,
-                "download_date": metadata_record.download_date.isoformat() if metadata_record and metadata_record.download_date else None,
+                "last_imported_at": serialize_datetime(status_record.last_imported_at) if status_record and status_record.last_imported_at else None,
+                "download_date": serialize_datetime(metadata_record.download_date) if metadata_record and metadata_record.download_date else None,
                 "error_message": status_record.error_message if status_record else None,
             })
         

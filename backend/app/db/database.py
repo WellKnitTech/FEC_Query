@@ -38,6 +38,15 @@ class Contribution(Base):
     contribution_amount = Column(Float)
     contribution_date = Column(DateTime)
     contribution_type = Column(String)
+    # Additional FEC fields from Schedule A
+    amendment_indicator = Column(String)  # AMNDT_IND
+    report_type = Column(String, index=True)  # RPT_TP
+    transaction_id = Column(String, index=True)  # TRAN_ID
+    entity_type = Column(String, index=True)  # ENTITY_TP
+    other_id = Column(String)  # OTHER_ID
+    file_number = Column(String)  # FILE_NUM
+    memo_code = Column(String)  # MEMO_CD
+    memo_text = Column(Text)  # MEMO_TEXT
     raw_data = Column(JSON)
     created_at = Column(DateTime, default=datetime.utcnow)
     
@@ -45,6 +54,9 @@ class Contribution(Base):
         Index('idx_contributor_name', 'contributor_name'),
         Index('idx_contribution_date', 'contribution_date'),
         Index('idx_candidate_committee', 'candidate_id', 'committee_id'),
+        Index('idx_report_type', 'report_type'),
+        Index('idx_entity_type', 'entity_type'),
+        Index('idx_transaction_id', 'transaction_id'),
     )
 
 
@@ -221,6 +233,23 @@ class OperatingExpenditure(Base):
     expenditure_amount = Column(Float)
     expenditure_date = Column(DateTime)
     expenditure_purpose = Column(Text)
+    # Additional FEC fields from oppexp files
+    amendment_indicator = Column(String)  # AMNDT_IND
+    report_year = Column(Integer)  # RPT_YR
+    report_type = Column(String, index=True)  # RPT_TP
+    image_number = Column(String)  # IMAGE_NUM
+    line_number = Column(String)  # LINE_NUM
+    form_type_code = Column(String)  # FORM_TP_CD
+    schedule_type_code = Column(String)  # SCHED_TP_CD
+    transaction_pgi = Column(String)  # TRANSACTION_PGI
+    category = Column(String, index=True)  # CATEGORY
+    category_description = Column(String)  # CATEGORY_DESC
+    memo_code = Column(String)  # MEMO_CD
+    memo_text = Column(Text)  # MEMO_TEXT
+    entity_type = Column(String, index=True)  # ENTITY_TP
+    file_number = Column(String)  # FILE_NUM
+    transaction_id = Column(String, index=True)  # TRAN_ID
+    back_reference_transaction_id = Column(String)  # BACK_REF_TRAN_ID
     raw_data = Column(JSON)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -229,6 +258,10 @@ class OperatingExpenditure(Base):
     __table_args__ = (
         Index('idx_op_exp_cycle_committee', 'cycle', 'committee_id'),
         Index('idx_op_exp_date', 'expenditure_date'),
+        Index('idx_op_exp_report_type', 'report_type'),
+        Index('idx_op_exp_category', 'category'),
+        Index('idx_op_exp_entity_type', 'entity_type'),
+        Index('idx_op_exp_transaction_id', 'transaction_id'),
     )
 
 
@@ -466,7 +499,9 @@ async def init_db():
     logger.info("Running migrations...")
     migrations = [
         "add_file_size_column.py",
-        "add_resume_columns.py"
+        "add_resume_columns.py",
+        "add_contribution_fields.py",  # Add missing FEC fields to contributions table
+        "add_operating_expenditure_fields.py"  # Add missing FEC fields to operating_expenditures table
     ]
     for migration_name in migrations:
         try:

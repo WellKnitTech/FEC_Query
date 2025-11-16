@@ -264,6 +264,21 @@ export interface ContributionVelocity {
   average_daily_velocity: number;
 }
 
+export interface DonorStateAnalysis {
+  donors_by_state: Record<string, number>;
+  donor_percentages_by_state: Record<string, number>;
+  amounts_by_state: Record<string, number>;
+  amount_percentages_by_state: Record<string, number>;
+  candidate_state?: string;
+  in_state_donor_percentage: number;
+  in_state_amount_percentage: number;
+  out_of_state_donor_percentage: number;
+  out_of_state_amount_percentage: number;
+  total_unique_donors: number;
+  total_contributions: number;
+  is_highly_out_of_state: boolean;
+}
+
 export const analysisApi = {
   getMoneyFlow: async (candidateId: string, maxDepth?: number, minAmount?: number, aggregateByEmployer?: boolean, signal?: AbortSignal): Promise<MoneyFlowGraph> => {
     const response = await api.get('/api/analysis/money-flow', {
@@ -305,6 +320,28 @@ export const analysisApi = {
     max_date?: string;
   }, signal?: AbortSignal): Promise<ContributionVelocity> => {
     const response = await api.get('/api/analysis/velocity', { params, ...createRequestConfig(signal) });
+    return response.data;
+  },
+
+  getDonorStates: async (params: {
+    candidate_id: string;
+    min_date?: string;
+    max_date?: string;
+    cycle?: number;
+  }, signal?: AbortSignal): Promise<DonorStateAnalysis> => {
+    const response = await api.get('/api/analysis/donor-states', { params, ...createRequestConfig(signal) });
+    return response.data;
+  },
+
+  getOutOfStateContributions: async (params: {
+    candidate_id: string;
+    min_date?: string;
+    max_date?: string;
+    cycle?: number;
+    limit?: number;
+    aggregate?: boolean;
+  }, signal?: AbortSignal): Promise<Contribution[] | AggregatedDonor[]> => {
+    const response = await api.get('/api/analysis/donor-states/out-of-state-contributions', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 };
@@ -923,6 +960,62 @@ export const exportApi = {
     
     const extension = format === 'excel' ? 'xlsx' : 'csv';
     link.setAttribute('download', `contributions_export.${extension}`);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  },
+
+  exportOutOfStateContributions: async (
+    candidate_id: string,
+    params?: {
+      min_date?: string;
+      max_date?: string;
+      cycle?: number;
+      limit?: number;
+    }
+  ): Promise<void> => {
+    const response = await api.get('/api/export/out-of-state-contributions/csv', {
+      params: {
+        candidate_id,
+        ...params,
+      },
+      responseType: 'blob',
+    });
+    
+    // Create download link
+    const url = window.URL.createObjectURL(new Blob([response.data]));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `out_of_state_contributions_${candidate_id}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  },
+
+  exportOutOfStateDonors: async (
+    candidate_id: string,
+    params?: {
+      min_date?: string;
+      max_date?: string;
+      cycle?: number;
+      limit?: number;
+    }
+  ): Promise<void> => {
+    const response = await api.get('/api/export/out-of-state-donors/csv', {
+      params: {
+        candidate_id,
+        ...params,
+      },
+      responseType: 'blob',
+    });
+    
+    // Create download link
+    const url = window.URL.createObjectURL(new Blob([response.data]));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `out_of_state_donors_${candidate_id}.csv`);
     document.body.appendChild(link);
     link.click();
     link.remove();

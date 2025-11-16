@@ -4,6 +4,7 @@ import asyncio
 from app.services.fec_client import FECClient
 from app.models.schemas import CandidateSummary, FinancialSummary, BatchFinancialsRequest, ContactInformation
 from app.services.analysis import AnalysisService
+from app.utils.date_utils import serialize_datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -200,7 +201,7 @@ async def get_race_candidates(
                     "election_years": candidate.get("election_years"),
                     "active_through": candidate.get("active_through"),
                     "contact_info": contact_info,
-                    "contact_info_updated_at": candidate.get("contact_info_updated_at")
+                    "contact_info_updated_at": serialize_datetime(candidate.get("contact_info_updated_at"))
                 }
                 candidates.append(CandidateSummary(**candidate_data))
             except Exception as e:
@@ -269,7 +270,7 @@ async def get_candidate(candidate_id: str):
             "election_years": candidate.get("election_years"),
             "active_through": candidate.get("active_through"),
             "contact_info": contact_info,
-            "contact_info_updated_at": candidate.get("contact_info_updated_at")
+            "contact_info_updated_at": serialize_datetime(candidate.get("contact_info_updated_at"))
         }
         return CandidateSummary(**candidate_data)
     except HTTPException:
@@ -380,7 +381,7 @@ async def refresh_candidate_contact_info(candidate_id: str):
                     "success": True,
                     "message": "Contact information refreshed successfully",
                     "contact_info": contact_info,
-                    "contact_info_updated_at": candidate.get("contact_info_updated_at")
+                    "contact_info_updated_at": serialize_datetime(candidate.get("contact_info_updated_at"))
                 }
         
         return {
