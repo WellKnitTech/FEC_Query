@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { analysisApi, EmployerAnalysis } from '../services/api';
 import { Bar, Pie } from 'react-chartjs-2';
+import AnalysisSection from './candidate/AnalysisSection';
+import { formatCurrency } from '../utils/candidateCalculations';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -27,6 +29,7 @@ interface EmployerTreemapProps {
   committeeId?: string;
   minDate?: string;
   maxDate?: string;
+  cycle?: number;
 }
 
 export default function EmployerTreemap({
@@ -34,6 +37,7 @@ export default function EmployerTreemap({
   committeeId,
   minDate,
   maxDate,
+  cycle,
 }: EmployerTreemapProps) {
   const [analysis, setAnalysis] = useState<EmployerAnalysis | null>(null);
   const [loading, setLoading] = useState(true);
@@ -63,40 +67,42 @@ export default function EmployerTreemap({
     if (candidateId || committeeId) {
       fetchAnalysis();
     }
-  }, [candidateId, committeeId, minDate, maxDate]);
+  }, [candidateId, committeeId, minDate, maxDate, cycle]);
 
-  if (loading) {
-    return (
-      <div className="bg-white rounded-lg shadow p-6">
-        <div className="animate-pulse">
-          <div className="h-4 bg-gray-200 rounded w-3/4 mb-4"></div>
-          <div className="h-64 bg-gray-200 rounded"></div>
-        </div>
-      </div>
-    );
-  }
+  const refresh = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await analysisApi.getEmployerBreakdown({
+        candidate_id: candidateId,
+        committee_id: committeeId,
+        min_date: minDate,
+        max_date: maxDate,
+      });
+      setAnalysis(data);
+    } catch (err: any) {
+      const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load employer analysis';
+      setError(errorMessage);
+      console.error('Error loading employer analysis:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  if (error) {
-    return (
-      <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-xl font-semibold mb-4">Employer/Industry Analysis</h2>
-        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-          <p className="text-red-800">{error}</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!analysis) {
+  if (!analysis && !loading && !error) {
     return null;
   }
 
-  if (analysis.top_employers.length === 0) {
+  if (!analysis || analysis.top_employers.length === 0) {
     return (
-      <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-xl font-semibold mb-4">Employer/Industry Analysis</h2>
+      <AnalysisSection
+        title="Employer/Industry Analysis"
+        loading={loading}
+        error={error}
+        onRetry={refresh}
+      >
         <p className="text-gray-600">No employer data available for contributions</p>
-      </div>
+      </AnalysisSection>
     );
   }
 
@@ -151,9 +157,13 @@ export default function EmployerTreemap({
     : 0;
 
   return (
-    <div className="space-y-6">
-      <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-xl font-semibold mb-4">Employer/Industry Analysis</h2>
+    <AnalysisSection
+      title="Employer/Industry Analysis"
+      loading={loading}
+      error={error}
+      onRetry={refresh}
+    >
+      <div className="space-y-6">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
           <div>
             <div className="text-sm text-gray-600">Unique Employers</div>
@@ -161,7 +171,7 @@ export default function EmployerTreemap({
           </div>
           <div>
             <div className="text-sm text-gray-600">Total from Employers</div>
-            <div className="text-2xl font-bold">${(totalFromEmployers / 1000).toFixed(1)}K</div>
+            <div className="text-2xl font-bold">{formatCurrency(totalFromEmployers)}</div>
           </div>
           <div>
             <div className="text-sm text-gray-600">% with Employer Data</div>
@@ -255,7 +265,7 @@ export default function EmployerTreemap({
           </table>
         </div>
       </div>
-    </div>
+    </AnalysisSection>
   );
 }
 
