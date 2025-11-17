@@ -1,8 +1,7 @@
 """
-Bulk Data Service - maintains backward compatibility
-Re-exports from the refactored package structure
+Bulk Data Service package - maintains backward compatibility
 """
-# Import from the refactored package
+# Import from the original bulk_data.py file (now bulk_data_original.py)
 from app.services.bulk_data_original import (
     BulkDataService,
     _running_tasks,
@@ -10,3 +9,4 @@ from app.services.bulk_data_original import (
 )
 
 __all__ = ["BulkDataService", "_running_tasks", "_cancelled_jobs"]
+

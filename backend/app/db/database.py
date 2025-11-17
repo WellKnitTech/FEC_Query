@@ -456,6 +456,7 @@ if DATABASE_URL.startswith("sqlite"):
     # For SQLite, we need to use aiosqlite
     # Configure connection pool and timeout settings for better concurrency handling
     # Note: aiosqlite uses different connection args than sqlite3
+    # Optimized pool settings based on refactoring analysis
     engine = create_async_engine(
         DATABASE_URL.replace("sqlite://", "sqlite+aiosqlite://"),
         echo=False,
