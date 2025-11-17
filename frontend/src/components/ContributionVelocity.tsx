@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { analysisApi, ContributionVelocity } from '../services/api';
 import { Line, Bar } from 'react-chartjs-2';
+import AnalysisSection from './candidate/AnalysisSection';
+import { formatCurrency } from '../utils/candidateCalculations';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -29,6 +31,7 @@ interface ContributionVelocityProps {
   committeeId?: string;
   minDate?: string;
   maxDate?: string;
+  cycle?: number;
 }
 
 export default function ContributionVelocityComponent({
@@ -36,6 +39,7 @@ export default function ContributionVelocityComponent({
   committeeId,
   minDate,
   maxDate,
+  cycle,
 }: ContributionVelocityProps) {
   const [velocity, setVelocity] = useState<ContributionVelocity | null>(null);
   const [loading, setLoading] = useState(true);
@@ -65,32 +69,43 @@ export default function ContributionVelocityComponent({
     if (candidateId || committeeId) {
       fetchVelocity();
     }
-  }, [candidateId, committeeId, minDate, maxDate]);
+  }, [candidateId, committeeId, minDate, maxDate, cycle]);
 
-  if (loading) {
-    return (
-      <div className="bg-white rounded-lg shadow p-6">
-        <div className="animate-pulse">
-          <div className="h-4 bg-gray-200 rounded w-3/4 mb-4"></div>
-          <div className="h-64 bg-gray-200 rounded"></div>
-        </div>
-      </div>
-    );
-  }
+  const refresh = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await analysisApi.getVelocity({
+        candidate_id: candidateId,
+        committee_id: committeeId,
+        min_date: minDate,
+        max_date: maxDate,
+      });
+      setVelocity(data);
+    } catch (err: any) {
+      const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contribution velocity';
+      setError(errorMessage);
+      console.error('Error loading contribution velocity:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  if (error) {
-    return (
-      <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-xl font-semibold mb-4">Contribution Velocity</h2>
-        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-          <p className="text-red-800">{error}</p>
-        </div>
-      </div>
-    );
+  if (!velocity && !loading && !error) {
+    return null;
   }
 
   if (!velocity) {
-    return null;
+    return (
+      <AnalysisSection
+        title="Contribution Velocity"
+        loading={loading}
+        error={error}
+        onRetry={refresh}
+      >
+        <p className="text-gray-600">No velocity data available</p>
+      </AnalysisSection>
+    );
   }
 
   // Prepare chart data
@@ -143,9 +158,13 @@ export default function ContributionVelocityComponent({
   };
 
   return (
-    <div className="space-y-6">
-      <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-xl font-semibold mb-4">Contribution Velocity</h2>
+    <AnalysisSection
+      title="Contribution Velocity"
+      loading={loading}
+      error={error}
+      onRetry={refresh}
+    >
+      <div className="space-y-6">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
           <div>
             <div className="text-sm text-gray-600">Average Daily Velocity</div>
@@ -190,7 +209,7 @@ export default function ContributionVelocityComponent({
                   <div className="text-xs text-gray-600">
                     {day.count || 0} contributions
                     <br />
-                    ${((day.amount || 0) / 1000).toFixed(1)}K
+                    {formatCurrency(day.amount || 0)}
                   </div>
                 </div>
               ))}
@@ -198,7 +217,7 @@ export default function ContributionVelocityComponent({
           </div>
         </div>
       </div>
-    </div>
+    </AnalysisSection>
   );
 }
 

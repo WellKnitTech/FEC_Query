@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { analysisApi, ExpenditureBreakdown } from '../services/api';
 import { Pie, Bar, Line } from 'react-chartjs-2';
+import AnalysisSection from './candidate/AnalysisSection';
+import { formatCurrency } from '../utils/candidateCalculations';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -31,6 +33,7 @@ interface ExpenditureBreakdownProps {
   committeeId?: string;
   minDate?: string;
   maxDate?: string;
+  cycle?: number;
 }
 
 export default function ExpenditureBreakdownComponent({
@@ -38,6 +41,7 @@ export default function ExpenditureBreakdownComponent({
   committeeId,
   minDate,
   maxDate,
+  cycle,
 }: ExpenditureBreakdownProps) {
   const [breakdown, setBreakdown] = useState<ExpenditureBreakdown | null>(null);
   const [loading, setLoading] = useState(true);
@@ -67,32 +71,43 @@ export default function ExpenditureBreakdownComponent({
     if (candidateId || committeeId) {
       fetchBreakdown();
     }
-  }, [candidateId, committeeId, minDate, maxDate]);
+  }, [candidateId, committeeId, minDate, maxDate, cycle]);
 
-  if (loading) {
-    return (
-      <div className="bg-white rounded-lg shadow p-6">
-        <div className="animate-pulse">
-          <div className="h-4 bg-gray-200 rounded w-3/4 mb-4"></div>
-          <div className="h-64 bg-gray-200 rounded"></div>
-        </div>
-      </div>
-    );
-  }
+  const refresh = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await analysisApi.getExpenditureBreakdown({
+        candidate_id: candidateId,
+        committee_id: committeeId,
+        min_date: minDate,
+        max_date: maxDate,
+      });
+      setBreakdown(data);
+    } catch (err: any) {
+      const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load expenditure breakdown';
+      setError(errorMessage);
+      console.error('Error loading expenditure breakdown:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  if (error) {
-    return (
-      <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-xl font-semibold mb-4">Expenditure Analysis</h2>
-        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-          <p className="text-red-800">{error}</p>
-        </div>
-      </div>
-    );
+  if (!breakdown && !loading && !error) {
+    return null;
   }
 
   if (!breakdown) {
-    return null;
+    return (
+      <AnalysisSection
+        title="Expenditure Analysis"
+        loading={loading}
+        error={error}
+        onRetry={refresh}
+      >
+        <p className="text-gray-600">No expenditure data available</p>
+      </AnalysisSection>
+    );
   }
 
   // Prepare chart data
@@ -151,14 +166,18 @@ export default function ExpenditureBreakdownComponent({
   };
 
   return (
-    <div className="space-y-6">
-      <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-xl font-semibold mb-4">Expenditure Analysis</h2>
+    <AnalysisSection
+      title="Expenditure Analysis"
+      loading={loading}
+      error={error}
+      onRetry={refresh}
+    >
+      <div className="space-y-6">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
           <div>
             <div className="text-sm text-gray-600">Total Expenditures</div>
             <div className="text-2xl font-bold">
-              ${(breakdown.total_expenditures / 1000).toFixed(1)}K
+              {formatCurrency(breakdown.total_expenditures)}
             </div>
           </div>
           <div>
@@ -195,7 +214,7 @@ export default function ExpenditureBreakdownComponent({
           />
         </div>
       </div>
-    </div>
+    </AnalysisSection>
   );
 }
 

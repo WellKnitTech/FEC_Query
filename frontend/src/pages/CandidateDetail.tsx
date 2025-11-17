@@ -1,7 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { candidateApi, Candidate } from '../services/api';
+import { candidateApi } from '../services/api';
 import { formatDateTime } from '../utils/dateUtils';
+import { useCandidateData } from '../hooks/useCandidateData';
+import { useFinancialData } from '../hooks/useFinancialData';
+import { useCycleSelector } from '../hooks/useCycleSelector';
+import { CandidateContextProvider } from '../contexts/CandidateContext';
 import FinancialSummary from '../components/FinancialSummary';
 import DonorStateAnalysis from '../components/DonorStateAnalysis';
 import ContributionAnalysis from '../components/ContributionAnalysis';
@@ -14,65 +18,38 @@ import CumulativeChart from '../components/CumulativeChart';
 import FraudRadarChart from '../components/FraudRadarChart';
 import SmurfingScatter from '../components/SmurfingScatter';
 import ExportButton from '../components/ExportButton';
+import LoadingState from '../components/candidate/LoadingState';
+import ErrorState from '../components/candidate/ErrorState';
 
-export default function CandidateDetail() {
+function CandidateDetailContent() {
   const { candidateId } = useParams<{ candidateId: string }>();
-  const [candidate, setCandidate] = useState<Candidate | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { candidate, loading, error, refresh: refreshCandidate } = useCandidateData(candidateId);
   const [refreshingContactInfo, setRefreshingContactInfo] = useState(false);
-  const [cycle, setCycle] = useState<number | undefined>(undefined);
 
-  useEffect(() => {
-    const abortController = new AbortController();
-    
-    const fetchCandidate = async () => {
-      if (!candidateId) return;
-      
-      setLoading(true);
-      setError(null);
-      try {
-        const data = await candidateApi.getById(candidateId, abortController.signal);
-        if (!abortController.signal.aborted) {
-          setCandidate(data);
-        }
-      } catch (err: any) {
-        // Don't set error if request was aborted
-        if (err.name === 'AbortError' || abortController.signal.aborted) {
-          return;
-        }
-        if (!abortController.signal.aborted) {
-          setError(err?.response?.data?.detail || err?.message || 'Failed to load candidate data');
-        }
-      } finally {
-        if (!abortController.signal.aborted) {
-          setLoading(false);
-        }
-      }
-    };
+  // Fetch financials to determine available cycles (fetch all, no cycle filter)
+  const { financials, latestFinancial, selectedFinancial, availableCycles } = useFinancialData(
+    candidateId,
+    undefined // Fetch all financials to determine available cycles
+  );
 
-    fetchCandidate();
-    
-    return () => {
-      abortController.abort();
-    };
-  }, [candidateId]);
+  // Manage cycle selection - start with latest cycle if available
+  const { selectedCycle, setCycle } = useCycleSelector({
+    financials,
+    initialCycle: latestFinancial?.cycle,
+    onCycleChange: undefined, // Cycle changes will update context via FinancialSummary's onCycleChange
+  });
 
   const handleRefreshContactInfo = async () => {
     if (!candidateId) return;
     
     setRefreshingContactInfo(true);
-    setError(null);
     try {
       const result = await candidateApi.refreshContactInfo(candidateId);
       if (result.success) {
         // Refresh candidate data to get updated contact info
-        const updatedCandidate = await candidateApi.getById(candidateId);
-        setCandidate(updatedCandidate);
+        await refreshCandidate();
       }
     } catch (err: any) {
-      const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to refresh contact info';
-      setError(errorMessage);
       console.error('Error refreshing contact info:', err);
     } finally {
       setRefreshingContactInfo(false);
@@ -83,10 +60,7 @@ export default function CandidateDetail() {
   if (loading) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="animate-pulse">
-          <div className="h-8 bg-gray-200 rounded w-1/2 mb-4"></div>
-          <div className="h-4 bg-gray-200 rounded w-1/3"></div>
-        </div>
+        <LoadingState message="Loading candidate information..." />
       </div>
     );
   }
@@ -94,20 +68,11 @@ export default function CandidateDetail() {
   if (error || !candidate) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="bg-red-50 border border-red-200 rounded-lg p-6">
-          {error && (
-            <div className="text-red-800">
-              <h2 className="text-lg font-semibold mb-2">Error Loading Candidate</h2>
-              <p>{error}</p>
-            </div>
-          )}
-          {!candidate && !error && (
-            <div className="text-red-800">
-              <h2 className="text-lg font-semibold mb-2">Candidate Not Found</h2>
-              <p>The candidate you're looking for could not be found. Please check the candidate ID and try again.</p>
-            </div>
-          )}
-        </div>
+        <ErrorState
+          title={error ? 'Error Loading Candidate' : 'Candidate Not Found'}
+          error={error || (!candidate ? 'The candidate you\'re looking for could not be found. Please check the candidate ID and try again.' : null)}
+          onRetry={error ? refreshCandidate : undefined}
+        />
       </div>
     );
   }
@@ -206,20 +171,41 @@ export default function CandidateDetail() {
         </div>
       </div>
 
-      <div className="space-y-6">
-        <FinancialSummary candidateId={candidateId!} cycle={cycle} onCycleChange={setCycle} />
-        <DonorStateAnalysis candidateId={candidateId} candidate={candidate} cycle={cycle} />
-        <ContributionAnalysis candidateId={candidateId} cycle={cycle} />
-        <CumulativeChart candidateId={candidateId} />
-        <ContributionVelocity candidateId={candidateId} />
-        <EmployerTreemap candidateId={candidateId} />
-        <ExpenditureBreakdown candidateId={candidateId} />
-        <NetworkGraph candidateId={candidateId!} />
-        <FraudRadarChart candidateId={candidateId!} />
-        <SmurfingScatter candidateId={candidateId} />
-        <FraudAlerts candidateId={candidateId!} />
-      </div>
+      <CandidateContextProvider
+        candidateId={candidateId}
+        candidate={candidate}
+        cycle={selectedCycle}
+        setCycle={setCycle}
+        financials={financials}
+        latestFinancial={latestFinancial}
+        selectedFinancial={selectedFinancial}
+        availableCycles={availableCycles}
+      >
+        <div className="space-y-6">
+          <FinancialSummary 
+            candidateId={candidateId!} 
+            cycle={selectedCycle} 
+            onCycleChange={(newCycle) => {
+              setCycle(newCycle);
+            }} 
+          />
+          <DonorStateAnalysis candidateId={candidateId} candidate={candidate} cycle={selectedCycle} />
+          <ContributionAnalysis candidateId={candidateId} cycle={selectedCycle} />
+          <CumulativeChart candidateId={candidateId} cycle={selectedCycle} />
+          <ContributionVelocity candidateId={candidateId} cycle={selectedCycle} />
+          <EmployerTreemap candidateId={candidateId} cycle={selectedCycle} />
+          <ExpenditureBreakdown candidateId={candidateId} cycle={selectedCycle} />
+          <NetworkGraph candidateId={candidateId!} />
+          <FraudRadarChart candidateId={candidateId!} />
+          <SmurfingScatter candidateId={candidateId} />
+          <FraudAlerts candidateId={candidateId!} />
+        </div>
+      </CandidateContextProvider>
     </div>
   );
+}
+
+export default function CandidateDetail() {
+  return <CandidateDetailContent />;
 }
 

@@ -2067,11 +2067,18 @@ class FECClient:
                 existing.contribution_date = new_date
         elif existing.contribution_date is None:
             # Try to extract from raw_data if new data doesn't have it
-            if new_data.get('raw_data'):
-                from app.utils.date_utils import extract_date_from_raw_data
+            # First try new_data itself (it might be the raw API response)
+            from app.utils.date_utils import extract_date_from_raw_data
+            date_from_raw = extract_date_from_raw_data(new_data)
+            if date_from_raw:
+                existing.contribution_date = date_from_raw
+                logger.debug(f"_smart_merge_contribution: Extracted date from new_data for contribution {existing.contribution_id}: {date_from_raw}")
+            elif new_data.get('raw_data'):
+                # Fallback: try nested raw_data
                 date_from_raw = extract_date_from_raw_data(new_data['raw_data'])
                 if date_from_raw:
                     existing.contribution_date = date_from_raw
+                    logger.debug(f"_smart_merge_contribution: Extracted date from nested raw_data for contribution {existing.contribution_id}: {date_from_raw}")
         
         # IDs: prefer new if provided
         if normalized.get('candidate_id'):
@@ -2208,6 +2215,17 @@ class FECClient:
                         if existing_contrib:
                             # Use smart merge for existing contributions
                             self._smart_merge_contribution(existing_contrib, contribution_data, 'api')
+                            
+                            # If we extracted a date and the existing contribution doesn't have one, update it
+                            # This ensures dates from API responses are saved even for existing contributions
+                            if contrib_date and not existing_contrib.contribution_date:
+                                existing_contrib.contribution_date = contrib_date
+                                logger.debug(f"Updated contribution_date for existing contribution {contrib_id} from API response: {contrib_date}")
+                            elif contrib_date and existing_contrib.contribution_date != contrib_date:
+                                # Also update if the new date is different (API might have more accurate data)
+                                existing_contrib.contribution_date = contrib_date
+                                logger.debug(f"Updated contribution_date for existing contribution {contrib_id} from API response (was {existing_contrib.contribution_date}, now {contrib_date})")
+                            
                             logger.debug(f"Updated existing contribution {contrib_id} using smart merge (may be an amendment)")
                         else:
                             # Create new contribution
