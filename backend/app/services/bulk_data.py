@@ -630,8 +630,14 @@ class BulkDataService:
         # Convert to string and strip
         date_strs = date_series.astype(str).str.strip()
         
-        # Filter valid 8-digit dates
-        valid_mask = (date_strs.str.len() == 8) & date_strs.str.isdigit()
+        # Filter out obviously non-date values (common data quality issues)
+        # Skip values that contain letters (except for valid date formats)
+        # Skip common non-date strings
+        non_date_patterns = ['NOT EMPLOYED', 'N/A', 'NA', 'NULL', 'NONE', 'UNKNOWN', 'RETIRED', 'SELF']
+        is_not_date = date_strs.str.upper().isin([p.upper() for p in non_date_patterns])
+        
+        # Filter valid 8-digit dates (must be exactly 8 digits, all numeric)
+        valid_mask = (date_strs.str.len() == 8) & date_strs.str.isdigit() & ~is_not_date
         
         if valid_mask.any():
             valid_dates = date_strs[valid_mask]
@@ -675,11 +681,18 @@ class BulkDataService:
         logger.info(f"Parsing CSV file: {file_path} (resume={resume})")
         
         # FEC Schedule A CSV columns (pipe-delimited, no headers)
+        # Note: File has 21 fields (not 20 as in older documentation)
+        # Field 4: IMAGE_NUM (values like "P", "G2024") - this is the extra field added
+        # Field 6: ENTITY_TP code (e.g., "15")
+        # Field 7: ENTITY_TP description (e.g., "IND" for Individual)
+        # Field 21: SUB_ID (contribution ID) - this is the last field
+        # Updated to match actual file structure (21 fields)
         fec_columns = [
-            'CMTE_ID', 'AMNDT_IND', 'RPT_TP', 'TRAN_ID', 'ENTITY_TP', 'NAME',
+            'CMTE_ID', 'AMNDT_IND', 'RPT_TP', 'IMAGE_NUM', 'TRAN_ID', 
+            'ENTITY_TP_CODE', 'ENTITY_TP_DESC', 'NAME',
             'CITY', 'STATE', 'ZIP_CODE', 'EMPLOYER', 'OCCUPATION', 'TRANSACTION_DT',
             'TRANSACTION_AMT', 'OTHER_ID', 'CAND_ID', 'TRAN_TP', 'FILE_NUM',
-            'MEMO_CD', 'MEMO_TEXT', 'SUB_ID'
+            'MEMO_CD', 'SUB_ID'  # Note: MEMO_TEXT was removed - file only has 21 fields, SUB_ID is last
         ]
         
         try:
@@ -774,7 +787,7 @@ class BulkDataService:
                         
                         if committees_to_lookup:
                             # Query Committee table for candidate_ids
-                            from sqlalchemy import select
+                            # Note: select is already imported at module level
                             from app.db.database import Committee
                             
                             # Use the same session to avoid nested async context issues
@@ -812,11 +825,19 @@ class BulkDataService:
                     chunk['amendment_indicator'] = clean_str_field(chunk.get('AMNDT_IND', pd.Series([''] * len(chunk))))
                     chunk['report_type'] = clean_str_field(chunk.get('RPT_TP', pd.Series([''] * len(chunk))))
                     chunk['transaction_id'] = clean_str_field(chunk.get('TRAN_ID', pd.Series([''] * len(chunk))))
-                    chunk['entity_type'] = clean_str_field(chunk.get('ENTITY_TP', pd.Series([''] * len(chunk))))
+                    # Combine ENTITY_TP_CODE and ENTITY_TP_DESC for entity_type
+                    # Use CODE if available, otherwise use DESC, or combine both
+                    entity_tp_code = chunk.get('ENTITY_TP_CODE', pd.Series([''] * len(chunk)))
+                    entity_tp_desc = chunk.get('ENTITY_TP_DESC', pd.Series([''] * len(chunk)))
+                    # Combine code and description (e.g., "15|IND" or just use code)
+                    chunk['entity_type'] = (entity_tp_code.astype(str).str.strip() + 
+                                           entity_tp_desc.astype(str).str.strip().replace('', '')).str.strip()
+                    chunk['entity_type'] = chunk['entity_type'].replace('', None)
                     chunk['other_id'] = clean_str_field(chunk.get('OTHER_ID', pd.Series([''] * len(chunk))))
                     chunk['file_number'] = clean_str_field(chunk.get('FILE_NUM', pd.Series([''] * len(chunk))))
                     chunk['memo_code'] = clean_str_field(chunk.get('MEMO_CD', pd.Series([''] * len(chunk))))
-                    chunk['memo_text'] = clean_str_field(chunk.get('MEMO_TEXT', pd.Series([''] * len(chunk))))
+                    # MEMO_TEXT is not a separate field in the 21-field format - set to None
+                    chunk['memo_text'] = None
                     
                     # Vectorized amount parsing
                     chunk['contribution_amount'] = pd.to_numeric(
@@ -826,6 +847,8 @@ class BulkDataService:
                     
                     # Vectorized date parsing
                     chunk['contribution_date'] = self._parse_date_vectorized(chunk['TRANSACTION_DT'])
+                    # Convert pandas NaN to None for SQLite compatibility
+                    chunk['contribution_date'] = chunk['contribution_date'].where(pd.notna(chunk['contribution_date']), None)
                     
                     # Build raw_data more efficiently - prepare columns for raw_data dict
                     # Convert to records list using vectorized operations
@@ -841,6 +864,11 @@ class BulkDataService:
                     # Convert to dict records
                     records = records_df.to_dict('records')
                     
+                    # Clean NaN dates in records (pandas NaN -> None for SQLite compatibility)
+                    for record in records:
+                        if 'contribution_date' in record and (pd.isna(record['contribution_date']) or record['contribution_date'] is pd.NA):
+                            record['contribution_date'] = None
+                    
                     # Build raw_data efficiently using vectorized operations
                     # Create a DataFrame with ALL 20 source fields from Schedule A
                     raw_data_df = pd.DataFrame({
@@ -848,21 +876,29 @@ class BulkDataService:
                         'AMNDT_IND': chunk['AMNDT_IND'].astype(str).where(chunk['AMNDT_IND'].notna(), None),
                         'RPT_TP': chunk['RPT_TP'].astype(str).where(chunk['RPT_TP'].notna(), None),
                         'TRAN_ID': chunk['TRAN_ID'].astype(str).where(chunk['TRAN_ID'].notna(), None),
-                        'ENTITY_TP': chunk['ENTITY_TP'].astype(str).where(chunk['ENTITY_TP'].notna(), None),
+                        'ENTITY_TP_CODE': chunk.get('ENTITY_TP_CODE', pd.Series([None] * len(chunk))).astype(str).where(
+                            chunk.get('ENTITY_TP_CODE', pd.Series([None] * len(chunk))).notna(), None),
+                        'ENTITY_TP_DESC': chunk.get('ENTITY_TP_DESC', pd.Series([None] * len(chunk))).astype(str).where(
+                            chunk.get('ENTITY_TP_DESC', pd.Series([None] * len(chunk))).notna(), None),
+                        'IMAGE_NUM': chunk.get('IMAGE_NUM', pd.Series([None] * len(chunk))).astype(str).where(
+                            chunk.get('IMAGE_NUM', pd.Series([None] * len(chunk))).notna(), None),
                         'NAME': chunk['NAME'].astype(str).where(chunk['NAME'].notna(), None),
                         'CITY': chunk['CITY'].astype(str).where(chunk['CITY'].notna(), None),
                         'STATE': chunk['STATE'].astype(str).where(chunk['STATE'].notna(), None),
                         'ZIP_CODE': chunk['ZIP_CODE'].astype(str).where(chunk['ZIP_CODE'].notna(), None),
                         'EMPLOYER': chunk['EMPLOYER'].astype(str).where(chunk['EMPLOYER'].notna(), None),
                         'OCCUPATION': chunk['OCCUPATION'].astype(str).where(chunk['OCCUPATION'].notna(), None),
-                        'TRANSACTION_DT': chunk['TRANSACTION_DT'].astype(str).where(chunk['TRANSACTION_DT'].notna(), None),
+                        # Convert empty strings to None for TRANSACTION_DT (FEC data has some missing dates)
+                        'TRANSACTION_DT': chunk['TRANSACTION_DT'].astype(str).where(
+                            (chunk['TRANSACTION_DT'].notna()) & (chunk['TRANSACTION_DT'] != ''), None
+                        ),
                         'TRANSACTION_AMT': chunk['TRANSACTION_AMT'].astype(str).where(chunk['TRANSACTION_AMT'].notna(), None),
                         'OTHER_ID': chunk['OTHER_ID'].astype(str).where(chunk['OTHER_ID'].notna(), None),
                         'CAND_ID': chunk['CAND_ID'].astype(str).where(chunk['CAND_ID'].notna(), None),
                         'TRAN_TP': chunk['TRAN_TP'].astype(str).where(chunk['TRAN_TP'].notna(), None),
                         'FILE_NUM': chunk['FILE_NUM'].astype(str).where(chunk['FILE_NUM'].notna(), None),
                         'MEMO_CD': chunk['MEMO_CD'].astype(str).where(chunk['MEMO_CD'].notna(), None),
-                        'MEMO_TEXT': chunk['MEMO_TEXT'].astype(str).where(chunk['MEMO_TEXT'].notna(), None),
+                        # MEMO_TEXT is not a field in 21-field format - don't include it in raw_data
                         'SUB_ID': chunk['SUB_ID'].astype(str).where(chunk['SUB_ID'].notna(), None),
                     })
                     
@@ -871,40 +907,83 @@ class BulkDataService:
                     for i, record in enumerate(records):
                         record['raw_data'] = raw_data_records[i]
                     
-                    # Bulk insert with ON CONFLICT handling (SQLite)
+                    # Bulk insert/update with smart merge (SQLite)
                     if records:
                         try:
-                            # Use bulk_insert_mappings for better performance
-                            await session.execute(
-                                text("""
-                                    INSERT OR IGNORE INTO contributions 
-                                    (contribution_id, candidate_id, committee_id, contributor_name, 
-                                     contributor_city, contributor_state, contributor_zip, 
-                                     contributor_employer, contributor_occupation, contribution_amount,
-                                     contribution_date, contribution_type, amendment_indicator,
-                                     report_type, transaction_id, entity_type, other_id,
-                                     file_number, memo_code, memo_text, raw_data, created_at)
-                                    VALUES 
-                                    (:contribution_id, :candidate_id, :committee_id, :contributor_name,
-                                     :contributor_city, :contributor_state, :contributor_zip,
-                                     :contributor_employer, :contributor_occupation, :contribution_amount,
-                                     :contribution_date, :contribution_type, :amendment_indicator,
-                                     :report_type, :transaction_id, :entity_type, :other_id,
-                                     :file_number, :memo_code, :memo_text, :raw_data, :created_at)
-                                """),
-                                [
-                                    {
-                                        **r,
-                                        'raw_data': json.dumps(r['raw_data']),
-                                        'created_at': datetime.utcnow()
-                                    }
-                                    for r in records
-                                ]
+                            # Get contribution IDs for this batch
+                            contribution_ids = [r['contribution_id'] for r in records]
+                            
+                            # Fetch existing contributions in this batch
+                            existing_query = select(Contribution).where(
+                                Contribution.contribution_id.in_(contribution_ids)
                             )
+                            existing_result = await session.execute(existing_query)
+                            existing_contribs = {c.contribution_id: c for c in existing_result.scalars().all()}
+                            
+                            # Separate new and existing records
+                            new_records = []
+                            updated_count = 0
+                            
+                            # Import FECClient for smart merge
+                            from app.services.fec_client import FECClient
+                            fec_client = FECClient()
+                            
+                            for record in records:
+                                contrib_id = record['contribution_id']
+                                
+                                if contrib_id in existing_contribs:
+                                    # Use smart merge for existing records
+                                    # Clean NaN dates before smart merge
+                                    merge_record = {**record}
+                                    if 'contribution_date' in merge_record and (pd.isna(merge_record['contribution_date']) or merge_record['contribution_date'] is pd.NA):
+                                        merge_record['contribution_date'] = None
+                                    
+                                    existing_contrib = existing_contribs[contrib_id]
+                                    fec_client._smart_merge_contribution(existing_contrib, merge_record, 'bulk')
+                                    updated_count += 1
+                                else:
+                                    # New record - prepare for insert
+                                    # Clean NaN dates before adding to new_records
+                                    new_record = {**record}
+                                    if 'contribution_date' in new_record and (pd.isna(new_record['contribution_date']) or new_record['contribution_date'] is pd.NA):
+                                        new_record['contribution_date'] = None
+                                    
+                                    new_records.append({
+                                        **new_record,
+                                        'raw_data': new_record['raw_data'],  # Store as dict, SQLAlchemy JSON handles it
+                                        'created_at': datetime.utcnow(),
+                                        'data_source': 'bulk',
+                                        'last_updated_from': 'bulk'
+                                    })
+                            
+                            # Bulk insert new records
+                            if new_records:
+                                await session.execute(
+                                    text("""
+                                        INSERT INTO contributions 
+                                        (contribution_id, candidate_id, committee_id, contributor_name, 
+                                         contributor_city, contributor_state, contributor_zip, 
+                                         contributor_employer, contributor_occupation, contribution_amount,
+                                         contribution_date, contribution_type, amendment_indicator,
+                                         report_type, transaction_id, entity_type, other_id,
+                                         file_number, memo_code, memo_text, raw_data, created_at,
+                                         data_source, last_updated_from)
+                                        VALUES 
+                                        (:contribution_id, :candidate_id, :committee_id, :contributor_name,
+                                         :contributor_city, :contributor_state, :contributor_zip,
+                                         :contributor_employer, :contributor_occupation, :contribution_amount,
+                                         :contribution_date, :contribution_type, :amendment_indicator,
+                                         :report_type, :transaction_id, :entity_type, :other_id,
+                                         :file_number, :memo_code, :memo_text, :raw_data, :created_at,
+                                         :data_source, :last_updated_from)
+                                    """),
+                                    new_records
+                                )
+                            
                             await session.commit()
                             
-                            inserted = len(records)
-                            total_records += inserted
+                            inserted = len(new_records)
+                            total_records += inserted + updated_count
                             
                             # Update progress every 5 chunks to reduce overhead
                             # Track file position as rows processed (for resume capability)
@@ -940,34 +1019,64 @@ class BulkDataService:
                         except Exception as e:
                             await session.rollback()
                             logger.error(f"Error committing chunk {chunk_count}: {e}")
-                            # Fallback: try individual inserts for this chunk
+                            # Fallback: try individual inserts/updates with smart merge for this chunk
+                            # Import select with alias to avoid scoping issues
+                            from sqlalchemy import select as sql_select
+                            from app.services.fec_client import FECClient
+                            fec_client = FECClient()
+                            
                             for record in records:
                                 try:
-                                    await session.execute(
-                                        text("""
-                                            INSERT OR IGNORE INTO contributions 
-                                            (contribution_id, candidate_id, committee_id, contributor_name, 
-                                             contributor_city, contributor_state, contributor_zip, 
-                                             contributor_employer, contributor_occupation, contribution_amount,
-                                             contribution_date, contribution_type, amendment_indicator,
-                                             report_type, transaction_id, entity_type, other_id,
-                                             file_number, memo_code, memo_text, raw_data, created_at)
-                                            VALUES 
-                                            (:contribution_id, :candidate_id, :committee_id, :contributor_name,
-                                             :contributor_city, :contributor_state, :contributor_zip,
-                                             :contributor_employer, :contributor_occupation, :contribution_amount,
-                                             :contribution_date, :contribution_type, :amendment_indicator,
-                                             :report_type, :transaction_id, :entity_type, :other_id,
-                                             :file_number, :memo_code, :memo_text, :raw_data, :created_at)
-                                        """),
-                                        {
-                                            **record,
-                                            'raw_data': json.dumps(record['raw_data']),
-                                            'created_at': datetime.utcnow()
-                                        }
+                                    contrib_id = record['contribution_id']
+                                    
+                                    # Check if exists
+                                    existing_query = sql_select(Contribution).where(
+                                        Contribution.contribution_id == contrib_id
                                     )
-                                    await session.commit()
-                                    total_records += 1
+                                    existing_result = await session.execute(existing_query)
+                                    existing_contrib = existing_result.scalar_one_or_none()
+                                    
+                                    if existing_contrib:
+                                        # Use smart merge
+                                        fec_client._smart_merge_contribution(existing_contrib, record, 'bulk')
+                                        await session.commit()
+                                        total_records += 1
+                                    else:
+                                        # Insert new
+                                        # Clean NaN dates before insert
+                                        insert_record = {**record}
+                                        if 'contribution_date' in insert_record and (pd.isna(insert_record['contribution_date']) or insert_record['contribution_date'] is pd.NA):
+                                            insert_record['contribution_date'] = None
+                                        
+                                        await session.execute(
+                                            text("""
+                                                INSERT INTO contributions 
+                                                (contribution_id, candidate_id, committee_id, contributor_name, 
+                                                 contributor_city, contributor_state, contributor_zip, 
+                                                 contributor_employer, contributor_occupation, contribution_amount,
+                                                 contribution_date, contribution_type, amendment_indicator,
+                                                 report_type, transaction_id, entity_type, other_id,
+                                                 file_number, memo_code, memo_text, raw_data, created_at,
+                                                 data_source, last_updated_from)
+                                                VALUES 
+                                                (:contribution_id, :candidate_id, :committee_id, :contributor_name,
+                                                 :contributor_city, :contributor_state, :contributor_zip,
+                                                 :contributor_employer, :contributor_occupation, :contribution_amount,
+                                                 :contribution_date, :contribution_type, :amendment_indicator,
+                                                 :report_type, :transaction_id, :entity_type, :other_id,
+                                                 :file_number, :memo_code, :memo_text, :raw_data, :created_at,
+                                                 :data_source, :last_updated_from)
+                                            """),
+                                            {
+                                                **insert_record,
+                                                'raw_data': insert_record['raw_data'],  # Store as dict, SQLAlchemy JSON handles it
+                                                'created_at': datetime.utcnow(),
+                                                'data_source': 'bulk',
+                                                'last_updated_from': 'bulk'
+                                            }
+                                        )
+                                        await session.commit()
+                                        total_records += 1
                                 except Exception:
                                     await session.rollback()
                                     skipped_duplicates += 1
@@ -1762,6 +1871,16 @@ class BulkDataService:
                     await session.commit()
         except Exception as e:
             logger.warning(f"Error updating download progress: {e}")
+    
+    async def get_recent_jobs(self, limit: int = 10) -> List[BulkImportJob]:
+        """Get recent import jobs (all statuses), ordered by started_at descending"""
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(BulkImportJob)
+                .order_by(BulkImportJob.started_at.desc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
     
     async def get_incomplete_jobs(self) -> List[BulkImportJob]:
         """Get all incomplete import jobs (running or failed)"""

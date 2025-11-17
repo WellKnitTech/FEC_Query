@@ -3,10 +3,11 @@ import { candidateApi, FinancialSummary } from '../services/api';
 
 interface FinancialSummaryProps {
   candidateId: string;
+  cycle?: number;
   onCycleChange?: (cycle: number | undefined) => void;
 }
 
-export default function FinancialSummaryComponent({ candidateId, onCycleChange }: FinancialSummaryProps) {
+export default function FinancialSummaryComponent({ candidateId, cycle, onCycleChange }: FinancialSummaryProps) {
   const [financials, setFinancials] = useState<FinancialSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -16,7 +17,7 @@ export default function FinancialSummaryComponent({ candidateId, onCycleChange }
       setLoading(true);
       setError(null);
       try {
-        const data = await candidateApi.getFinancials(candidateId);
+        const data = await candidateApi.getFinancials(candidateId, cycle);
         setFinancials(data);
         // Notify parent of the cycle from the latest financial data
         if (data.length > 0 && onCycleChange) {
@@ -32,7 +33,7 @@ export default function FinancialSummaryComponent({ candidateId, onCycleChange }
     if (candidateId) {
       fetchFinancials();
     }
-  }, [candidateId]);
+  }, [candidateId, cycle]);
 
   if (loading) {
     return (
@@ -118,7 +119,7 @@ export default function FinancialSummaryComponent({ candidateId, onCycleChange }
           </div>
         </div>
         <div>
-          <div className="text-sm text-gray-600">Loan Contributions</div>
+          <div className="text-sm text-gray-600">Loans Received</div>
           <div className="text-lg font-semibold">
             ${((latest.loan_contributions || 0) / 1000).toFixed(1)}K
           </div>

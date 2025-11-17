@@ -1,192 +1,37 @@
-import { useState, useEffect, useRef } from 'react';
-import { bulkDataApi, BulkDataStatus, BulkDataCycle, BulkImportJobStatus, CycleStatus } from '../services/api';
-import ProgressTracker from '../components/ProgressTracker';
+import { useState, useEffect, useCallback } from 'react';
+import { bulkDataApi, BulkDataStatus, BulkDataCycle, CycleStatus } from '../services/api';
 import DataTypeGrid from '../components/DataTypeGrid';
-
-// Helper function to extract error message from API responses
-function extractErrorMessage(err: any): string {
-  if (!err) return 'An unknown error occurred';
-  
-  // Handle FastAPI validation errors (422) - detail is an array of error objects
-  if (err.response?.data?.detail) {
-    const detail = err.response.data.detail;
-    
-    // If detail is an array (validation errors), format them
-    if (Array.isArray(detail)) {
-      return detail.map((error: any) => {
-        const loc = error.loc ? error.loc.join('.') : '';
-        const msg = error.msg || error.message || 'Validation error';
-        return loc ? `${loc}: ${msg}` : msg;
-      }).join('; ');
-    }
-    
-    // If detail is a string, use it directly
-    if (typeof detail === 'string') {
-      return detail;
-    }
-  }
-  
-  // Fallback to message or default
-  return err.message || 'An unknown error occurred';
-}
+import JobList from '../components/JobList';
+import BulkDataStatusSummary from '../components/BulkDataStatusSummary';
+import BulkDataOperations from '../components/BulkDataOperations';
+import CycleSelector from '../components/CycleSelector';
+import QuickStats from '../components/QuickStats';
+import { useMultipleJobTracking } from '../hooks/useMultipleJobTracking';
+import { useBulkDataOperations } from '../hooks/useBulkDataOperations';
 
 export default function BulkDataManagement() {
   const [status, setStatus] = useState<BulkDataStatus | null>(null);
   const [cycles, setCycles] = useState<BulkDataCycle[]>([]);
   const [cycleStatus, setCycleStatus] = useState<CycleStatus | null>(null);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [selectedCycle, setSelectedCycle] = useState<number>(2024);
   const [selectedDataTypes, setSelectedDataTypes] = useState<Set<string>>(new Set());
   const [forceDownload, setForceDownload] = useState<boolean>(false);
-  const [operationInProgress, setOperationInProgress] = useState<string | null>(null);
-  const [activeJobs, setActiveJobs] = useState<Map<string, BulkImportJobStatus>>(new Map());
-  const wsRefs = useRef<Map<string, WebSocket>>(new Map());
-  const pollingIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const [initialLoading, setInitialLoading] = useState(true);
 
-  useEffect(() => {
-    loadStatus();
-    
-    // Cleanup on unmount
-    return () => {
-      wsRefs.current.forEach((ws) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.close();
-        }
-      });
-      pollingIntervals.current.forEach((interval) => clearInterval(interval));
-    };
-  }, []);
-
-  useEffect(() => {
-    // Load cycle status when selected cycle changes
-    loadCycleStatus();
-  }, [selectedCycle]);
-
-  const startJobTracking = (jobId: string) => {
-    // Try WebSocket first
-    const ws = bulkDataApi.createWebSocket(
-      jobId,
-      (message) => {
-        if (message.type === 'progress' || message.type === 'completed' || message.type === 'failed' || message.type === 'cancelled') {
-          // The backend sends { type, job_id, data: { ...jobStatus } }
-          const jobStatus = message.data as BulkImportJobStatus;
-          setActiveJobs((prev) => {
-            const updated = new Map(prev);
-            updated.set(jobId, jobStatus);
-            return updated;
-          });
-          
-          // Stop tracking if job is done
-          if (message.type !== 'progress') {
-            stopJobTracking(jobId);
-            if (message.type === 'completed' || message.type === 'failed') {
-              loadStatus(); // Refresh status
-              loadCycleStatus(); // Refresh cycle status
-            }
-          }
-        }
-      },
-      () => {
-        // WebSocket failed, falling back to polling
-        startPolling(jobId);
-      }
-    );
-
-    if (ws) {
-      wsRefs.current.set(jobId, ws);
-      
-      // Fallback to polling if WebSocket closes unexpectedly
-      ws.onclose = () => {
-        if (!pollingIntervals.current.has(jobId)) {
-          startPolling(jobId);
-        }
-      };
-    } else {
-      // WebSocket creation failed, use polling
-      startPolling(jobId);
-    }
-  };
-
-  const startPolling = (jobId: string) => {
-    // Stop any existing polling for this job
-    if (pollingIntervals.current.has(jobId)) {
-      clearInterval(pollingIntervals.current.get(jobId)!);
-    }
-
-    const poll = async () => {
-      try {
-        const jobStatus = await bulkDataApi.getJobStatus(jobId);
-        setActiveJobs((prev) => {
-          const updated = new Map(prev);
-          updated.set(jobId, jobStatus);
-          return updated;
-        });
-
-        // Stop polling if job is done
-        if (jobStatus.status !== 'running' && jobStatus.status !== 'pending') {
-          stopJobTracking(jobId);
-          if (jobStatus.status === 'completed' || jobStatus.status === 'failed') {
-            loadStatus(); // Refresh status
-            loadCycleStatus(); // Refresh cycle status
-          }
-        }
-      } catch (err) {
-        console.error(`Error polling job ${jobId}:`, err);
-      }
-    };
-
-    // Poll immediately, then every 2 seconds
-    poll();
-    const interval = setInterval(poll, 2000);
-    pollingIntervals.current.set(jobId, interval);
-  };
-
-  const stopJobTracking = (jobId: string) => {
-    // Close WebSocket if open
-    const ws = wsRefs.current.get(jobId);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.close();
-    }
-    wsRefs.current.delete(jobId);
-
-    // Clear polling interval
-    const interval = pollingIntervals.current.get(jobId);
-    if (interval) {
-      clearInterval(interval);
-      pollingIntervals.current.delete(jobId);
-    }
-  };
-
-  const handleCancelJob = async (jobId: string) => {
-    if (!window.confirm('Are you sure you want to cancel this job?')) {
-      return;
-    }
-
+  // Load initial data
+  const loadStatus = useCallback(async () => {
     try {
-      await bulkDataApi.cancelJob(jobId);
-      // Job status will be updated via WebSocket/polling
-    } catch (err: any) {
-      setError(extractErrorMessage(err) || 'Failed to cancel job');
-      console.error(err);
-    }
-  };
-
-  const loadStatus = async () => {
-    try {
-      setLoading(true);
-      setError(null);
       const [statusData, cyclesData] = await Promise.all([
         bulkDataApi.getStatus(),
         bulkDataApi.getCycles(),
       ]);
       setStatus(statusData);
       setCycles(cyclesData.cycles || []);
-      
+
       // Set default cycle to most recent available or current year
       if (cyclesData.cycles && cyclesData.cycles.length > 0) {
-        // First cycle should be most recent
         const firstCycle = cyclesData.cycles[0];
         const defaultCycle = firstCycle.cycle || 2024;
         if (!selectedCycle || selectedCycle === 2024) {
@@ -194,20 +39,18 @@ export default function BulkDataManagement() {
         }
       } else {
         const currentYear = new Date().getFullYear();
-        const defaultCycle = (Math.floor(currentYear / 2) * 2); // Nearest even year
+        const defaultCycle = Math.floor(currentYear / 2) * 2; // Nearest even year
         if (!selectedCycle || selectedCycle === 2024) {
           setSelectedCycle(defaultCycle);
         }
       }
     } catch (err: any) {
-      setError(extractErrorMessage(err) || 'Failed to load bulk data status');
+      setError(err.message || 'Failed to load bulk data status');
       console.error(err);
-    } finally {
-      setLoading(false);
     }
-  };
+  }, []);
 
-  const loadCycleStatus = async () => {
+  const loadCycleStatus = useCallback(async () => {
     try {
       const status = await bulkDataApi.getDataTypeStatus(selectedCycle);
       // Validate response structure
@@ -222,213 +65,83 @@ export default function BulkDataManagement() {
       console.error('Failed to load cycle status:', err);
       setCycleStatus(null);
       // Don't set error here as it might be a temporary issue
-      // The error will be shown in the DataTypeGrid component
     }
-  };
+  }, [selectedCycle]);
 
-  const handleRefreshCycles = async () => {
+  // Job tracking with callback to refresh data when jobs complete
+  const handleJobComplete = useCallback(() => {
+    loadStatus();
+    loadCycleStatus();
+    // Note: loadRecentJobs is called separately when needed (e.g., on manual refresh)
+  }, [loadStatus, loadCycleStatus]);
+
+  const {
+    jobs: activeJobs,
+    startTracking,
+    cancelJob: handleCancelJobInternal,
+    loadJobs,
+  } = useMultipleJobTracking(handleJobComplete);
+
+  const loadRecentJobs = useCallback(async () => {
     try {
-      setLoading(true);
+      const result = await bulkDataApi.getRecentJobs(20); // Get last 20 jobs
+      // Load all jobs into state - this will also start tracking active ones
+      loadJobs(result.jobs);
+    } catch (err) {
+      console.error('Failed to load recent jobs:', err);
+      // Don't show error to user - this is just for display
+    }
+  }, [loadJobs]);
+
+  // Operations hook
+  const {
+    loading,
+    handleDownload,
+    handleImportSelected,
+    handleImportAllTypes,
+    handleClearContributions,
+    handleCleanupAndReimport,
+    handleImportAll,
+    handleRefreshCycles,
+  } = useBulkDataOperations({
+    selectedCycle,
+    selectedDataTypes,
+    forceDownload,
+    onSuccess: (message) => {
+      setSuccess(message);
       setError(null);
+      // Auto-dismiss success after 5 seconds
+      setTimeout(() => setSuccess(null), 5000);
+    },
+    onError: (message) => {
+      setError(message);
       setSuccess(null);
-      setOperationInProgress('Searching for cycles from FEC API...');
-      
-      const result = await bulkDataApi.refreshCycles();
-      setSuccess(`Found ${result.count} available cycles. Cycles updated in database.`);
-      await loadStatus(); // Refresh status to show updated cycles
-    } catch (err: any) {
-      setError(extractErrorMessage(err) || 'Failed to refresh cycles');
-      console.error(err);
-    } finally {
-      setLoading(false);
-      setOperationInProgress(null);
-    }
-  };
+    },
+    onJobStarted: (jobId) => {
+      startTracking(jobId);
+      // Also refresh recent jobs to ensure it appears immediately
+      setTimeout(() => loadRecentJobs(), 500);
+    },
+    onStatusRefresh: loadStatus,
+    onCycleStatusRefresh: loadCycleStatus,
+  });
 
-  const handleClearContributions = async () => {
-    if (!window.confirm('Are you sure you want to clear all contributions? This action cannot be undone.')) {
-      return;
-    }
+  // Initial load
+  useEffect(() => {
+    const initialize = async () => {
+      await loadStatus();
+      await loadRecentJobs();
+      setInitialLoading(false);
+    };
+    initialize();
+  }, []); // Only run on mount
 
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
-      setOperationInProgress('Clearing contributions...');
-      
-      const result = await bulkDataApi.clearContributions();
-      setSuccess(`Successfully cleared ${result.deleted_count} contributions`);
-      await loadStatus(); // Refresh status
-    } catch (err: any) {
-      setError(extractErrorMessage(err) || 'Failed to clear contributions');
-      console.error(err);
-    } finally {
-      setLoading(false);
-      setOperationInProgress(null);
-    }
-  };
+  useEffect(() => {
+    // Load cycle status when selected cycle changes
+    loadCycleStatus();
+  }, [selectedCycle, loadCycleStatus]);
 
-  const handleDownload = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
-      
-      const result = await bulkDataApi.download(selectedCycle, forceDownload);
-      setSuccess(result.message || `Download started for cycle ${selectedCycle}`);
-      
-      // Start tracking the job
-      if (result.job_id) {
-        startJobTracking(result.job_id);
-      }
-      
-      await loadStatus(); // Refresh status
-    } catch (err: any) {
-      setError(extractErrorMessage(err) || 'Failed to download bulk data');
-      console.error(err);
-    } finally {
-      setLoading(false);
-      setOperationInProgress(null);
-    }
-  };
-
-  const handleCleanupAndReimport = async () => {
-    if (!window.confirm(
-      `Are you sure you want to clear all contributions and reimport cycle ${selectedCycle}? ` +
-      'This will delete all existing contribution data and cannot be undone.'
-    )) {
-      return;
-    }
-
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
-      
-      const result = await bulkDataApi.cleanupAndReimport(selectedCycle);
-      setSuccess(result.message || `Cleanup and reimport started for cycle ${selectedCycle}`);
-      
-      // Start tracking the job
-      if (result.job_id) {
-        startJobTracking(result.job_id);
-      }
-      
-      await loadStatus(); // Refresh status
-    } catch (err: any) {
-      setError(extractErrorMessage(err) || 'Failed to cleanup and reimport');
-      console.error(err);
-    } finally {
-      setLoading(false);
-      setOperationInProgress(null);
-    }
-  };
-
-  const handleImportSelected = async () => {
-    if (selectedDataTypes.size === 0) {
-      setError('Please select at least one data type to import');
-      return;
-    }
-
-    const dataTypesArray = Array.from(selectedDataTypes);
-    if (!window.confirm(
-      `Import ${dataTypesArray.length} selected data type(s) for cycle ${selectedCycle}?`
-    )) {
-      return;
-    }
-
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
-      
-      const result = await bulkDataApi.importMultipleDataTypes(selectedCycle, dataTypesArray, forceDownload);
-      setSuccess(result.message || `Import started for ${dataTypesArray.length} data types`);
-      
-      // Start tracking the job
-      if (result.job_id) {
-        startJobTracking(result.job_id);
-      }
-      
-      // Refresh cycle status, but don't fail if it errors
-      try {
-        await loadCycleStatus();
-      } catch (err) {
-        console.error('Failed to refresh cycle status after import:', err);
-        // Don't throw - the import started successfully
-      }
-    } catch (err: any) {
-      const errorMessage = extractErrorMessage(err) || 'Failed to import selected data types';
-      setError(errorMessage);
-      console.error('Import error:', err);
-    } finally {
-      setLoading(false);
-      setOperationInProgress(null);
-    }
-  };
-
-  const handleImportAllTypes = async () => {
-    if (!window.confirm(
-      `Import all implemented data types for cycle ${selectedCycle}?`
-    )) {
-      return;
-    }
-
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
-      
-      const result = await bulkDataApi.importAllDataTypes(selectedCycle);
-      setSuccess(result.message || `Import started for all data types`);
-      
-      // Start tracking the job
-      if (result.job_id) {
-        startJobTracking(result.job_id);
-      }
-      
-      await loadCycleStatus(); // Refresh cycle status
-    } catch (err: any) {
-      setError(extractErrorMessage(err) || 'Failed to import all data types');
-      console.error(err);
-    } finally {
-      setLoading(false);
-      setOperationInProgress(null);
-    }
-  };
-
-  const handleImportAll = async () => {
-    const cycleCount = cycles.length;
-    const endYear = new Date().getFullYear() + 6;
-    if (!window.confirm(
-      `Are you sure you want to import all ${cycleCount} cycles from 2000 to ${endYear}? ` +
-      'This will download and import data for all election cycles (including future cycles). This may take a very long time.'
-    )) {
-      return;
-    }
-
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
-      
-      const result = await bulkDataApi.importAll();
-      setSuccess(result.message || `Import started for ${result.count} cycles`);
-      
-      // Start tracking the job
-      if (result.job_id) {
-        startJobTracking(result.job_id);
-      }
-      
-      await loadStatus(); // Refresh status
-    } catch (err: any) {
-      setError(extractErrorMessage(err) || 'Failed to import all cycles');
-      console.error(err);
-    } finally {
-      setLoading(false);
-      setOperationInProgress(null);
-    }
-  };
-
+  // Data type selection handlers
   const handleDataTypeSelection = (dataType: string, selected: boolean) => {
     setSelectedDataTypes((prev) => {
       const updated = new Set(prev);
@@ -453,7 +166,32 @@ export default function BulkDataManagement() {
     setSelectedDataTypes(new Set());
   };
 
-  if (loading && !status) {
+  const handleCancelJob = async (jobId: string) => {
+    if (!window.confirm('Are you sure you want to cancel this job?')) {
+      return;
+    }
+
+    try {
+      await handleCancelJobInternal(jobId);
+    } catch (err: any) {
+      setError(err.message || 'Failed to cancel job');
+      console.error(err);
+    }
+  };
+
+  // Calculate stats for components
+  const runningJobs = Array.from(activeJobs.values()).filter((j) => j.status === 'running').length;
+  const completedToday = Array.from(activeJobs.values()).filter((j) => {
+    if (j.status === 'completed' && j.completed_at) {
+      const completedDate = new Date(j.completed_at);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      return completedDate >= today;
+    }
+    return false;
+  }).length;
+
+  if (initialLoading && !status) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="animate-pulse">
@@ -466,15 +204,16 @@ export default function BulkDataManagement() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      {/* Header */}
       <div className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-900 mb-2">
-          Bulk Data Management
-        </h1>
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">Bulk Data Management</h1>
         <p className="text-gray-600">
-          Manage FEC bulk CSV data downloads and imports. Use this to clean up incorrectly imported data and reimport with correct mappings.
+          Manage FEC bulk CSV data downloads and imports. Use this to clean up incorrectly imported
+          data and reimport with correct mappings.
         </p>
       </div>
 
+      {/* Error/Success Messages */}
       {error && (
         <div className="mb-6 bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded">
           <strong>Error:</strong> {error}
@@ -487,160 +226,83 @@ export default function BulkDataManagement() {
         </div>
       )}
 
-      {/* Active Jobs - Prominent Display */}
-      {Array.from(activeJobs.values()).length > 0 && (
-        <div className="mb-6 bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-lg p-6 shadow-lg">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-              <span className="animate-pulse">⚡</span>
-              Active Import Jobs ({Array.from(activeJobs.values()).length})
-            </h2>
-            <div className="text-sm text-gray-600">
-              {Array.from(activeJobs.values()).filter(j => j.status === 'running').length} running
-            </div>
-          </div>
-          <div className="space-y-4">
-            {Array.from(activeJobs.values()).map((job) => (
-              <ProgressTracker
-                key={job.job_id}
-                jobStatus={job}
-                onCancel={() => handleCancelJob(job.job_id)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {operationInProgress && activeJobs.size === 0 && (
-        <div className="mb-6 bg-blue-50 border border-blue-200 text-blue-800 px-4 py-3 rounded">
-          <strong>In Progress:</strong> {operationInProgress}
-          <div className="mt-2">
-            <div className="w-full bg-blue-200 rounded-full h-2.5">
-              <div className="bg-blue-600 h-2.5 rounded-full animate-pulse" style={{ width: '100%' }}></div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Status Card */}
-      <div className="bg-white shadow rounded-lg p-6 mb-6">
-        <h2 className="text-xl font-semibold text-gray-900 mb-4">Current Status</h2>
-        {status ? (
-          <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <dt className="text-sm font-medium text-gray-500">Bulk Data Enabled</dt>
-              <dd className="mt-1 text-sm text-gray-900">
-                {status.enabled ? (
-                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                    Enabled
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                    Disabled
-                  </span>
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-sm font-medium text-gray-500">Total Records</dt>
-              <dd className="mt-1 text-sm text-gray-900">
-                {status.total_records?.toLocaleString() || 0}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-sm font-medium text-gray-500">Available Cycles</dt>
-              <dd className="mt-1 text-sm text-gray-900">
-                {status.available_cycles?.length || 0}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-sm font-medium text-gray-500">Update Interval</dt>
-              <dd className="mt-1 text-sm text-gray-900">
-                {status.update_interval_hours || 24} hours
-              </dd>
-            </div>
-          </dl>
-        ) : (
-          <p className="text-gray-500">No status available</p>
-        )}
+      {/* Quick Stats */}
+      <div className="mb-6">
+        <QuickStats status={status} cycles={cycles} runningJobs={runningJobs} />
       </div>
 
-      {/* Year Selection and Data Type Grid */}
-      <div className="bg-white shadow rounded-lg p-6 mb-6">
-        <div className="flex justify-between items-center mb-4">
-          <div className="flex-1">
-            <label htmlFor="cycle-select" className="block text-sm font-medium text-gray-700 mb-2">
-              Election Cycle
-            </label>
-            <div className="flex gap-2">
-              <select
-                id="cycle-select"
-                value={selectedCycle}
-                onChange={(e) => {
-                  setSelectedCycle(parseInt(e.target.value));
-                  setSelectedDataTypes(new Set()); // Clear selections when cycle changes
-                }}
-                className="block w-48 rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-                disabled={loading}
-              >
-                {cycles.length > 0 ? (
-                  cycles.map((cycleObj) => (
-                    <option key={cycleObj.cycle} value={cycleObj.cycle}>
-                      {cycleObj.cycle}
-                    </option>
-                  ))
-                ) : (
-                  <option value={2024}>2024</option>
-                )}
-              </select>
-              <button
-                onClick={loadCycleStatus}
-                disabled={loading}
-                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Refresh Status
-              </button>
-              <button
-                onClick={handleRefreshCycles}
-                disabled={loading}
-                className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 border border-transparent rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Search for additional cycles from FEC API (only needed every couple years)"
-              >
-                Search for Cycles
-              </button>
-            </div>
+      {/* Jobs Section - Always Visible */}
+      <div className="mb-6 bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-lg p-6 shadow-lg">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-3">
+            {runningJobs > 0 && (
+              <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+            )}
+            <h2 className="text-2xl font-bold text-gray-900">
+              Import Jobs ({activeJobs.size})
+            </h2>
           </div>
-          <div className="flex flex-col gap-2">
-            <div className="flex gap-2">
-              <button
-                onClick={handleImportSelected}
-                disabled={loading || selectedDataTypes.size === 0}
-                className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Import Selected ({selectedDataTypes.size})
-              </button>
-              <button
-                onClick={handleImportAllTypes}
-                disabled={loading}
-                className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Import All Types
-              </button>
-            </div>
-            <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={forceDownload}
-                onChange={(e) => setForceDownload(e.target.checked)}
-                disabled={loading}
-                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded disabled:opacity-50"
-              />
-              <span>Force download (skip file size check)</span>
-            </label>
+          <div className="flex items-center gap-3">
+            {runningJobs > 0 && (
+              <span className="px-3 py-1 bg-blue-100 text-blue-800 text-sm font-medium rounded-full">
+                {runningJobs} running
+              </span>
+            )}
+            <button
+              onClick={loadRecentJobs}
+              disabled={loading}
+              className="px-3 py-1.5 text-sm bg-white border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              title="Refresh job status"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                />
+              </svg>
+              Refresh
+            </button>
           </div>
         </div>
 
-        {/* Data Type Grid */}
+        <JobList
+          jobs={Array.from(activeJobs.values())}
+          onCancel={handleCancelJob}
+          onRefresh={loadRecentJobs}
+          loading={loading}
+        />
+      </div>
+
+      {/* Status Summary */}
+      <div className="mb-6">
+        <BulkDataStatusSummary
+          status={status}
+          cycles={cycles}
+          totalJobs={activeJobs.size}
+          runningJobs={runningJobs}
+          completedToday={completedToday}
+        />
+      </div>
+
+      {/* Cycle Selector */}
+      <div className="mb-6">
+        <CycleSelector
+          cycles={cycles}
+          selectedCycle={selectedCycle}
+          onCycleChange={(cycle) => {
+            setSelectedCycle(cycle);
+            setSelectedDataTypes(new Set()); // Clear selections when cycle changes
+          }}
+          onRefresh={loadCycleStatus}
+          onSearchCycles={handleRefreshCycles}
+          loading={loading}
+        />
+      </div>
+
+      {/* Data Type Grid */}
+      <div className="bg-white shadow rounded-lg p-6 mb-6">
         <DataTypeGrid
           cycleStatus={cycleStatus}
           selectedTypes={selectedDataTypes}
@@ -651,86 +313,21 @@ export default function BulkDataManagement() {
         />
       </div>
 
-      {/* Legacy Operations Card - Keep for backward compatibility */}
-      <div className="bg-white shadow rounded-lg p-6 mb-6">
-        <h2 className="text-xl font-semibold text-gray-900 mb-4">Legacy Operations</h2>
-        
-        <div className="space-y-4">
-          {/* Action Buttons */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="flex flex-col gap-2">
-              <button
-                onClick={handleDownload}
-                disabled={loading}
-                className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Download & Import (Individual Contributions)
-              </button>
-              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={forceDownload}
-                  onChange={(e) => setForceDownload(e.target.checked)}
-                  disabled={loading}
-                  className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded disabled:opacity-50"
-                />
-                <span>Force download (skip file size check)</span>
-              </label>
-            </div>
-
-            <button
-              onClick={handleClearContributions}
-              disabled={loading}
-              className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Clear All Contributions
-            </button>
-
-            <button
-              onClick={handleCleanupAndReimport}
-              disabled={loading}
-              className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Cleanup & Reimport
-            </button>
-
-            <button
-              onClick={handleImportAll}
-              disabled={loading}
-              className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Import All Cycles
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Information Card */}
-      <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
-        <h3 className="text-lg font-semibold text-blue-900 mb-2">About Cleanup & Reimport</h3>
-        <div className="text-sm text-blue-800 space-y-2">
-          <p>
-            <strong>Clear All Contributions:</strong> Removes all contribution records from the database. 
-            This is useful if data was imported with incorrect column mappings.
-          </p>
-          <p>
-            <strong>Download & Import:</strong> Downloads and imports FEC bulk CSV data for the selected cycle 
-            without clearing existing data. Duplicates will be skipped.
-          </p>
-          <p>
-            <strong>Cleanup & Reimport:</strong> First clears all contributions, then downloads and imports 
-            fresh data for the selected cycle. This ensures a clean import with correct column mappings.
-          </p>
-          <p>
-            <strong>Import All Cycles:</strong> Downloads and imports all election cycles from 2000 to {new Date().getFullYear() + 6} (includes future cycles). 
-            This will import {cycles.length} cycles and may take several hours to complete. Future cycles may not have data available yet. Duplicates will be skipped.
-          </p>
-          <p className="mt-4 font-semibold">
-            ⚠️ Warning: Cleanup operations are irreversible. Make sure you want to delete all contribution data before proceeding.
-          </p>
-        </div>
+      {/* Operations Panel */}
+      <div className="mb-6">
+        <BulkDataOperations
+          selectedDataTypesCount={selectedDataTypes.size}
+          loading={loading}
+          forceDownload={forceDownload}
+          onForceDownloadChange={setForceDownload}
+          onDownload={handleDownload}
+          onImportSelected={handleImportSelected}
+          onImportAllTypes={handleImportAllTypes}
+          onClearContributions={handleClearContributions}
+          onCleanupAndReimport={handleCleanupAndReimport}
+          onImportAll={handleImportAll}
+        />
       </div>
     </div>
   );
 }
-

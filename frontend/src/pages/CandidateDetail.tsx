@@ -207,7 +207,7 @@ export default function CandidateDetail() {
       </div>
 
       <div className="space-y-6">
-        <FinancialSummary candidateId={candidateId!} onCycleChange={setCycle} />
+        <FinancialSummary candidateId={candidateId!} cycle={cycle} onCycleChange={setCycle} />
         <DonorStateAnalysis candidateId={candidateId} candidate={candidate} cycle={cycle} />
         <ContributionAnalysis candidateId={candidateId} cycle={cycle} />
         <CumulativeChart candidateId={candidateId} />

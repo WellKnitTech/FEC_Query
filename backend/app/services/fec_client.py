@@ -22,6 +22,10 @@ _contact_info_check_cache: Dict[str, Tuple[bool, datetime]] = {}
 _contact_info_check_cache_ttl = 300  # 5 minutes
 _contact_info_check_cache_lock = asyncio.Lock()
 
+# Track ongoing backfill operations to prevent duplicates
+_backfill_in_progress: Dict[str, asyncio.Task] = {}
+_backfill_lock = asyncio.Lock()
+
 class FECClient:
     """Client for interacting with OpenFEC API with caching and rate limiting"""
     
@@ -921,9 +925,14 @@ class FECClient:
         
         Returns the most recent contribution_date for the given filters, which is used
         to determine what new contributions need to be fetched from the API.
+        
+        If contribution_date is NULL, also checks raw_data for dates (from bulk imports).
         """
         try:
             async with AsyncSessionLocal() as session:
+                from app.utils.date_utils import extract_date_from_raw_data
+                
+                # First, get max date from contribution_date column
                 query = select(func.max(Contribution.contribution_date))
                 conditions = []
                 
@@ -941,6 +950,47 @@ class FECClient:
                 
                 result = await session.execute(query)
                 latest_date = result.scalar_one_or_none()
+                
+                # Also check contributions with NULL contribution_date but non-NULL raw_data
+                # This handles cases where bulk import stored dates in raw_data but not in contribution_date
+                null_date_query = select(Contribution).where(
+                    Contribution.contribution_date.is_(None),
+                    Contribution.raw_data.isnot(None)
+                )
+                
+                if candidate_id:
+                    null_date_query = null_date_query.where(Contribution.candidate_id == candidate_id)
+                if committee_id:
+                    null_date_query = null_date_query.where(Contribution.committee_id == committee_id)
+                if contributor_name:
+                    null_date_query = null_date_query.where(
+                        Contribution.contributor_name.ilike(f"%{contributor_name}%")
+                    )
+                
+                # Limit to a reasonable number to avoid loading too much data
+                null_date_query = null_date_query.limit(10000)
+                
+                null_date_result = await session.execute(null_date_query)
+                contributions_with_null_date = null_date_result.scalars().all()
+                
+                # Extract dates from raw_data and find the latest
+                for contrib in contributions_with_null_date:
+                    if contrib.raw_data:
+                        # Handle JSON string case
+                        raw_data = contrib.raw_data
+                        if isinstance(raw_data, str):
+                            try:
+                                raw_data = json.loads(raw_data)
+                            except (json.JSONDecodeError, TypeError):
+                                continue
+                        
+                        if isinstance(raw_data, dict):
+                            date_from_raw = extract_date_from_raw_data(raw_data)
+                            if date_from_raw:
+                                # Update latest_date if this is newer
+                                if latest_date is None or date_from_raw > latest_date:
+                                    latest_date = date_from_raw
+                                    logger.debug(f"_get_latest_contribution_date: Found newer date {date_from_raw} in raw_data for {contrib.contribution_id}")
                 
                 if latest_date:
                     logger.debug(f"Latest contribution date in DB: {latest_date.strftime('%Y-%m-%d')} "
@@ -1036,10 +1086,29 @@ class FECClient:
         if raw_data is None and contribution_obj and contribution_obj.raw_data:
             raw_data = contribution_obj.raw_data
         
-        if raw_data:
+        # Handle case where raw_data might be a JSON string (from bulk import)
+        if raw_data and isinstance(raw_data, str):
+            try:
+                raw_data = json.loads(raw_data)
+                logger.debug(f"get_contribution_date: Deserialized raw_data from JSON string for {contribution_id}")
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"get_contribution_date: Failed to deserialize raw_data JSON string for {contribution_id}: {e}")
+                raw_data = None
+        
+        if raw_data and isinstance(raw_data, dict):
+            # Check if this looks like bulk import data (has TRANSACTION_DT key)
+            has_transaction_dt_key = 'TRANSACTION_DT' in raw_data
+            if has_transaction_dt_key:
+                logger.debug(f"get_contribution_date: raw_data has TRANSACTION_DT key for {contribution_id}")
+            else:
+                logger.debug(f"get_contribution_date: raw_data does not have TRANSACTION_DT key for {contribution_id}, available keys: {list(raw_data.keys())[:10]}")
+            # Debug: log what's in raw_data for date fields
+            trans_dt = raw_data.get('TRANSACTION_DT')
+            logger.debug(f"get_contribution_date: Checking raw_data for {contribution_id}, TRANSACTION_DT={trans_dt}, type={type(trans_dt).__name__ if trans_dt else 'None'}")
+            
             date_from_raw = extract_date_from_raw_data(raw_data)
             if date_from_raw:
-                logger.debug(f"get_contribution_date: Found date in raw_data for {contribution_id}")
+                logger.debug(f"get_contribution_date: Found date in raw_data for {contribution_id}: {date_from_raw}")
                 # If we found date in raw_data, update DB field for future queries (in background to avoid blocking)
                 # Schedule background update to avoid blocking the current query
                 if contribution_obj:
@@ -1047,8 +1116,33 @@ class FECClient:
                         self._update_contribution_date_from_raw_data(contribution_id, date_from_raw)
                     )
                 return date_from_raw
+            else:
+                # More detailed logging about why extraction failed
+                available_keys = list(raw_data.keys())[:10]
+                logger.debug(f"get_contribution_date: raw_data exists but extract_date_from_raw_data returned None for {contribution_id}. Available keys (first 10): {available_keys}, TRANSACTION_DT value: {trans_dt}")
+                
+                # If this is bulk import data (has TRANSACTION_DT key) but the value is None/empty,
+                # the API might have more up-to-date information, so we should try fetching from API
+                if 'TRANSACTION_DT' in raw_data:
+                    trans_dt_val = raw_data.get('TRANSACTION_DT')
+                    # Check if value is None, empty, or invalid string
+                    is_invalid = (
+                        trans_dt_val is None or
+                        (isinstance(trans_dt_val, str) and trans_dt_val.strip().lower() in ['none', 'nan', 'null', ''])
+                    )
+                    if is_invalid:
+                        logger.info(f"get_contribution_date: Bulk import data has no valid TRANSACTION_DT value for {contribution_id} (value: {trans_dt_val}), will try API fetch (API may have more up-to-date data)")
+                        # Continue to API fetch below - don't return None
+                else:
+                    # raw_data exists but doesn't have TRANSACTION_DT - might be API data or missing field
+                    logger.debug(f"get_contribution_date: raw_data exists but no TRANSACTION_DT key for {contribution_id}, will try API fetch")
+        elif raw_data:
+            logger.warning(f"get_contribution_date: raw_data exists but is not a dict (type: {type(raw_data).__name__}) for {contribution_id}")
+        else:
+            logger.debug(f"get_contribution_date: No raw_data available for {contribution_id}, will try API fetch")
         
         # Step 3: Schedule API query in background (non-blocking)
+        # Only do this if we don't have bulk import data, or if bulk import data might have a date from API
         # Don't block - schedule background task to fetch and store
         logger.info(f"get_contribution_date: Date not in DB or raw_data, scheduling API fetch for {contribution_id}")
         asyncio.create_task(
@@ -1109,14 +1203,12 @@ class FECClient:
                         contrib.contribution_date = extracted_date
                         logger.info(f"_store_api_response_in_db: Storing date {extracted_date} for {contribution_id}")
                     
-                    # Store the complete API response in raw_data
-                    # Merge with existing raw_data to preserve any existing fields
-                    if contrib.raw_data and isinstance(contrib.raw_data, dict):
-                        # Merge API response into existing raw_data (API data takes precedence)
-                        contrib.raw_data.update(api_response)
-                    else:
-                        # If no existing raw_data, use the API response directly
-                        contrib.raw_data = api_response
+                    # Use smart merge to update contribution with API response
+                    # This preserves bulk import fields and intelligently merges data
+                    merge_data = {'raw_data': api_response}
+                    if extracted_date:
+                        merge_data['contribution_date'] = extracted_date
+                    self._smart_merge_contribution(contrib, merge_data, 'api')
                     
                     # Mark JSON column as modified so SQLAlchemy detects the change
                     from sqlalchemy.orm.attributes import flag_modified
@@ -1140,36 +1232,81 @@ class FECClient:
         Background task to fetch contribution date from FEC API and update database.
         This runs asynchronously and doesn't block the main query.
         Always stores the API response in DB to avoid future API calls.
+        Uses deduplication to prevent multiple concurrent API calls for the same contribution_id.
         
         Args:
             contribution_id: The contribution sub_id to fetch
             committee_id: Optional committee ID to narrow the search
             candidate_id: Optional candidate ID to narrow the search
         """
-        try:
-            logger.info(f"_backfill_contribution_date: Starting background fetch for contribution_id: {contribution_id}")
-            
-            # Fetch from FEC API
-            api_contrib = await self._fetch_contribution_by_id(contribution_id, committee_id, candidate_id)
-            
-            if not api_contrib:
-                logger.warning(f"_backfill_contribution_date: FEC API returned no data for contribution_id: {contribution_id}")
-                return
-            
-            # Extract date from API response
-            from app.utils.date_utils import extract_date_from_raw_data
-            api_date = extract_date_from_raw_data(api_contrib)
-            
-            # Always store API response in DB (even if no date found) to avoid future API calls
-            await self._store_api_response_in_db(contribution_id, api_contrib, api_date)
-            
-            if api_date:
-                logger.info(f"_backfill_contribution_date: Successfully fetched and stored date {api_date} for {contribution_id}")
-            else:
-                logger.warning(f"_backfill_contribution_date: No date found for {contribution_id} (API response was still stored)")
+        # Check if already in progress
+        async with _backfill_lock:
+            if contribution_id in _backfill_in_progress:
+                existing_task = _backfill_in_progress[contribution_id]
+                # Check if task is still running
+                if not existing_task.done():
+                    logger.debug(f"_backfill_contribution_date: Already in progress for {contribution_id}, skipping duplicate call")
+                    return
+                else:
+                    # Task completed, remove it
+                    _backfill_in_progress.pop(contribution_id, None)
+        
+        # Create the task
+        async def _do_backfill():
+            try:
+                logger.info(f"_backfill_contribution_date: Starting background fetch for contribution_id: {contribution_id}")
+                
+                # First, check if date is already in DB or raw_data (might have been updated)
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(
+                        select(Contribution).where(Contribution.contribution_id == contribution_id)
+                    )
+                    contrib = result.scalar_one_or_none()
+                    if contrib:
+                        # Check if date is now available
+                        if contrib.contribution_date:
+                            logger.debug(f"_backfill_contribution_date: Date already available in DB for {contribution_id}, skipping API call")
+                            return
                         
-        except Exception as e:
-            logger.error(f"_backfill_contribution_date: Error in background task for contribution_id {contribution_id}: {e}", exc_info=True)
+                        # Check raw_data
+                        if contrib.raw_data:
+                            from app.utils.date_utils import extract_date_from_raw_data
+                            date_from_raw = extract_date_from_raw_data(contrib.raw_data)
+                            if date_from_raw:
+                                logger.debug(f"_backfill_contribution_date: Date found in raw_data for {contribution_id}, updating DB field")
+                                contrib.contribution_date = date_from_raw
+                                await session.commit()
+                                return
+                
+                # Fetch from FEC API
+                api_contrib = await self._fetch_contribution_by_id(contribution_id, committee_id, candidate_id)
+                
+                if not api_contrib:
+                    logger.warning(f"_backfill_contribution_date: FEC API returned no data for contribution_id: {contribution_id}")
+                    return
+                
+                # Extract date from API response
+                from app.utils.date_utils import extract_date_from_raw_data
+                api_date = extract_date_from_raw_data(api_contrib)
+                
+                # Always store API response in DB (even if no date found) to avoid future API calls
+                await self._store_api_response_in_db(contribution_id, api_contrib, api_date)
+                
+                if api_date:
+                    logger.info(f"_backfill_contribution_date: Successfully fetched and stored date {api_date} for {contribution_id}")
+                else:
+                    logger.warning(f"_backfill_contribution_date: No date found for {contribution_id} (API response was still stored)")
+            except Exception as e:
+                logger.error(f"_backfill_contribution_date: Error in background task for contribution_id {contribution_id}: {e}", exc_info=True)
+            finally:
+                # Remove from in-progress tracking
+                async with _backfill_lock:
+                    _backfill_in_progress.pop(contribution_id, None)
+        
+        # Track the task
+        async with _backfill_lock:
+            task = asyncio.create_task(_do_backfill())
+            _backfill_in_progress[contribution_id] = task
     
     async def _query_local_contributions(
         self,
@@ -1237,6 +1374,21 @@ class FECClient:
                         conditions.append(Contribution.contribution_date <= max_date_obj)
                     except ValueError:
                         pass
+                
+                # Filter by cycle (two_year_transaction_period) if provided
+                # FEC cycles: For cycle YYYY, the cycle includes contributions from (YYYY-1)-01-01 to YYYY-12-31
+                # Example: Cycle 2026 includes contributions from 2025-01-01 through 2026-12-31
+                # Only apply cycle filter if explicit date range is not provided
+                if two_year_transaction_period and not min_date and not max_date:
+                    # Convert cycle to date range
+                    cycle_year = two_year_transaction_period
+                    # Cycle covers the two-year period: (cycle_year - 1) through cycle_year
+                    # For cycle 2026: 2025-01-01 to 2026-12-31
+                    cycle_start = datetime(cycle_year - 1, 1, 1)
+                    cycle_end = datetime(cycle_year, 12, 31)
+                    conditions.append(Contribution.contribution_date >= cycle_start)
+                    conditions.append(Contribution.contribution_date <= cycle_end)
+                    logger.debug(f"Filtering contributions by cycle {two_year_transaction_period}: {cycle_start.date()} to {cycle_end.date()}")
                 
                 if conditions:
                     query = query.where(and_(*conditions))
@@ -1838,6 +1990,150 @@ class FECClient:
             logger.warning(f"Error querying local committees: {e}")
             return None
     
+    def _smart_merge_contribution(
+        self,
+        existing: Contribution,
+        new_data: Dict,
+        source: str
+    ) -> Contribution:
+        """
+        Intelligently merge new contribution data with existing contribution.
+        
+        Merge strategy:
+        - Prefer non-NULL values from new data
+        - Preserve existing values if new data has NULL/empty
+        - For amendments: API data takes precedence (amendment_indicator check)
+        - Merge raw_data intelligently (preserve bulk fields, add API fields)
+        
+        Args:
+            existing: Existing Contribution object from database
+            new_data: New contribution data dictionary
+            source: Source of new data ('bulk' or 'api')
+            
+        Returns:
+            Updated Contribution object (not yet committed)
+        """
+        from app.utils.field_mapping import (
+            normalize_from_bulk, normalize_from_api, merge_raw_data,
+            get_date_field, get_amount_field, extract_unified_field
+        )
+        
+        # Normalize new data based on source
+        if source == 'bulk':
+            normalized = normalize_from_bulk(new_data)
+        else:
+            normalized = normalize_from_api(new_data)
+        
+        # Smart merge: prefer non-None values from new data, preserve existing if new is None
+        # Contributor information
+        if normalized.get('contributor_name'):
+            existing.contributor_name = normalized['contributor_name']
+        if normalized.get('contributor_city'):
+            existing.contributor_city = normalized['contributor_city']
+        if normalized.get('contributor_state'):
+            existing.contributor_state = normalized['contributor_state']
+        if normalized.get('contributor_zip'):
+            existing.contributor_zip = normalized['contributor_zip']
+        if normalized.get('contributor_employer'):
+            existing.contributor_employer = normalized['contributor_employer']
+        if normalized.get('contributor_occupation'):
+            existing.contributor_occupation = normalized['contributor_occupation']
+        
+        # Amount: prefer new if it's valid and > 0
+        new_amount = get_amount_field(new_data, source)
+        if new_amount and new_amount > 0:
+            existing.contribution_amount = new_amount
+        elif existing.contribution_amount is None or existing.contribution_amount == 0:
+            # Only update if existing is None/0 and new has a value (even if 0)
+            if new_amount is not None:
+                existing.contribution_amount = new_amount
+        
+        # Date: prefer new if it's valid
+        new_date = get_date_field(new_data, source)
+        # Handle NaN values (pandas NaN -> None for SQLite compatibility)
+        if new_date is not None:
+            import pandas as pd
+            if pd.isna(new_date) or new_date is pd.NA:
+                new_date = None
+        
+        if new_date:
+            # Parse if string
+            if isinstance(new_date, str):
+                from app.utils.date_utils import extract_date_from_raw_data
+                parsed_date = extract_date_from_raw_data({'contribution_date': new_date})
+                if parsed_date:
+                    existing.contribution_date = parsed_date
+            else:
+                existing.contribution_date = new_date
+        elif existing.contribution_date is None:
+            # Try to extract from raw_data if new data doesn't have it
+            if new_data.get('raw_data'):
+                from app.utils.date_utils import extract_date_from_raw_data
+                date_from_raw = extract_date_from_raw_data(new_data['raw_data'])
+                if date_from_raw:
+                    existing.contribution_date = date_from_raw
+        
+        # IDs: prefer new if provided
+        if normalized.get('candidate_id'):
+            existing.candidate_id = normalized['candidate_id']
+        if normalized.get('committee_id'):
+            existing.committee_id = normalized['committee_id']
+        if normalized.get('transaction_id'):
+            existing.transaction_id = normalized['transaction_id']
+        
+        # FEC metadata: prefer new if provided
+        if normalized.get('amendment_indicator'):
+            # For amendments, API data takes precedence
+            if source == 'api' or not existing.amendment_indicator:
+                existing.amendment_indicator = normalized['amendment_indicator']
+        if normalized.get('report_type'):
+            existing.report_type = normalized['report_type']
+        if normalized.get('entity_type'):
+            existing.entity_type = normalized['entity_type']
+        if normalized.get('other_id'):
+            existing.other_id = normalized['other_id']
+        if normalized.get('file_number'):
+            existing.file_number = normalized['file_number']
+        if normalized.get('memo_code'):
+            existing.memo_code = normalized['memo_code']
+        if normalized.get('memo_text'):
+            existing.memo_text = normalized['memo_text']
+        if normalized.get('contribution_type'):
+            existing.contribution_type = normalized['contribution_type']
+        
+        # Merge raw_data intelligently
+        existing_raw_data = existing.raw_data
+        new_raw_data = new_data.get('raw_data') or new_data  # Use new_data itself if no raw_data key
+        
+        # Handle case where raw_data might be a JSON string
+        if isinstance(existing_raw_data, str):
+            try:
+                existing_raw_data = json.loads(existing_raw_data)
+            except (json.JSONDecodeError, TypeError):
+                existing_raw_data = {}
+        
+        if isinstance(new_raw_data, str):
+            try:
+                new_raw_data = json.loads(new_raw_data)
+            except (json.JSONDecodeError, TypeError):
+                new_raw_data = {}
+        
+        # Merge raw_data
+        existing.raw_data = merge_raw_data(existing_raw_data, new_raw_data, source)
+        
+        # Update data source tracking
+        if not existing.data_source:
+            existing.data_source = source
+        elif existing.data_source != source:
+            existing.data_source = 'both'
+        existing.last_updated_from = source
+        
+        # Mark raw_data as modified for SQLAlchemy
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(existing, 'raw_data')
+        
+        return existing
+    
     async def _store_contribution(self, contribution_data: Dict):
         """Store contribution in local database with retry logic for database locks"""
         max_retries = 3
@@ -1910,44 +2206,9 @@ class FECClient:
                                     pass
                         
                         if existing_contrib:
-                            # Update existing contribution - this handles amendments to previous filings
-                            # FEC allows committees to amend filings, which may update contribution details
-                            # We always update to ensure we have the most current information
-                            
-                            # Always update these fields if new data is available (amendments may correct them)
-                            if contrib_name:
-                                existing_contrib.contributor_name = contrib_name
-                            if amount > 0:
-                                existing_contrib.contribution_amount = amount
-                            if contrib_date:
-                                existing_contrib.contribution_date = contrib_date
-                            
-                            # Update other fields - prefer new data over existing (handles amendments)
-                            if contribution_data.get('contributor_city'):
-                                existing_contrib.contributor_city = contribution_data.get('contributor_city')
-                            if contribution_data.get('contributor_state'):
-                                existing_contrib.contributor_state = contribution_data.get('contributor_state')
-                            if contribution_data.get('contributor_zip'):
-                                existing_contrib.contributor_zip = contribution_data.get('contributor_zip')
-                            if contribution_data.get('contributor_employer'):
-                                existing_contrib.contributor_employer = contribution_data.get('contributor_employer')
-                            if contribution_data.get('contributor_occupation'):
-                                existing_contrib.contributor_occupation = contribution_data.get('contributor_occupation')
-                            if contribution_data.get('candidate_id'):
-                                existing_contrib.candidate_id = contribution_data.get('candidate_id')
-                            if contribution_data.get('committee_id'):
-                                existing_contrib.committee_id = contribution_data.get('committee_id')
-                            if contribution_data.get('contribution_type') or contribution_data.get('transaction_type'):
-                                existing_contrib.contribution_type = (
-                                    contribution_data.get('contribution_type') or 
-                                    contribution_data.get('transaction_type')
-                                )
-                            
-                            # Always update raw_data to preserve the most recent version (may contain amendments)
-                            if contribution_data:
-                                existing_contrib.raw_data = contribution_data
-                            
-                            logger.debug(f"Updated existing contribution {contrib_id} (may be an amendment)")
+                            # Use smart merge for existing contributions
+                            self._smart_merge_contribution(existing_contrib, contribution_data, 'api')
+                            logger.debug(f"Updated existing contribution {contrib_id} using smart merge (may be an amendment)")
                         else:
                             # Create new contribution
                             contribution = Contribution(
@@ -1963,7 +2224,9 @@ class FECClient:
                                 contribution_amount=amount,
                                 contribution_date=contrib_date,
                                 contribution_type=contribution_data.get('contribution_type') or contribution_data.get('transaction_type'),
-                                raw_data=contribution_data
+                                raw_data=contribution_data,
+                                data_source='api',
+                                last_updated_from='api'
                             )
                             session.add(contribution)
                         

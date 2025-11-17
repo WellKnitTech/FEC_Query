@@ -49,6 +49,9 @@ class Contribution(Base):
     memo_text = Column(Text)  # MEMO_TEXT
     raw_data = Column(JSON)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Data source tracking (optional, for debugging and data provenance)
+    data_source = Column(String)  # 'bulk', 'api', or 'both' - tracks which sources contributed data
+    last_updated_from = Column(String)  # Tracks the last source that updated this record
     
     __table_args__ = (
         Index('idx_contributor_name', 'contributor_name'),

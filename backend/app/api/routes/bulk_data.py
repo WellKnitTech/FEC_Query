@@ -1003,6 +1003,61 @@ async def get_incomplete_jobs():
         )
 
 
+@router.get("/jobs/recent")
+async def get_recent_jobs(limit: int = Query(10, ge=1, le=50, description="Number of recent jobs to return")):
+    """Get recent import jobs (all statuses)"""
+    try:
+        bulk_data_service = get_bulk_data_service()
+        jobs = await bulk_data_service.get_recent_jobs(limit=limit)
+        
+        # Convert jobs to full status format (same as get_job_status)
+        result_jobs = []
+        for job in jobs:
+            # Calculate overall progress
+            overall_progress = 0.0
+            if job.total_chunks > 0:
+                overall_progress = (job.current_chunk / job.total_chunks) * 100
+            elif job.total_cycles > 0:
+                overall_progress = (job.completed_cycles / job.total_cycles) * 100
+            
+            # Enhance progress_data with file_position if available
+            progress_data = job.progress_data or {}
+            if job.file_position and job.file_position > 0:
+                progress_data['file_position'] = job.file_position
+            
+            result_jobs.append({
+                "job_id": job.id,
+                "job_type": job.job_type,
+                "status": job.status,
+                "cycle": job.cycle,
+                "cycles": job.cycles,
+                "total_cycles": job.total_cycles,
+                "completed_cycles": job.completed_cycles,
+                "current_cycle": job.current_cycle,
+                "total_records": job.total_records,
+                "imported_records": job.imported_records,
+                "skipped_records": job.skipped_records,
+                "current_chunk": job.current_chunk,
+                "total_chunks": job.total_chunks,
+                "error_message": job.error_message,
+                "started_at": job.started_at.isoformat() if job.started_at else None,
+                "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+                "progress_data": progress_data,
+                "overall_progress": overall_progress
+            })
+        
+        return {
+            "jobs": result_jobs,
+            "count": len(result_jobs)
+        }
+    except Exception as e:
+        logger.error(f"Error getting recent jobs: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get recent jobs: {str(e)}"
+        )
+
+
 @router.get("/committee-ids/invalid")
 async def get_invalid_committee_ids():
     """Get list of invalid committee IDs in contributions"""

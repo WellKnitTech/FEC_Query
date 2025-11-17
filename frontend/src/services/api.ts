@@ -678,6 +678,13 @@ export const bulkDataApi = {
     return response.data;
   },
 
+  getRecentJobs: async (limit: number = 10): Promise<{ jobs: BulkImportJobStatus[]; count: number }> => {
+    const response = await api.get('/api/bulk-data/jobs/recent', {
+      params: { limit },
+    });
+    return response.data;
+  },
+
   cancelJob: async (jobId: string): Promise<{ message: string; job_id: string; status: string }> => {
     const response = await api.post(`/api/bulk-data/jobs/${jobId}/cancel`);
     return response.data;
