@@ -18,8 +18,10 @@ class RaceTrendRequest(BaseModel):
 
 def get_fec_client():
     """Get FEC client instance"""
+    from app.services.container import get_service_container
     try:
-        return FECClient()
+        container = get_service_container()
+        return container.get_fec_client()
     except ValueError as e:
         logger.error(f"FEC API key not configured: {e}")
         raise HTTPException(

@@ -16,6 +16,8 @@ from app.db.database import (
     ElectioneeringComm, CommunicationCost
 )
 from app.services.bulk_data_config import DataType, get_config
+from app.services.shared.exceptions import BulkDataError
+from app.services.shared.retry import retry_on_db_lock
 
 logger = logging.getLogger(__name__)
 
@@ -829,9 +831,11 @@ class GenericBulkDataParser:
             logger.info(f"Completed independent expenditures import: {total_records} records, {skipped} skipped")
             return total_records
             
+        except BulkDataError:
+            raise
         except Exception as e:
             logger.error(f"Error parsing independent expenditures: {e}", exc_info=True)
-            raise
+            raise BulkDataError(f"Error parsing independent expenditures for cycle {cycle}: {str(e)}", cycle=cycle, data_type=DataType.INDEPENDENT_EXPENDITURES.value) from e
     
     async def parse_operating_expenditures(
         self,

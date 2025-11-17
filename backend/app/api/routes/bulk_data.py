@@ -34,25 +34,20 @@ def get_limiter():
         pass
     return limiter
 
-# Global services (will be initialized on first use)
-_bulk_data_service: Optional[BulkDataService] = None
-_bulk_updater_service: Optional[BulkUpdaterService] = None
+# Use service container for dependency injection
+from app.services.container import get_service_container
 
 
 def get_bulk_data_service() -> BulkDataService:
     """Get bulk data service instance"""
-    global _bulk_data_service
-    if _bulk_data_service is None:
-        _bulk_data_service = BulkDataService()
-    return _bulk_data_service
+    container = get_service_container()
+    return container.get_bulk_data_service()
 
 
 def get_bulk_updater_service() -> BulkUpdaterService:
     """Get bulk updater service instance"""
-    global _bulk_updater_service
-    if _bulk_updater_service is None:
-        _bulk_updater_service = BulkUpdaterService()
-    return _bulk_updater_service
+    # BulkUpdaterService creates its own BulkDataService, so we keep it simple
+    return BulkUpdaterService()
 
 
 # Rate limiting will be handled via decorators on routes when needed
