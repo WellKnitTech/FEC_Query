@@ -369,10 +369,17 @@ class AnalysisService:
         # Convert to string and strip whitespace
         normalized = str(employer).strip()
         
-        # Remove common business suffixes and variations
-        normalized = re.sub(r'\s+(inc|llc|corp|ltd|co|corporation|company)\.?$', '', normalized, flags=re.IGNORECASE)
+        # Convert to uppercase for consistent comparison
+        normalized = normalized.upper()
         
-        # Remove extra whitespace
+        # Remove common business suffixes and variations (with optional comma before)
+        # This handles cases like "COMPANY, INC.", "COMPANY INC", "COMPANY, INC", etc.
+        normalized = re.sub(r',?\s*(INC|LLC|CORP|LTD|CO|CORPORATION|COMPANY|INCORPORATED)\.?$', '', normalized, flags=re.IGNORECASE)
+        
+        # Remove all punctuation (commas, periods, etc.)
+        normalized = re.sub(r'[^\w\s]', '', normalized)
+        
+        # Normalize whitespace (multiple spaces to single space)
         normalized = re.sub(r'\s+', ' ', normalized).strip()
         
         return normalized if normalized else 'Unknown Employer'
@@ -427,11 +434,37 @@ class AnalysisService:
         df_with_employer['normalized_employer'] = df_with_employer['contributor_employer'].apply(self._normalize_employer_name)
         
         # Group by normalized employer name
+        # For display name, prefer the most common original name, or longest if tied
+        def get_best_display_name(group):
+            """Get the best display name from a group of employer name variations"""
+            # Count occurrences of each original name
+            name_counts = group.value_counts()
+            # Get the most common name
+            most_common = name_counts.index[0]
+            # If there's a tie, prefer the longest name (usually more complete)
+            if len(name_counts) > 1 and name_counts.iloc[0] == name_counts.iloc[1]:
+                # Get all names with the same count
+                max_count = name_counts.iloc[0]
+                tied_names = name_counts[name_counts == max_count].index.tolist()
+                # Return the longest one
+                return max(tied_names, key=len)
+            return most_common
+        
+        # Group and aggregate
+        # Use a custom aggregation that returns a scalar string
         employer_grouped = df_with_employer.groupby('normalized_employer').agg({
-            'contribution_amount': ['sum', 'count'],
-            'contributor_employer': lambda x: x.iloc[0]  # Use first original name as display name
+            'contribution_amount': ['sum', 'count']
         }).reset_index()
-        employer_grouped.columns = ['employer', 'total', 'count', 'display_name']
+        
+        # Rename columns first
+        employer_grouped.columns = ['employer', 'total', 'count']
+        
+        # Add display name separately to ensure it's a scalar
+        employer_grouped['display_name'] = employer_grouped['employer'].apply(
+            lambda norm_name: get_best_display_name(
+                df_with_employer[df_with_employer['normalized_employer'] == norm_name]['contributor_employer']
+            )
+        )
         employer_grouped = employer_grouped.sort_values('total', ascending=False)
         
         # Use display name (original) for the output, but grouping was done on normalized name
