@@ -13,6 +13,7 @@ import {
   Title,
   Tooltip,
   Legend,
+  Filler,
 } from 'chart.js';
 
 ChartJS.register(
@@ -23,7 +24,8 @@ ChartJS.register(
   BarElement,
   Title,
   Tooltip,
-  Legend
+  Legend,
+  Filler
 );
 
 interface ContributionVelocityProps {
@@ -46,6 +48,12 @@ export default function ContributionVelocityComponent({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!candidateId && !committeeId) {
+      return;
+    }
+
+    const abortController = new AbortController();
+    
     const fetchVelocity = async () => {
       setLoading(true);
       setError(null);
@@ -55,20 +63,32 @@ export default function ContributionVelocityComponent({
           committee_id: committeeId,
           min_date: minDate,
           max_date: maxDate,
-        });
-        setVelocity(data);
+        }, abortController.signal);
+        if (!abortController.signal.aborted) {
+          setVelocity(data);
+        }
       } catch (err: any) {
+        // Don't set error if request was aborted
+        if (err.name === 'AbortError' || abortController.signal.aborted) {
+          return;
+        }
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contribution velocity';
-        setError(errorMessage);
-        console.error('Error loading contribution velocity:', err);
+        if (!abortController.signal.aborted) {
+          setError(errorMessage);
+          console.error('Error loading contribution velocity:', err);
+        }
       } finally {
-        setLoading(false);
+        if (!abortController.signal.aborted) {
+          setLoading(false);
+        }
       }
     };
 
-    if (candidateId || committeeId) {
-      fetchVelocity();
-    }
+    fetchVelocity();
+    
+    return () => {
+      abortController.abort();
+    };
   }, [candidateId, committeeId, minDate, maxDate, cycle]);
 
   const refresh = async () => {

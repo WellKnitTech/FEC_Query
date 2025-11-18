@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, lazy, Suspense } from 'react';
 import { useParams } from 'react-router-dom';
 import { candidateApi } from '../services/api';
 import { formatDateTime, cycleToDateRange, formatCycleRange, formatDate } from '../utils/dateUtils';
@@ -9,17 +9,20 @@ import { CandidateContextProvider } from '../contexts/CandidateContext';
 import FinancialSummary from '../components/FinancialSummary';
 import DonorStateAnalysis from '../components/DonorStateAnalysis';
 import ContributionAnalysis from '../components/ContributionAnalysis';
-import NetworkGraph from '../components/NetworkGraph';
-import FraudAlerts from '../components/FraudAlerts';
-import ExpenditureBreakdown from '../components/ExpenditureBreakdown';
-import EmployerTreemap from '../components/EmployerTreemap';
-import ContributionVelocity from '../components/ContributionVelocity';
-import CumulativeChart from '../components/CumulativeChart';
-import FraudRadarChart from '../components/FraudRadarChart';
-import SmurfingScatter from '../components/SmurfingScatter';
 import ExportButton from '../components/ExportButton';
 import LoadingState from '../components/candidate/LoadingState';
 import ErrorState from '../components/candidate/ErrorState';
+import ErrorBoundary from '../components/candidate/ErrorBoundary';
+
+// Lazy load heavy visualization components
+const NetworkGraph = lazy(() => import('../components/NetworkGraph'));
+const FraudAlerts = lazy(() => import('../components/FraudAlerts'));
+const ExpenditureBreakdown = lazy(() => import('../components/ExpenditureBreakdown'));
+const EmployerTreemap = lazy(() => import('../components/EmployerTreemap'));
+const ContributionVelocity = lazy(() => import('../components/ContributionVelocity'));
+const CumulativeChart = lazy(() => import('../components/CumulativeChart'));
+const FraudRadarChart = lazy(() => import('../components/FraudRadarChart'));
+const SmurfingScatter = lazy(() => import('../components/SmurfingScatter'));
 
 function CandidateDetailContent() {
   const { candidateId } = useParams<{ candidateId: string }>();
@@ -231,39 +234,84 @@ function CandidateDetailContent() {
         )}
 
         <div className="space-y-6">
-          <FinancialSummary 
-            candidateId={candidateId!} 
-            cycle={selectedCycle} 
-            onCycleChange={(newCycle) => {
-              setCycle(newCycle);
-            }} 
-          />
-          <DonorStateAnalysis candidateId={candidateId} candidate={candidate} cycle={selectedCycle} />
-          <ContributionAnalysis candidateId={candidateId} cycle={selectedCycle} />
-          <CumulativeChart candidateId={candidateId} cycle={selectedCycle} />
-          <ContributionVelocity candidateId={candidateId} cycle={selectedCycle} />
-          <EmployerTreemap candidateId={candidateId} cycle={selectedCycle} />
-          <ExpenditureBreakdown candidateId={candidateId} cycle={selectedCycle} />
-          <NetworkGraph 
-            candidateId={candidateId!} 
-            minDate={cycleDateRange.minDate}
-            maxDate={cycleDateRange.maxDate}
-          />
-          <FraudRadarChart 
-            candidateId={candidateId!} 
-            minDate={cycleDateRange.minDate}
-            maxDate={cycleDateRange.maxDate}
-          />
-          <SmurfingScatter 
-            candidateId={candidateId} 
-            minDate={cycleDateRange.minDate}
-            maxDate={cycleDateRange.maxDate}
-          />
-          <FraudAlerts 
-            candidateId={candidateId!} 
-            minDate={cycleDateRange.minDate}
-            maxDate={cycleDateRange.maxDate}
-          />
+          {/* Critical components - load immediately with error boundaries */}
+          <ErrorBoundary>
+            <FinancialSummary 
+              candidateId={candidateId!} 
+              cycle={selectedCycle} 
+              onCycleChange={(newCycle) => {
+                setCycle(newCycle);
+              }} 
+            />
+          </ErrorBoundary>
+          <ErrorBoundary>
+            <DonorStateAnalysis candidateId={candidateId} candidate={candidate} cycle={selectedCycle} />
+          </ErrorBoundary>
+          <ErrorBoundary>
+            <ContributionAnalysis candidateId={candidateId} cycle={selectedCycle} />
+          </ErrorBoundary>
+          
+          {/* Deferred visualizations - lazy loaded with suspense and error boundaries */}
+          {selectedCycle && (
+            <>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <CumulativeChart candidateId={candidateId} cycle={selectedCycle} />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <ContributionVelocity candidateId={candidateId} cycle={selectedCycle} />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <EmployerTreemap candidateId={candidateId} cycle={selectedCycle} />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <ExpenditureBreakdown candidateId={candidateId} cycle={selectedCycle} />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-96 bg-gray-200 rounded"></div></div></div>}>
+                  <NetworkGraph 
+                    candidateId={candidateId!} 
+                    minDate={cycleDateRange.minDate}
+                    maxDate={cycleDateRange.maxDate}
+                  />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <FraudRadarChart 
+                    candidateId={candidateId!} 
+                    minDate={cycleDateRange.minDate}
+                    maxDate={cycleDateRange.maxDate}
+                  />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <SmurfingScatter 
+                    candidateId={candidateId} 
+                    minDate={cycleDateRange.minDate}
+                    maxDate={cycleDateRange.maxDate}
+                  />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <FraudAlerts 
+                    candidateId={candidateId!} 
+                    minDate={cycleDateRange.minDate}
+                    maxDate={cycleDateRange.maxDate}
+                  />
+                </Suspense>
+              </ErrorBoundary>
+            </>
+          )}
         </div>
       </CandidateContextProvider>
     </div>

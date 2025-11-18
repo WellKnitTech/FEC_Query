@@ -32,6 +32,9 @@ _contact_info_check_cache_lock = asyncio.Lock()
 # Track ongoing backfill operations to prevent duplicates
 _backfill_in_progress: Dict[str, asyncio.Task] = {}
 _backfill_lock = asyncio.Lock()
+# Limit concurrent backfill tasks to prevent overwhelming the system
+# Max 10 concurrent backfill operations to avoid blocking database/API
+_backfill_semaphore = asyncio.Semaphore(10)
 
 class FECClient:
     """Client for interacting with OpenFEC API with caching and rate limiting"""
@@ -391,20 +394,30 @@ class FECClient:
         candidate_id: str,
         cycle: Optional[int] = None
     ) -> Optional[List[Dict]]:
-        """Query financial totals from local database"""
+        """Query financial totals from local database
+        
+        Optimized to use composite index (candidate_id, cycle) efficiently.
+        When cycle is specified, uses the unique index for fast lookup.
+        When cycle is None, fetches all cycles ordered by cycle descending.
+        """
         if not self.bulk_data_enabled:
             return None
         
         try:
             async with AsyncSessionLocal() as session:
-                query = select(FinancialTotal).where(
-                    FinancialTotal.candidate_id == candidate_id
-                )
-                if cycle:
-                    query = query.where(FinancialTotal.cycle == cycle)
+                # Use composite index efficiently
+                if cycle is not None:
+                    # Single cycle lookup - uses unique composite index
+                    query = select(FinancialTotal).where(
+                        FinancialTotal.candidate_id == candidate_id,
+                        FinancialTotal.cycle == cycle
+                    )
                 else:
-                    # Get most recent cycle
-                    query = query.order_by(FinancialTotal.cycle.desc())
+                    # All cycles - uses candidate_id index, then orders by cycle
+                    # Limit to reasonable number of cycles (e.g., last 20 years = 10 cycles)
+                    query = select(FinancialTotal).where(
+                        FinancialTotal.candidate_id == candidate_id
+                    ).order_by(FinancialTotal.cycle.desc()).limit(20)
                 
                 result = await session.execute(query)
                 financials = result.scalars().all()
@@ -708,10 +721,15 @@ class FECClient:
         # Step 3: Schedule API query in background (non-blocking)
         # Only do this if we don't have bulk import data, or if bulk import data might have a date from API
         # Don't block - schedule background task to fetch and store
+        # Note: Concurrency is limited by semaphore in _backfill_contribution_date
         logger.debug(f"get_contribution_date: Date not in DB or raw_data, scheduling API fetch for {contribution_id}")
-        asyncio.create_task(
-            self._backfill_contribution_date(contribution_id, committee_id, candidate_id)
-        )
+        try:
+            asyncio.create_task(
+                self._backfill_contribution_date(contribution_id, committee_id, candidate_id)
+            )
+        except Exception as e:
+            # If task creation fails, log but don't block
+            logger.warning(f"Failed to create backfill task for {contribution_id}: {e}")
         
         # Return None immediately - date will be available on next query after background task completes
         return None
@@ -815,57 +833,59 @@ class FECClient:
                     # Task completed, remove it
                     _backfill_in_progress.pop(contribution_id, None)
         
-        # Create the task
+        # Create the task with semaphore to limit concurrency
         async def _do_backfill():
-            try:
-                logger.info(f"_backfill_contribution_date: Starting background fetch for contribution_id: {contribution_id}")
-                
-                # First, check if date is already in DB or raw_data (might have been updated)
-                async with AsyncSessionLocal() as session:
-                    result = await session.execute(
-                        select(Contribution).where(Contribution.contribution_id == contribution_id)
-                    )
-                    contrib = result.scalar_one_or_none()
-                    if contrib:
-                        # Check if date is now available
-                        if contrib.contribution_date:
-                            logger.debug(f"_backfill_contribution_date: Date already available in DB for {contribution_id}, skipping API call")
-                            return
-                        
-                        # Check raw_data
-                        if contrib.raw_data:
-                            from app.utils.date_utils import extract_date_from_raw_data
-                            date_from_raw = extract_date_from_raw_data(contrib.raw_data)
-                            if date_from_raw:
-                                logger.debug(f"_backfill_contribution_date: Date found in raw_data for {contribution_id}, updating DB field")
-                                contrib.contribution_date = date_from_raw
-                                await session.commit()
+            # Acquire semaphore to limit concurrent operations
+            async with _backfill_semaphore:
+                try:
+                    logger.debug(f"_backfill_contribution_date: Starting background fetch for contribution_id: {contribution_id}")
+                    
+                    # First, check if date is already in DB or raw_data (might have been updated)
+                    async with AsyncSessionLocal() as session:
+                        result = await session.execute(
+                            select(Contribution).where(Contribution.contribution_id == contribution_id)
+                        )
+                        contrib = result.scalar_one_or_none()
+                        if contrib:
+                            # Check if date is now available
+                            if contrib.contribution_date:
+                                logger.debug(f"_backfill_contribution_date: Date already available in DB for {contribution_id}, skipping API call")
                                 return
-                
-                # Fetch from FEC API
-                api_contrib = await self._fetch_contribution_by_id(contribution_id, committee_id, candidate_id)
-                
-                if not api_contrib:
-                    logger.warning(f"_backfill_contribution_date: FEC API returned no data for contribution_id: {contribution_id}")
-                    return
-                
-                # Extract date from API response
-                from app.utils.date_utils import extract_date_from_raw_data
-                api_date = extract_date_from_raw_data(api_contrib)
-                
-                # Always store API response in DB (even if no date found) to avoid future API calls
-                await self._store_api_response_in_db(contribution_id, api_contrib, api_date)
-                
-                if api_date:
-                    logger.info(f"_backfill_contribution_date: Successfully fetched and stored date {api_date} for {contribution_id}")
-                else:
-                    logger.warning(f"_backfill_contribution_date: No date found for {contribution_id} (API response was still stored)")
-            except Exception as e:
-                logger.error(f"_backfill_contribution_date: Error in background task for contribution_id {contribution_id}: {e}", exc_info=True)
-            finally:
-                # Remove from in-progress tracking
-                async with _backfill_lock:
-                    _backfill_in_progress.pop(contribution_id, None)
+                            
+                            # Check raw_data
+                            if contrib.raw_data:
+                                from app.utils.date_utils import extract_date_from_raw_data
+                                date_from_raw = extract_date_from_raw_data(contrib.raw_data)
+                                if date_from_raw:
+                                    logger.debug(f"_backfill_contribution_date: Date found in raw_data for {contribution_id}, updating DB field")
+                                    contrib.contribution_date = date_from_raw
+                                    await session.commit()
+                                    return
+                    
+                    # Fetch from FEC API
+                    api_contrib = await self._fetch_contribution_by_id(contribution_id, committee_id, candidate_id)
+                    
+                    if not api_contrib:
+                        logger.debug(f"_backfill_contribution_date: FEC API returned no data for contribution_id: {contribution_id}")
+                        return
+                    
+                    # Extract date from API response
+                    from app.utils.date_utils import extract_date_from_raw_data
+                    api_date = extract_date_from_raw_data(api_contrib)
+                    
+                    # Always store API response in DB (even if no date found) to avoid future API calls
+                    await self._store_api_response_in_db(contribution_id, api_contrib, api_date)
+                    
+                    if api_date:
+                        logger.debug(f"_backfill_contribution_date: Successfully fetched and stored date {api_date} for {contribution_id}")
+                    else:
+                        logger.debug(f"_backfill_contribution_date: No date found for {contribution_id} (API response was still stored)")
+                except Exception as e:
+                    logger.warning(f"_backfill_contribution_date: Error in background task for contribution_id {contribution_id}: {e}")
+                finally:
+                    # Remove from in-progress tracking
+                    async with _backfill_lock:
+                        _backfill_in_progress.pop(contribution_id, None)
         
         # Track the task
         async with _backfill_lock:
@@ -1334,16 +1354,15 @@ class FECClient:
             api_results = data.get("results", [])
             logger.debug(f"Direct API query returned {len(api_results)} contributions for candidate {candidate_id}")
             
-            # Store new contributions in database for caching
+            # Store new contributions in database for caching (non-blocking background task)
             if api_results:
-                logger.info(f"Storing {len(api_results)} new contributions from API in database")
-                # Store contributions in batches to avoid exhausting connection pool
-                # Limit concurrent storage operations to prevent connection pool exhaustion
-                batch_size = 50  # Store 50 contributions at a time
-                semaphore = asyncio.Semaphore(10)  # Max 10 concurrent storage operations
+                logger.debug(f"Queueing {len(api_results)} contributions for background storage")
+                # Store contributions in background to avoid blocking the request
+                # Use a semaphore to limit concurrent storage operations
+                storage_semaphore = asyncio.Semaphore(5)  # Max 5 concurrent storage operations
                 
                 async def store_with_semaphore(contrib_data):
-                    async with semaphore:
+                    async with storage_semaphore:
                         try:
                             await self._store_contribution(contrib_data)
                         except Exception as e:
@@ -1353,21 +1372,29 @@ class FECClient:
                             else:
                                 logger.warning(f"Error storing contribution: {e}")
                 
-                # Process in batches to avoid overwhelming the database
-                for i in range(0, len(api_results), batch_size):
-                    batch = api_results[i:i + batch_size]
-                    tasks = []
-                    for contrib in batch:
-                        # Ensure candidate_id is set when storing contributions
-                        if candidate_id and not contrib.get('candidate_id'):
-                            contrib['candidate_id'] = candidate_id
-                        tasks.append(store_with_semaphore(contrib))
-                    
-                    # Wait for batch to complete before starting next batch
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    # Small delay between batches to allow connections to be released
-                    if i + batch_size < len(api_results):
-                        await asyncio.sleep(0.1)
+                # Process in background without blocking the request
+                async def store_all_contributions():
+                    try:
+                        batch_size = 50  # Process 50 contributions at a time
+                        for i in range(0, len(api_results), batch_size):
+                            batch = api_results[i:i + batch_size]
+                            tasks = []
+                            for contrib in batch:
+                                # Ensure candidate_id is set when storing contributions
+                                if candidate_id and not contrib.get('candidate_id'):
+                                    contrib['candidate_id'] = candidate_id
+                                tasks.append(store_with_semaphore(contrib))
+                            
+                            # Wait for batch to complete before starting next batch
+                            await asyncio.gather(*tasks, return_exceptions=True)
+                            # Small delay between batches to allow connections to be released
+                            if i + batch_size < len(api_results):
+                                await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logger.warning(f"Error in background contribution storage: {e}")
+                
+                # Start background task without awaiting (fire and forget)
+                asyncio.create_task(store_all_contributions())
             
             # Merge local and API results, avoiding duplicates
             all_results = local_data.copy() if local_data else []

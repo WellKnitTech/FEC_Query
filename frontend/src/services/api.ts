@@ -264,6 +264,13 @@ export interface ContributionVelocity {
   average_daily_velocity: number;
 }
 
+export interface CumulativeTotals {
+  totals_by_date: Record<string, number>;
+  total_amount: number;
+  first_date?: string;
+  last_date?: string;
+}
+
 export interface DonorStateAnalysis {
   donors_by_state: Record<string, number>;
   donor_percentages_by_state: Record<string, number>;
@@ -342,6 +349,17 @@ export const analysisApi = {
     aggregate?: boolean;
   }, signal?: AbortSignal): Promise<Contribution[] | AggregatedDonor[]> => {
     const response = await api.get('/api/analysis/donor-states/out-of-state-contributions', { params, ...createRequestConfig(signal) });
+    return response.data;
+  },
+
+  getCumulativeTotals: async (params: {
+    candidate_id?: string;
+    committee_id?: string;
+    min_date?: string;
+    max_date?: string;
+    cycle?: number;
+  }, signal?: AbortSignal): Promise<CumulativeTotals> => {
+    const response = await api.get('/api/analysis/cumulative-totals', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 };

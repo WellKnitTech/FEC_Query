@@ -1,5 +1,7 @@
-import { useFinancialData } from '../hooks/useFinancialData';
+import { useContext } from 'react';
+import { CandidateContext } from '../contexts/CandidateContext';
 import { useCycleSelector } from '../hooks/useCycleSelector';
+import { useFinancialData } from '../hooks/useFinancialData';
 import AnalysisSection from './candidate/AnalysisSection';
 import { formatCurrency } from '../utils/candidateCalculations';
 
@@ -10,10 +12,32 @@ interface FinancialSummaryProps {
 }
 
 export default function FinancialSummaryComponent({ candidateId, cycle, onCycleChange }: FinancialSummaryProps) {
-  const { financials, selected, latest, loading, error, availableCycles, refresh } = useFinancialData(
-    candidateId,
-    cycle
+  // Try to use context data first (from parent component) - optional
+  const context = useContext(CandidateContext);
+  const hasContextData = context && context.financials && context.financials.length > 0;
+  
+  // Fallback to fetching if context doesn't have data
+  const { financials: fetchedFinancials, loading: fetching, error: fetchError, refresh: fetchRefresh } = useFinancialData(
+    hasContextData ? undefined : candidateId, // Don't fetch if we have context data
+    hasContextData ? undefined : cycle
   );
+  
+  // Use context data if available, otherwise use fetched data
+  const financials = hasContextData ? context!.financials : fetchedFinancials;
+  const loading = hasContextData ? false : fetching;
+  const error = hasContextData ? null : fetchError;
+  const refresh = hasContextData ? async () => { /* Context refresh handled by parent */ } : fetchRefresh;
+  
+  // Get latest and selected from financials
+  const latest = financials.length > 0 ? financials[0] : null;
+  const selected = cycle !== undefined 
+    ? financials.find(f => f.cycle === cycle) || latest
+    : latest;
+  
+  const availableCycles = financials
+    .map(f => f.cycle)
+    .filter((c): c is number => c !== undefined)
+    .sort((a, b) => b - a);
 
   const { selectedCycle, setCycle, hasMultipleCycles } = useCycleSelector({
     financials,

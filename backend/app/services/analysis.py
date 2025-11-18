@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from app.services.fec_client import FECClient
 from app.models.schemas import (
     ContributionAnalysis, MoneyFlowNode, MoneyFlowEdge, MoneyFlowGraph,
-    ExpenditureBreakdown, EmployerAnalysis, ContributionVelocity, DonorStateAnalysis
+    ExpenditureBreakdown, EmployerAnalysis, ContributionVelocity, DonorStateAnalysis, CumulativeTotals
 )
 from app.utils.date_utils import serialize_date, extract_date_from_raw_data
 
@@ -27,86 +27,306 @@ class AnalysisService:
         max_date: Optional[str] = None,
         cycle: Optional[int] = None
     ) -> ContributionAnalysis:
-        """Analyze contributions with aggregations"""
-        contributions = await self.fec_client.get_contributions(
-            candidate_id=candidate_id,
-            committee_id=committee_id,
-            min_date=min_date,
-            max_date=max_date,
-            limit=10000,
-            two_year_transaction_period=cycle
-        )
+        """Analyze contributions with aggregations using efficient SQL queries"""
+        from app.db.database import AsyncSessionLocal, Contribution
+        from sqlalchemy import select, func, and_, or_, case
         
-        if not contributions:
-            return ContributionAnalysis(
-                total_contributions=0.0,
-                total_contributors=0,
-                average_contribution=0.0,
-                contributions_by_date={},
-                contributions_by_state={},
-                top_donors=[],
-                contribution_distribution={}
+        try:
+            async with AsyncSessionLocal() as session:
+                # Convert cycle to date range if provided and no explicit dates given
+                # FEC cycles: For cycle YYYY, the cycle includes contributions from (YYYY-1)-01-01 to YYYY-12-31
+                if cycle and not min_date and not max_date:
+                    cycle_year = cycle
+                    min_date = f"{cycle_year - 1}-01-01"
+                    max_date = f"{cycle_year}-12-31"
+                    logger.debug(f"analyze_contributions: Converted cycle {cycle} to date range: {min_date} to {max_date}")
+                
+                # Build base query conditions
+                conditions = []
+                if candidate_id:
+                    conditions.append(Contribution.candidate_id == candidate_id)
+                if committee_id:
+                    conditions.append(Contribution.committee_id == committee_id)
+                
+                # Date filters - only apply if dates are provided
+                # If cycle is specified, also include contributions without dates (they belong to this cycle)
+                date_conditions = []
+                if min_date and max_date:
+                    try:
+                        min_date_obj = datetime.strptime(min_date, "%Y-%m-%d")
+                        max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
+                        # If cycle is specified, include contributions without dates OR within date range
+                        if cycle:
+                            # Include contributions with dates in range OR contributions without dates
+                            date_conditions.append(
+                                or_(
+                                    and_(
+                                        Contribution.contribution_date >= min_date_obj,
+                                        Contribution.contribution_date <= max_date_obj
+                                    ),
+                                    Contribution.contribution_date.is_(None)
+                                )
+                            )
+                        else:
+                            # No cycle specified, only include contributions with dates in range
+                            date_conditions.append(Contribution.contribution_date >= min_date_obj)
+                            date_conditions.append(Contribution.contribution_date <= max_date_obj)
+                    except ValueError:
+                        pass
+                elif min_date:
+                    try:
+                        min_date_obj = datetime.strptime(min_date, "%Y-%m-%d")
+                        if cycle:
+                            date_conditions.append(
+                                or_(
+                                    Contribution.contribution_date >= min_date_obj,
+                                    Contribution.contribution_date.is_(None)
+                                )
+                            )
+                        else:
+                            date_conditions.append(Contribution.contribution_date >= min_date_obj)
+                    except ValueError:
+                        pass
+                elif max_date:
+                    try:
+                        max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
+                        if cycle:
+                            date_conditions.append(
+                                or_(
+                                    Contribution.contribution_date <= max_date_obj,
+                                    Contribution.contribution_date.is_(None)
+                                )
+                            )
+                        else:
+                            date_conditions.append(Contribution.contribution_date <= max_date_obj)
+                    except ValueError:
+                        pass
+                
+                # Combine all conditions
+                all_conditions = conditions + date_conditions
+                where_clause = and_(*all_conditions) if all_conditions else and_(*conditions) if conditions else True
+                
+                # Check if we have any contributions for this candidate (for debugging)
+                if candidate_id:
+                    total_check_query = select(func.count(Contribution.id)).where(
+                        Contribution.candidate_id == candidate_id
+                    )
+                    total_check_result = await session.execute(total_check_query)
+                    total_count = total_check_result.scalar() or 0
+                    logger.debug(f"analyze_contributions: Found {total_count} total contributions for candidate {candidate_id}")
+                    
+                    # Check contributions with dates
+                    dated_check_query = select(func.count(Contribution.id)).where(
+                        and_(
+                            Contribution.candidate_id == candidate_id,
+                            Contribution.contribution_date.isnot(None)
+                        )
+                    )
+                    dated_check_result = await session.execute(dated_check_query)
+                    dated_count = dated_check_result.scalar() or 0
+                    logger.debug(f"analyze_contributions: Found {dated_count} contributions with dates for candidate {candidate_id}")
+                
+                # Get total contributions and count using aggregation
+                # Note: We require contribution_amount to be not None, but contribution_date can be None
+                # if no date filters are applied
+                total_query = select(
+                    func.sum(Contribution.contribution_amount).label('total'),
+                    func.count(Contribution.id).label('count'),
+                    func.count(func.distinct(Contribution.contributor_name)).label('unique_donors')
+                ).where(
+                    and_(
+                        where_clause,
+                        Contribution.contribution_amount.isnot(None)
+                    )
+                )
+                
+                total_result = await session.execute(total_query)
+                total_row = total_result.first()
+                
+                total_contributions = float(total_row.total) if total_row.total else 0.0
+                total_count = int(total_row.count) if total_row.count else 0
+                total_contributors = int(total_row.unique_donors) if total_row.unique_donors else 0
+                average_contribution = total_contributions / total_count if total_count > 0 else 0.0
+                
+                # Contributions by date (aggregated)
+                date_query = select(
+                    func.date(Contribution.contribution_date).label('date'),
+                    func.sum(Contribution.contribution_amount).label('amount')
+                ).where(
+                    and_(
+                        where_clause,
+                        Contribution.contribution_date.isnot(None),
+                        Contribution.contribution_amount.isnot(None)
+                    )
+                ).group_by(func.date(Contribution.contribution_date))
+                
+                date_result = await session.execute(date_query)
+                contributions_by_date = {
+                    str(row.date): float(row.amount)
+                    for row in date_result
+                    if row.date
+                }
+                
+                # Contributions by state (aggregated)
+                state_query = select(
+                    Contribution.contributor_state.label('state'),
+                    func.sum(Contribution.contribution_amount).label('amount')
+                ).where(
+                    and_(
+                        where_clause,
+                        Contribution.contributor_state.isnot(None),
+                        Contribution.contribution_amount.isnot(None)
+                    )
+                ).group_by(Contribution.contributor_state)
+                
+                state_result = await session.execute(state_query)
+                contributions_by_state = {
+                    row.state: float(row.amount)
+                    for row in state_result
+                    if row.state
+                }
+                
+                # Top donors (aggregated)
+                top_donors_query = select(
+                    Contribution.contributor_name.label('name'),
+                    func.sum(Contribution.contribution_amount).label('total'),
+                    func.count(Contribution.id).label('count')
+                ).where(
+                    and_(
+                        where_clause,
+                        Contribution.contributor_name.isnot(None),
+                        Contribution.contribution_amount.isnot(None)
+                    )
+                ).group_by(Contribution.contributor_name).order_by(
+                    func.sum(Contribution.contribution_amount).desc()
+                ).limit(20)
+                
+                top_donors_result = await session.execute(top_donors_query)
+                top_donors = [
+                    {
+                        'name': row.name,
+                        'total': float(row.total),
+                        'count': int(row.count)
+                    }
+                    for row in top_donors_result
+                    if row.name
+                ]
+                
+                # Contribution distribution (bins) - need to fetch amounts for binning
+                # This is the one part that still needs raw data, but we can limit it
+                amount_query = select(Contribution.contribution_amount).where(
+                    and_(
+                        where_clause,
+                        Contribution.contribution_amount.isnot(None),
+                        Contribution.contribution_amount > 0
+                    )
+                ).limit(10000)  # Limit for binning calculation
+                
+                amount_result = await session.execute(amount_query)
+                amounts = [float(row.contribution_amount) for row in amount_result if row.contribution_amount]
+                
+                # Calculate distribution bins
+                if amounts:
+                    df_amounts = pd.Series(amounts)
+                    bins = [0, 50, 100, 200, 500, 1000, 2700, float('inf')]
+                    labels = ['$0-50', '$50-100', '$100-200', '$200-500', '$500-1000', '$1000-2700', '$2700+']
+                    df_amounts_binned = pd.cut(df_amounts, bins=bins, labels=labels, right=False)
+                    contribution_distribution = df_amounts_binned.value_counts().to_dict()
+                    contribution_distribution = {str(k): int(v) for k, v in contribution_distribution.items()}
+                else:
+                    contribution_distribution = {}
+                
+                return ContributionAnalysis(
+                    total_contributions=total_contributions,
+                    total_contributors=total_contributors,
+                    average_contribution=average_contribution,
+                    contributions_by_date=contributions_by_date,
+                    contributions_by_state=contributions_by_state,
+                    top_donors=top_donors,
+                    contribution_distribution=contribution_distribution
+                )
+        except Exception as e:
+            logger.warning(f"Error in optimized analyze_contributions, falling back to pandas method: {e}", exc_info=True)
+            # Fallback to original pandas-based method
+            contributions = await self.fec_client.get_contributions(
+                candidate_id=candidate_id,
+                committee_id=committee_id,
+                min_date=min_date,
+                max_date=max_date,
+                limit=10000,
+                two_year_transaction_period=cycle
             )
-        
-        df = pd.DataFrame(contributions)
-        
-        # Ensure required columns exist with defaults
-        if 'contribution_amount' not in df.columns:
-            df['contribution_amount'] = 0.0
-        if 'contributor_name' not in df.columns:
-            df['contributor_name'] = 'Unknown'
-        if 'contribution_date' not in df.columns:
-            df['contribution_date'] = None
-        if 'contributor_state' not in df.columns:
-            df['contributor_state'] = None
-        
-        # Convert contribution_amount to float, handling None, strings, and other types
-        df['contribution_amount'] = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0.0)
-        
-        # Calculate totals
-        total_contributions = df['contribution_amount'].sum()
-        total_contributors = df['contributor_name'].fillna('Unknown').nunique()
-        average_contribution = total_contributions / len(df) if len(df) > 0 else 0.0
-        
-        # Contributions by date
-        df['date'] = pd.to_datetime(df['contribution_date'], errors='coerce')
-        date_grouped = df[df['date'].notna()].groupby(df['date'].dt.date)['contribution_amount'].sum()
-        contributions_by_date = {str(k): float(v) for k, v in date_grouped.items() if k is not None}
-        
-        # Contributions by state
-        state_grouped = df[df['contributor_state'].notna()].groupby('contributor_state')['contribution_amount'].sum()
-        contributions_by_state = {k: float(v) for k, v in state_grouped.items()}
-        
-        # Top donors
-        if len(df) > 0:
-            top_donors_df = df.groupby('contributor_name').agg({
-                'contribution_amount': ['sum', 'count']
-            }).reset_index()
-            top_donors_df.columns = ['name', 'total', 'count']
-            top_donors_df = top_donors_df.sort_values('total', ascending=False).head(20)
-            top_donors = top_donors_df.to_dict('records')
-        else:
-            top_donors = []
-        
-        # Contribution distribution (bins)
-        if len(df) > 0:
-            bins = [0, 50, 100, 200, 500, 1000, 2700, float('inf')]
-            labels = ['$0-50', '$50-100', '$100-200', '$200-500', '$500-1000', '$1000-2700', '$2700+']
-            df['amount_bin'] = pd.cut(df['contribution_amount'].fillna(0), bins=bins, labels=labels, right=False)
-            contribution_distribution = df['amount_bin'].value_counts().to_dict()
-            contribution_distribution = {str(k): int(v) for k, v in contribution_distribution.items()}
-        else:
-            contribution_distribution = {}
-        
-        return ContributionAnalysis(
-            total_contributions=float(total_contributions),
-            total_contributors=int(total_contributors),
-            average_contribution=float(average_contribution),
-            contributions_by_date=contributions_by_date,
-            contributions_by_state=contributions_by_state,
-            top_donors=top_donors,
-            contribution_distribution=contribution_distribution
-        )
+            
+            if not contributions:
+                return ContributionAnalysis(
+                    total_contributions=0.0,
+                    total_contributors=0,
+                    average_contribution=0.0,
+                    contributions_by_date={},
+                    contributions_by_state={},
+                    top_donors=[],
+                    contribution_distribution={}
+                )
+            
+            df = pd.DataFrame(contributions)
+            
+            # Ensure required columns exist with defaults
+            if 'contribution_amount' not in df.columns:
+                df['contribution_amount'] = 0.0
+            if 'contributor_name' not in df.columns:
+                df['contributor_name'] = 'Unknown'
+            if 'contribution_date' not in df.columns:
+                df['contribution_date'] = None
+            if 'contributor_state' not in df.columns:
+                df['contributor_state'] = None
+            
+            # Convert contribution_amount to float, handling None, strings, and other types
+            df['contribution_amount'] = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0.0)
+            
+            # Calculate totals
+            total_contributions = df['contribution_amount'].sum()
+            total_contributors = df['contributor_name'].fillna('Unknown').nunique()
+            average_contribution = total_contributions / len(df) if len(df) > 0 else 0.0
+            
+            # Contributions by date
+            df['date'] = pd.to_datetime(df['contribution_date'], errors='coerce')
+            date_grouped = df[df['date'].notna()].groupby(df['date'].dt.date)['contribution_amount'].sum()
+            contributions_by_date = {str(k): float(v) for k, v in date_grouped.items() if k is not None}
+            
+            # Contributions by state
+            state_grouped = df[df['contributor_state'].notna()].groupby('contributor_state')['contribution_amount'].sum()
+            contributions_by_state = {k: float(v) for k, v in state_grouped.items()}
+            
+            # Top donors
+            if len(df) > 0:
+                top_donors_df = df.groupby('contributor_name').agg({
+                    'contribution_amount': ['sum', 'count']
+                }).reset_index()
+                top_donors_df.columns = ['name', 'total', 'count']
+                top_donors_df = top_donors_df.sort_values('total', ascending=False).head(20)
+                top_donors = top_donors_df.to_dict('records')
+            else:
+                top_donors = []
+            
+            # Contribution distribution (bins)
+            if len(df) > 0:
+                bins = [0, 50, 100, 200, 500, 1000, 2700, float('inf')]
+                labels = ['$0-50', '$50-100', '$100-200', '$200-500', '$500-1000', '$1000-2700', '$2700+']
+                df['amount_bin'] = pd.cut(df['contribution_amount'].fillna(0), bins=bins, labels=labels, right=False)
+                contribution_distribution = df['amount_bin'].value_counts().to_dict()
+                contribution_distribution = {str(k): int(v) for k, v in contribution_distribution.items()}
+            else:
+                contribution_distribution = {}
+            
+            return ContributionAnalysis(
+                total_contributions=float(total_contributions),
+                total_contributors=int(total_contributors),
+                average_contribution=float(average_contribution),
+                contributions_by_date=contributions_by_date,
+                contributions_by_state=contributions_by_state,
+                top_donors=top_donors,
+                contribution_distribution=contribution_distribution
+            )
     
     async def build_money_flow_graph(
         self,
@@ -389,177 +609,414 @@ class AnalysisService:
         candidate_id: Optional[str] = None,
         committee_id: Optional[str] = None,
         min_date: Optional[str] = None,
-        max_date: Optional[str] = None
+        max_date: Optional[str] = None,
+        cycle: Optional[int] = None
     ) -> EmployerAnalysis:
-        """Analyze contributions by employer with name normalization"""
-        contributions = await self.fec_client.get_contributions(
-            candidate_id=candidate_id,
-            committee_id=committee_id,
-            min_date=min_date,
-            max_date=max_date,
-            limit=10000
-        )
+        """Analyze contributions by employer with name normalization using efficient SQL queries"""
+        from app.db.database import AsyncSessionLocal, Contribution
+        from sqlalchemy import select, func, and_, or_
         
-        if not contributions:
-            return EmployerAnalysis(
-                total_by_employer={},
-                top_employers=[],
-                employer_count=0,
-                total_contributions=0.0
+        try:
+            # Convert cycle to date range if provided
+            if cycle and not min_date and not max_date:
+                cycle_year = cycle
+                min_date = f"{cycle_year - 1}-01-01"
+                max_date = f"{cycle_year}-12-31"
+            
+            async with AsyncSessionLocal() as session:
+                # Build base query conditions
+                conditions = []
+                if candidate_id:
+                    conditions.append(Contribution.candidate_id == candidate_id)
+                if committee_id:
+                    conditions.append(Contribution.committee_id == committee_id)
+                if min_date:
+                    try:
+                        min_date_obj = datetime.strptime(min_date, "%Y-%m-%d")
+                        conditions.append(Contribution.contribution_date >= min_date_obj)
+                    except ValueError:
+                        pass
+                if max_date:
+                    try:
+                        max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
+                        conditions.append(Contribution.contribution_date <= max_date_obj)
+                    except ValueError:
+                        pass
+                
+                where_clause = and_(*conditions) if conditions else True
+                
+                # Get total contributions (for total_contributions field)
+                total_query = select(
+                    func.sum(Contribution.contribution_amount).label('total')
+                ).where(
+                    and_(
+                        where_clause,
+                        Contribution.contribution_amount.isnot(None)
+                    )
+                )
+                total_result = await session.execute(total_query)
+                total_row = total_result.first()
+                total_contributions = float(total_row.total) if total_row.total else 0.0
+                
+                # Get employer breakdown using SQL aggregation
+                # We'll fetch employer names and amounts, then normalize in Python
+                employer_query = select(
+                    Contribution.contributor_employer.label('employer'),
+                    func.sum(Contribution.contribution_amount).label('total'),
+                    func.count(Contribution.id).label('count')
+                ).where(
+                    and_(
+                        where_clause,
+                        Contribution.contributor_employer.isnot(None),
+                        Contribution.contribution_amount.isnot(None)
+                    )
+                ).group_by(Contribution.contributor_employer)
+                
+                employer_result = await session.execute(employer_query)
+                employer_rows = employer_result.all()
+                
+                if not employer_rows:
+                    return EmployerAnalysis(
+                        total_by_employer={},
+                        top_employers=[],
+                        employer_count=0,
+                        total_contributions=total_contributions
+                    )
+                
+                # Convert to DataFrame for normalization
+                employer_data = [
+                    {
+                        'employer': row.employer,
+                        'total': float(row.total),
+                        'count': int(row.count)
+                    }
+                    for row in employer_rows
+                    if row.employer
+                ]
+                
+                df = pd.DataFrame(employer_data)
+                
+                # Normalize employer names for better aggregation
+                df['normalized_employer'] = df['employer'].apply(self._normalize_employer_name)
+                
+                # Group by normalized employer name and aggregate
+                employer_grouped = df.groupby('normalized_employer').agg({
+                    'total': 'sum',
+                    'count': 'sum',
+                    'employer': 'first'  # Keep first original name for display
+                }).reset_index()
+                employer_grouped.columns = ['normalized_employer', 'total', 'count', 'display_name']
+                employer_grouped = employer_grouped.sort_values('total', ascending=False)
+                
+                # Use display name (original) for the output, but grouping was done on normalized name
+                total_by_employer = {row['display_name']: float(row['total']) for _, row in employer_grouped.iterrows()}
+                top_employers = [
+                    {
+                        'employer': row['display_name'],
+                        'total': float(row['total']),
+                        'count': int(row['count'])
+                    }
+                    for _, row in employer_grouped.head(50).iterrows()
+                ]
+                
+                return EmployerAnalysis(
+                    total_by_employer=total_by_employer,
+                    top_employers=top_employers,
+                    employer_count=int(employer_grouped['normalized_employer'].nunique()),
+                    total_contributions=total_contributions
+                )
+        except Exception as e:
+            logger.warning(f"Error in optimized analyze_by_employer, falling back to pandas method: {e}", exc_info=True)
+            # Fallback to original pandas-based method
+            contributions = await self.fec_client.get_contributions(
+                candidate_id=candidate_id,
+                committee_id=committee_id,
+                min_date=min_date,
+                max_date=max_date,
+                limit=10000
             )
-        
-        df = pd.DataFrame(contributions)
-        
-        # Ensure required columns exist
-        if 'contribution_amount' not in df.columns:
-            df['contribution_amount'] = 0.0
-        if 'contributor_employer' not in df.columns:
-            df['contributor_employer'] = None
-        
-        # Convert contribution_amount to float, handling None, strings, and other types
-        df['contribution_amount'] = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0.0)
-        
-        # Filter out null employers
-        df_with_employer = df[df['contributor_employer'].notna()].copy()
-        
-        if len(df_with_employer) == 0:
+            
+            if not contributions:
+                return EmployerAnalysis(
+                    total_by_employer={},
+                    top_employers=[],
+                    employer_count=0,
+                    total_contributions=0.0
+                )
+            
+            df = pd.DataFrame(contributions)
+            
+            # Ensure required columns exist
+            if 'contribution_amount' not in df.columns:
+                df['contribution_amount'] = 0.0
+            if 'contributor_employer' not in df.columns:
+                df['contributor_employer'] = None
+            
+            # Convert contribution_amount to float, handling None, strings, and other types
+            df['contribution_amount'] = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0.0)
+            
+            # Filter out null employers
+            df_with_employer = df[df['contributor_employer'].notna()].copy()
+            
+            if len(df_with_employer) == 0:
+                return EmployerAnalysis(
+                    total_by_employer={},
+                    top_employers=[],
+                    employer_count=0,
+                    total_contributions=float(df['contribution_amount'].sum())
+                )
+            
+            # Normalize employer names for better aggregation
+            df_with_employer['normalized_employer'] = df_with_employer['contributor_employer'].apply(self._normalize_employer_name)
+            
+            # Group by normalized employer name
+            employer_grouped = df_with_employer.groupby('normalized_employer').agg({
+                'contribution_amount': ['sum', 'count'],
+                'contributor_employer': 'first'  # Keep original name for display
+            }).reset_index()
+            employer_grouped.columns = ['employer', 'total', 'count', 'display_name']
+            employer_grouped = employer_grouped.sort_values('total', ascending=False)
+            
+            # Use display name (original) for the output, but grouping was done on normalized name
+            total_by_employer = {row['display_name']: float(row['total']) for _, row in employer_grouped.iterrows()}
+            top_employers = [
+                {
+                    'employer': row['display_name'],
+                    'total': float(row['total']),
+                    'count': int(row['count'])
+                }
+                for _, row in employer_grouped.head(50).iterrows()
+            ]
+            
             return EmployerAnalysis(
-                total_by_employer={},
-                top_employers=[],
-                employer_count=0,
+                total_by_employer=total_by_employer,
+                top_employers=top_employers,
+                employer_count=int(employer_grouped['employer'].nunique()),
                 total_contributions=float(df['contribution_amount'].sum())
             )
-        
-        # Normalize employer names for better aggregation
-        df_with_employer['normalized_employer'] = df_with_employer['contributor_employer'].apply(self._normalize_employer_name)
-        
-        # Group by normalized employer name
-        # For display name, prefer the most common original name, or longest if tied
-        def get_best_display_name(group):
-            """Get the best display name from a group of employer name variations"""
-            # Count occurrences of each original name
-            name_counts = group.value_counts()
-            # Get the most common name
-            most_common = name_counts.index[0]
-            # If there's a tie, prefer the longest name (usually more complete)
-            if len(name_counts) > 1 and name_counts.iloc[0] == name_counts.iloc[1]:
-                # Get all names with the same count
-                max_count = name_counts.iloc[0]
-                tied_names = name_counts[name_counts == max_count].index.tolist()
-                # Return the longest one
-                return max(tied_names, key=len)
-            return most_common
-        
-        # Group and aggregate
-        # Use a custom aggregation that returns a scalar string
-        employer_grouped = df_with_employer.groupby('normalized_employer').agg({
-            'contribution_amount': ['sum', 'count']
-        }).reset_index()
-        
-        # Rename columns first
-        employer_grouped.columns = ['employer', 'total', 'count']
-        
-        # Add display name separately to ensure it's a scalar
-        employer_grouped['display_name'] = employer_grouped['employer'].apply(
-            lambda norm_name: get_best_display_name(
-                df_with_employer[df_with_employer['normalized_employer'] == norm_name]['contributor_employer']
-            )
-        )
-        employer_grouped = employer_grouped.sort_values('total', ascending=False)
-        
-        # Use display name (original) for the output, but grouping was done on normalized name
-        total_by_employer = {row['display_name']: float(row['total']) for _, row in employer_grouped.iterrows()}
-        top_employers = [
-            {
-                'employer': row['display_name'],
-                'total': float(row['total']),
-                'count': int(row['count'])
-            }
-            for _, row in employer_grouped.head(50).iterrows()
-        ]
-        
-        return EmployerAnalysis(
-            total_by_employer=total_by_employer,
-            top_employers=top_employers,
-            employer_count=int(employer_grouped['employer'].nunique()),
-            total_contributions=float(df['contribution_amount'].sum())
-        )
     
     async def analyze_velocity(
         self,
         candidate_id: Optional[str] = None,
         committee_id: Optional[str] = None,
         min_date: Optional[str] = None,
-        max_date: Optional[str] = None
+        max_date: Optional[str] = None,
+        cycle: Optional[int] = None
     ) -> ContributionVelocity:
-        """Calculate contribution velocity (contributions per day/week)"""
-        contributions = await self.fec_client.get_contributions(
-            candidate_id=candidate_id,
-            committee_id=committee_id,
-            min_date=min_date,
-            max_date=max_date,
-            limit=10000
-        )
+        """Calculate contribution velocity (contributions per day/week) using efficient SQL queries"""
+        from app.db.database import AsyncSessionLocal, Contribution
+        from sqlalchemy import select, func, and_, or_
         
-        if not contributions:
-            return ContributionVelocity(
-                velocity_by_date={},
-                velocity_by_week={},
-                peak_days=[],
-                average_daily_velocity=0.0
+        try:
+            # Convert cycle to date range if provided
+            if cycle and not min_date and not max_date:
+                cycle_year = cycle
+                min_date = f"{cycle_year - 1}-01-01"
+                max_date = f"{cycle_year}-12-31"
+            
+            async with AsyncSessionLocal() as session:
+                # Build base query conditions
+                conditions = []
+                if candidate_id:
+                    conditions.append(Contribution.candidate_id == candidate_id)
+                if committee_id:
+                    conditions.append(Contribution.committee_id == committee_id)
+                # Date filters - if cycle is specified, include contributions without dates
+                if min_date and max_date:
+                    try:
+                        min_date_obj = datetime.strptime(min_date, "%Y-%m-%d")
+                        max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
+                        if cycle:
+                            conditions.append(
+                                or_(
+                                    and_(
+                                        Contribution.contribution_date >= min_date_obj,
+                                        Contribution.contribution_date <= max_date_obj
+                                    ),
+                                    Contribution.contribution_date.is_(None)
+                                )
+                            )
+                        else:
+                            conditions.append(Contribution.contribution_date >= min_date_obj)
+                            conditions.append(Contribution.contribution_date <= max_date_obj)
+                    except ValueError:
+                        pass
+                elif min_date:
+                    try:
+                        min_date_obj = datetime.strptime(min_date, "%Y-%m-%d")
+                        if cycle:
+                            conditions.append(
+                                or_(
+                                    Contribution.contribution_date >= min_date_obj,
+                                    Contribution.contribution_date.is_(None)
+                                )
+                            )
+                        else:
+                            conditions.append(Contribution.contribution_date >= min_date_obj)
+                    except ValueError:
+                        pass
+                elif max_date:
+                    try:
+                        max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
+                        if cycle:
+                            conditions.append(
+                                or_(
+                                    Contribution.contribution_date <= max_date_obj,
+                                    Contribution.contribution_date.is_(None)
+                                )
+                            )
+                        else:
+                            conditions.append(Contribution.contribution_date <= max_date_obj)
+                    except ValueError:
+                        pass
+                
+                where_clause = and_(*conditions) if conditions else True
+                
+                # Get velocity by date using SQL aggregation
+                # Note: For velocity, we only use contributions with dates (can't calculate velocity without dates)
+                # But contributions without dates are still included in totals if cycle is specified
+                date_query = select(
+                    func.date(Contribution.contribution_date).label('date'),
+                    func.sum(Contribution.contribution_amount).label('amount'),
+                    func.count(Contribution.id).label('count')
+                ).where(
+                    and_(
+                        where_clause,
+                        Contribution.contribution_date.isnot(None),
+                        Contribution.contribution_amount.isnot(None)
+                    )
+                ).group_by(func.date(Contribution.contribution_date))
+                
+                date_result = await session.execute(date_query)
+                date_rows = date_result.all()
+                
+                if not date_rows:
+                    return ContributionVelocity(
+                        velocity_by_date={},
+                        velocity_by_week={},
+                        peak_days=[],
+                        average_daily_velocity=0.0
+                    )
+                
+                # Convert to DataFrame for week grouping and peak day calculation
+                velocity_data = [
+                    {
+                        'date': row.date,
+                        'amount': float(row.amount),
+                        'count': int(row.count)
+                    }
+                    for row in date_rows
+                    if row.date
+                ]
+                
+                df = pd.DataFrame(velocity_data)
+                df['date'] = pd.to_datetime(df['date'])
+                
+                # Velocity by date
+                velocity_by_date = {
+                    str(row['date'].date()): float(row['amount'])
+                    for _, row in df.iterrows()
+                }
+                
+                # Velocity by week (group by week)
+                df['week'] = df['date'].dt.to_period('W').astype(str)
+                week_grouped = df.groupby('week')['amount'].sum()
+                velocity_by_week = {str(k): float(v) for k, v in week_grouped.items()}
+                
+                # Peak days (top 10 by amount)
+                peak_days_df = df.nlargest(10, 'amount')[['date', 'amount', 'count']]
+                peak_days = [
+                    {
+                        'date': str(row['date'].date()),
+                        'amount': float(row['amount']),
+                        'count': int(row['count'])
+                    }
+                    for _, row in peak_days_df.iterrows()
+                ]
+                
+                # Average daily velocity
+                average_daily_velocity = float(df['amount'].mean()) if len(df) > 0 else 0.0
+                
+                return ContributionVelocity(
+                    velocity_by_date=velocity_by_date,
+                    velocity_by_week=velocity_by_week,
+                    peak_days=peak_days,
+                    average_daily_velocity=average_daily_velocity
+                )
+        except Exception as e:
+            logger.warning(f"Error in optimized analyze_velocity, falling back to pandas method: {e}", exc_info=True)
+            # Fallback to original pandas-based method
+            contributions = await self.fec_client.get_contributions(
+                candidate_id=candidate_id,
+                committee_id=committee_id,
+                min_date=min_date,
+                max_date=max_date,
+                limit=10000
             )
-        
-        df = pd.DataFrame(contributions)
-        
-        # Ensure required columns exist
-        if 'contribution_date' not in df.columns:
-            df['contribution_date'] = None
-        if 'contribution_amount' not in df.columns:
-            df['contribution_amount'] = 0.0
-        
-        # Convert contribution_amount to float, handling None, strings, and other types
-        df['contribution_amount'] = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0.0)
-        
-        df['date'] = pd.to_datetime(df['contribution_date'], errors='coerce')
-        df = df[df['date'].notna()].copy()
-        
-        if len(df) == 0:
+            
+            if not contributions:
+                return ContributionVelocity(
+                    velocity_by_date={},
+                    velocity_by_week={},
+                    peak_days=[],
+                    average_daily_velocity=0.0
+                )
+            
+            df = pd.DataFrame(contributions)
+            
+            # Ensure required columns exist
+            if 'contribution_date' not in df.columns:
+                df['contribution_date'] = None
+            if 'contribution_amount' not in df.columns:
+                df['contribution_amount'] = 0.0
+            
+            # Convert contribution_amount to float, handling None, strings, and other types
+            df['contribution_amount'] = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0.0)
+            
+            df['date'] = pd.to_datetime(df['contribution_date'], errors='coerce')
+            df = df[df['date'].notna()].copy()
+            
+            if len(df) == 0:
+                return ContributionVelocity(
+                    velocity_by_date={},
+                    velocity_by_week={},
+                    peak_days=[],
+                    average_daily_velocity=0.0
+                )
+            
+            # Daily velocity (amount per day)
+            daily_amounts = df.groupby(df['date'].dt.date)['contribution_amount'].sum()
+            velocity_by_date = {str(k): float(v) for k, v in daily_amounts.items()}
+            
+            # Weekly velocity
+            df['week'] = df['date'].dt.to_period('W').astype(str)
+            weekly_amounts = df.groupby('week')['contribution_amount'].sum()
+            velocity_by_week = {k: float(v) for k, v in weekly_amounts.items()}
+            
+            # Peak days (top 10 by amount)
+            peak_days_df = daily_amounts.sort_values(ascending=False).head(10).reset_index()
+            daily_counts = df.groupby(df['date'].dt.date).size()
+            peak_days = [
+                {
+                    'date': str(row['date']),
+                    'amount': float(row['contribution_amount']),
+                    'count': int(daily_counts.get(row['date'], 0))
+                }
+                for _, row in peak_days_df.iterrows()
+            ]
+            
+            # Average daily velocity
+            if len(velocity_by_date) > 0:
+                average_daily_velocity = sum(velocity_by_date.values()) / len(velocity_by_date)
+            else:
+                average_daily_velocity = 0.0
+            
             return ContributionVelocity(
-                velocity_by_date={},
-                velocity_by_week={},
-                peak_days=[],
-                average_daily_velocity=0.0
+                velocity_by_date=velocity_by_date,
+                velocity_by_week=velocity_by_week,
+                peak_days=peak_days,
+                average_daily_velocity=float(average_daily_velocity)
             )
-        
-        # Daily velocity (count of contributions per day)
-        daily_counts = df.groupby(df['date'].dt.date).size()
-        velocity_by_date = {str(k): float(v) for k, v in daily_counts.items()}
-        
-        # Weekly velocity
-        df['week'] = df['date'].dt.to_period('W').astype(str)
-        weekly_counts = df.groupby('week').size()
-        velocity_by_week = {k: float(v) for k, v in weekly_counts.items()}
-        
-        # Peak days (days with most contributions)
-        daily_amounts = df.groupby(df['date'].dt.date)['contribution_amount'].sum()
-        peak_days_df = daily_amounts.sort_values(ascending=False).head(10).reset_index()
-        peak_days = [
-            {'date': str(row['date']), 'amount': float(row['contribution_amount']), 'count': int(daily_counts.get(row['date'], 0))}
-            for _, row in peak_days_df.iterrows()
-        ]
-        
-        # Average daily velocity
-        if len(velocity_by_date) > 0:
-            average_daily_velocity = sum(velocity_by_date.values()) / len(velocity_by_date)
-        else:
-            average_daily_velocity = 0.0
-        
-        return ContributionVelocity(
-            velocity_by_date=velocity_by_date,
-            velocity_by_week=velocity_by_week,
-            peak_days=peak_days,
-            average_daily_velocity=float(average_daily_velocity)
-        )
     
     async def analyze_donor_states(
         self,
@@ -583,13 +1040,22 @@ class AnalysisService:
         candidate = await self.fec_client.get_candidate(candidate_id)
         candidate_state = candidate.get('state') if candidate else None
         
+        # Convert cycle to date range if provided and no explicit dates given
+        # FEC cycles: For cycle YYYY, the cycle includes contributions from (YYYY-1)-01-01 to YYYY-12-31
+        if cycle and not min_date and not max_date:
+            cycle_year = cycle
+            min_date = f"{cycle_year - 1}-01-01"
+            max_date = f"{cycle_year}-12-31"
+            logger.debug(f"analyze_donor_states: Converted cycle {cycle} to date range: {min_date} to {max_date}")
+        
         # Get contributions
+        # Note: get_contributions will handle cycle filtering, but we also pass explicit dates if cycle was converted
         contributions = await self.fec_client.get_contributions(
             candidate_id=candidate_id,
             min_date=min_date,
             max_date=max_date,
             limit=10000,
-            two_year_transaction_period=cycle
+            two_year_transaction_period=cycle if not min_date and not max_date else None  # Only pass cycle if dates weren't converted
         )
         
         if not contributions:
@@ -618,8 +1084,54 @@ class AnalysisService:
         if 'contributor_state' not in df.columns:
             df['contributor_state'] = None
         
-        # Convert contribution_amount to float
-        df['contribution_amount'] = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0.0)
+        # Convert contribution_amount to float, and extract from raw_data if needed
+        def extract_amount(row):
+            # First try the contribution_amount field
+            amount = row.get('contribution_amount')
+            if amount is not None:
+                try:
+                    amount_float = float(amount)
+                    if amount_float > 0:
+                        return amount_float
+                except (ValueError, TypeError):
+                    pass
+            
+            # If amount is 0 or missing, try to extract from raw_data
+            raw_data = row.get('raw_data')
+            if raw_data and isinstance(raw_data, dict):
+                # Try various amount field names
+                for amt_key in ['TRANSACTION_AMT', 'CONTB_AMT', 'contb_receipt_amt', 'contribution_amount', 'transaction_amt', 'contribution_receipt_amount']:
+                    if amt_key in raw_data:
+                        try:
+                            amt_val = str(raw_data[amt_key]).strip()
+                            amt_val = amt_val.replace('$', '').replace(',', '').strip()
+                            if amt_val:
+                                amount_float = float(amt_val)
+                                if amount_float > 0:
+                                    return amount_float
+                        except (ValueError, TypeError):
+                            continue
+            
+            # Also check other possible fields in the row itself
+            for amt_key in ['contb_receipt_amt', 'contribution_receipt_amount', 'amount']:
+                if amt_key in row:
+                    try:
+                        amount_float = float(row[amt_key])
+                        if amount_float > 0:
+                            return amount_float
+                    except (ValueError, TypeError):
+                        continue
+            
+            return 0.0
+        
+        # Apply amount extraction
+        df['contribution_amount'] = df.apply(extract_amount, axis=1)
+        
+        # Debug logging
+        total_before_filter = df['contribution_amount'].sum()
+        logger.debug(f"analyze_donor_states: Total contribution amount before filtering: ${total_before_filter:,.2f}")
+        logger.debug(f"analyze_donor_states: Number of contributions: {len(df)}")
+        logger.debug(f"analyze_donor_states: Contributions with amount > 0: {(df['contribution_amount'] > 0).sum()}")
         
         # Filter out rows without contributor_name
         df = df[df['contributor_name'].notna()].copy()
@@ -979,4 +1491,178 @@ class AnalysisService:
         aggregated.sort(key=lambda x: x.get('total_amount', 0), reverse=True)
         
         return aggregated[:limit]
+    
+    async def get_cumulative_totals(
+        self,
+        candidate_id: Optional[str] = None,
+        committee_id: Optional[str] = None,
+        min_date: Optional[str] = None,
+        max_date: Optional[str] = None,
+        cycle: Optional[int] = None
+    ) -> CumulativeTotals:
+        """Get cumulative contribution totals aggregated by date using efficient SQL queries
+        
+        This method uses database aggregation instead of fetching all contributions,
+        making it much faster for large datasets.
+        """
+        from app.db.database import AsyncSessionLocal, Contribution
+        from sqlalchemy import select, func, and_, or_, case
+        from sqlalchemy.sql import cast
+        from sqlalchemy.types import Date
+        
+        try:
+            async with AsyncSessionLocal() as session:
+                # Convert cycle to date range if provided and no explicit dates given
+                # FEC cycles: For cycle YYYY, the cycle includes contributions from (YYYY-1)-01-01 to YYYY-12-31
+                if cycle and not min_date and not max_date:
+                    cycle_year = cycle
+                    min_date = f"{cycle_year - 1}-01-01"
+                    max_date = f"{cycle_year}-12-31"
+                
+                # Build base query conditions
+                conditions = []
+                if candidate_id:
+                    conditions.append(Contribution.candidate_id == candidate_id)
+                if committee_id:
+                    conditions.append(Contribution.committee_id == committee_id)
+                
+                # Date filters - if cycle is specified, include contributions without dates
+                date_conditions = []
+                if min_date and max_date:
+                    try:
+                        min_date_obj = datetime.strptime(min_date, "%Y-%m-%d")
+                        max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
+                        if cycle:
+                            # Include contributions with dates in range OR contributions without dates
+                            date_conditions.append(
+                                or_(
+                                    and_(
+                                        Contribution.contribution_date >= min_date_obj,
+                                        Contribution.contribution_date <= max_date_obj
+                                    ),
+                                    Contribution.contribution_date.is_(None)
+                                )
+                            )
+                        else:
+                            # Only contributions with dates in range
+                            date_conditions.append(Contribution.contribution_date >= min_date_obj)
+                            date_conditions.append(Contribution.contribution_date <= max_date_obj)
+                    except ValueError:
+                        pass
+                elif min_date:
+                    try:
+                        min_date_obj = datetime.strptime(min_date, "%Y-%m-%d")
+                        if cycle:
+                            date_conditions.append(
+                                or_(
+                                    Contribution.contribution_date >= min_date_obj,
+                                    Contribution.contribution_date.is_(None)
+                                )
+                            )
+                        else:
+                            date_conditions.append(Contribution.contribution_date >= min_date_obj)
+                    except ValueError:
+                        pass
+                elif max_date:
+                    try:
+                        max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
+                        if cycle:
+                            date_conditions.append(
+                                or_(
+                                    Contribution.contribution_date <= max_date_obj,
+                                    Contribution.contribution_date.is_(None)
+                                )
+                            )
+                        else:
+                            date_conditions.append(Contribution.contribution_date <= max_date_obj)
+                    except ValueError:
+                        pass
+                
+                # Build base query - for cumulative totals, we only want contributions with dates
+                # (contributions without dates can't be plotted on a timeline)
+                # But we still include them in the total amount calculation
+                all_conditions = conditions + date_conditions
+                where_clause = and_(*all_conditions) if all_conditions else and_(*conditions) if conditions else True
+                
+                # Query for contributions with dates (for the timeline)
+                query = select(
+                    func.date(Contribution.contribution_date).label('date'),
+                    func.sum(Contribution.contribution_amount).label('daily_total')
+                ).where(
+                    and_(
+                        where_clause,
+                        Contribution.contribution_date.isnot(None),
+                        Contribution.contribution_amount.isnot(None)
+                )
+                )
+                
+                # Group by date and order by date ascending
+                query = query.group_by(func.date(Contribution.contribution_date)).order_by(
+                    func.date(Contribution.contribution_date).asc()
+                )
+                
+                result = await session.execute(query)
+                rows = result.all()
+                
+                if not rows:
+                    return CumulativeTotals(
+                        totals_by_date={},
+                        total_amount=0.0,
+                        first_date=None,
+                        last_date=None
+                    )
+                
+                # Calculate cumulative totals from contributions with dates
+                cumulative_total = 0.0
+                totals_by_date = {}
+                first_date = None
+                last_date = None
+                
+                for row in rows:
+                    date_str = row.date.strftime("%Y-%m-%d") if row.date else None
+                    daily_total = float(row.daily_total) if row.daily_total else 0.0
+                    
+                    if date_str:
+                        cumulative_total += daily_total
+                        totals_by_date[date_str] = cumulative_total
+                        
+                        if first_date is None:
+                            first_date = date_str
+                        last_date = date_str
+                
+                # If cycle is specified, also include contributions without dates in the total
+                # (they belong to this cycle but can't be plotted on timeline)
+                if cycle:
+                    undated_query = select(
+                        func.sum(Contribution.contribution_amount).label('total')
+                    ).where(
+                        and_(
+                            where_clause,
+                            Contribution.contribution_date.is_(None),
+                            Contribution.contribution_amount.isnot(None)
+                        )
+                    )
+                    undated_result = await session.execute(undated_query)
+                    undated_row = undated_result.first()
+                    undated_total = float(undated_row.total) if undated_row and undated_row.total else 0.0
+                    if undated_total > 0:
+                        # Add undated contributions to the final total
+                        cumulative_total += undated_total
+                        logger.debug(f"get_cumulative_totals: Added ${undated_total:,.2f} from {cycle} contributions without dates")
+                
+                return CumulativeTotals(
+                    totals_by_date=totals_by_date,
+                    total_amount=cumulative_total,
+                    first_date=first_date,
+                    last_date=last_date
+                )
+        except Exception as e:
+            logger.error(f"Error getting cumulative totals: {e}", exc_info=True)
+            # Fallback to empty result
+            return CumulativeTotals(
+                totals_by_date={},
+                total_amount=0.0,
+                first_date=None,
+                last_date=None
+            )
 

@@ -143,6 +143,14 @@ class ContributionVelocity(BaseModel):
     average_daily_velocity: float
 
 
+class CumulativeTotals(BaseModel):
+    """Cumulative contribution totals aggregated by date"""
+    totals_by_date: Dict[str, float]  # Date -> cumulative total
+    total_amount: float
+    first_date: Optional[str] = None
+    last_date: Optional[str] = None
+
+
 class IndependentExpenditure(BaseModel):
     expenditure_id: Optional[str] = None
     cycle: Optional[int] = None

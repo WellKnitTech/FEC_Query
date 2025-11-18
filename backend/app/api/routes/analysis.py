@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import Optional, List, Union
 from app.services.fec_client import FECClient
 from app.models.schemas import (
-    MoneyFlowGraph, ExpenditureBreakdown, EmployerAnalysis, ContributionVelocity, DonorStateAnalysis, Contribution, AggregatedDonor
+    MoneyFlowGraph, ExpenditureBreakdown, EmployerAnalysis, ContributionVelocity, DonorStateAnalysis, Contribution, AggregatedDonor, CumulativeTotals
 )
 from app.services.analysis import AnalysisService
 from app.api.dependencies import get_fec_client, get_analysis_service
@@ -261,4 +261,41 @@ async def get_donor_states(
     except Exception as e:
         logger.error(f"Error getting donor states for {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get donor states: {str(e)}")
+
+
+@router.get("/cumulative-totals", response_model=CumulativeTotals)
+async def get_cumulative_totals(
+    candidate_id: Optional[str] = Query(None, description="Candidate ID"),
+    committee_id: Optional[str] = Query(None, description="Committee ID"),
+    min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    cycle: Optional[int] = Query(None, description="Election cycle"),
+    analysis_service: AnalysisService = Depends(get_analysis_service)
+):
+    """Get cumulative contribution totals aggregated by date
+    
+    This endpoint uses efficient SQL aggregation instead of fetching all contributions,
+    making it much faster for large datasets.
+    """
+    try:
+        # Convert cycle to date range if provided
+        # FEC cycles: For cycle YYYY, the cycle includes contributions from (YYYY-1)-01-01 to YYYY-12-31
+        if cycle and not min_date and not max_date:
+            cycle_year = cycle
+            min_date = f"{cycle_year - 1}-01-01"
+            max_date = f"{cycle_year}-12-31"
+        
+        totals = await analysis_service.get_cumulative_totals(
+            candidate_id=candidate_id,
+            committee_id=committee_id,
+            min_date=min_date,
+            max_date=max_date,
+            cycle=cycle
+        )
+        return totals
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting cumulative totals: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get cumulative totals: {str(e)}")
 

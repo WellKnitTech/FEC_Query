@@ -22,8 +22,30 @@ def extract_candidate_contact_info(candidate: Dict) -> Optional[ContactInformati
     
     Matches the extraction logic in fec_client._extract_candidate_contact_info()
     """
+    # If candidate already has a contact_info dict (from local DB with processed data), use it
+    if isinstance(candidate.get("contact_info"), dict):
+        contact_dict = candidate.get("contact_info")
+        if any([
+            contact_dict.get("street_address"),
+            contact_dict.get("city"),
+            contact_dict.get("zip"),
+            contact_dict.get("email"),
+            contact_dict.get("phone"),
+            contact_dict.get("website")
+        ]):
+            return ContactInformation(
+                street_address=contact_dict.get("street_address"),
+                city=contact_dict.get("city"),
+                state=contact_dict.get("state"),
+                zip=contact_dict.get("zip"),
+                email=contact_dict.get("email"),
+                phone=contact_dict.get("phone"),
+                website=contact_dict.get("website")
+            )
+    
     # Try multiple field name variations to find contact info
     # This matches the logic in fec_client._extract_candidate_contact_info()
+    # First check direct fields (from local DB), then check API field variations
     extracted_contact = {
         "street_address": (
             candidate.get("street_address") or
@@ -33,7 +55,9 @@ def extract_candidate_contact_info(candidate: Dict) -> Optional[ContactInformati
             candidate.get("street_1") or
             candidate.get("address") or
             candidate.get("principal_committee_street") or
-            candidate.get("candidate_street_1")
+            candidate.get("candidate_street_1") or
+            candidate.get("street_address_1") or
+            candidate.get("street_address_2")
         ),
         "city": (
             candidate.get("city") or
@@ -57,14 +81,16 @@ def extract_candidate_contact_info(candidate: Dict) -> Optional[ContactInformati
             candidate.get("email") or
             candidate.get("principal_committee_email") or
             candidate.get("candidate_email") or
-            candidate.get("e_mail")
+            candidate.get("e_mail") or
+            candidate.get("email_address")
         ),
         "phone": (
             candidate.get("phone") or
             candidate.get("principal_committee_phone") or
             candidate.get("telephone") or
             candidate.get("candidate_phone") or
-            candidate.get("phone_number")
+            candidate.get("phone_number") or
+            candidate.get("phone_1")
         ),
         "website": (
             candidate.get("website") or
@@ -72,19 +98,22 @@ def extract_candidate_contact_info(candidate: Dict) -> Optional[ContactInformati
             candidate.get("web_site") or
             candidate.get("url") or
             candidate.get("candidate_website") or
-            candidate.get("web_url")
+            candidate.get("web_url") or
+            candidate.get("website_url")
         )
     }
     
-    # Only create ContactInformation if at least one field is present
-    if any([
+    # Only create ContactInformation if at least one field is present and not empty
+    has_contact_info = any([
         extracted_contact.get("street_address"),
         extracted_contact.get("city"),
         extracted_contact.get("zip"),
         extracted_contact.get("email"),
         extracted_contact.get("phone"),
         extracted_contact.get("website")
-    ]):
+    ])
+    
+    if has_contact_info:
         return ContactInformation(
             street_address=extracted_contact.get("street_address"),
             city=extracted_contact.get("city"),

@@ -1,5 +1,4 @@
-import { useEffect, useState } from 'react';
-import { fraudApi, FraudAnalysis } from '../services/api';
+import { useFraudAnalysis } from '../hooks/useFraudAnalysis';
 import { Radar } from 'react-chartjs-2';
 import { formatDate } from '../utils/dateUtils';
 import {
@@ -28,30 +27,8 @@ interface FraudRadarChartProps {
 }
 
 export default function FraudRadarChart({ candidateId, minDate, maxDate }: FraudRadarChartProps) {
-  const [analysis, setAnalysis] = useState<FraudAnalysis | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const fetchAnalysis = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const data = await fraudApi.analyze(candidateId, minDate, maxDate);
-        setAnalysis(data);
-      } catch (err: any) {
-        const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load fraud analysis';
-        setError(errorMessage);
-        console.error('Error loading fraud analysis:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    if (candidateId) {
-      fetchAnalysis();
-    }
-  }, [candidateId, minDate, maxDate]);
+  // Use shared hook - default to aggregation=false for radar chart (uses standard analysis)
+  const { analysis, loading, error } = useFraudAnalysis(candidateId, minDate, maxDate, false);
 
   if (loading) {
     return (
