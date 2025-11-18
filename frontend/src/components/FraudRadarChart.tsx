@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { fraudApi, FraudAnalysis } from '../services/api';
 import { Radar } from 'react-chartjs-2';
+import { formatDate } from '../utils/dateUtils';
 import {
   Chart as ChartJS,
   RadialLinearScale,
@@ -159,7 +160,14 @@ export default function FraudRadarChart({ candidateId, minDate, maxDate }: Fraud
 
   return (
     <div className="bg-white rounded-lg shadow p-6">
-      <h2 className="text-xl font-semibold mb-4">Fraud Pattern Analysis</h2>
+      <div className="mb-4">
+        <h2 className="text-xl font-semibold">Fraud Pattern Analysis</h2>
+        {minDate && maxDate && (
+          <p className="text-sm text-gray-500 mt-1">
+            Date Range: {formatDate(minDate)} - {formatDate(maxDate)}
+          </p>
+        )}
+      </div>
       <div className="mb-4">
         <div className="grid grid-cols-3 gap-4 mb-4">
           <div>

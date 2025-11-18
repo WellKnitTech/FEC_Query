@@ -102,7 +102,14 @@ export default function FraudAlerts({ candidateId, minDate, maxDate }: FraudAler
   return (
     <div className="bg-white rounded-lg shadow p-6">
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-xl font-semibold">Fraud Detection Analysis</h2>
+        <div>
+          <h2 className="text-xl font-semibold">Fraud Detection Analysis</h2>
+          {minDate && maxDate && (
+            <p className="text-sm text-gray-500 mt-1">
+              Date Range: {formatDate(minDate)} - {formatDate(maxDate)}
+            </p>
+          )}
+        </div>
         <div className="flex items-center gap-4">
           <label className="flex items-center gap-2 cursor-pointer">
             <input

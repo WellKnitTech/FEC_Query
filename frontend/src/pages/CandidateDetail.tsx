@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { candidateApi } from '../services/api';
-import { formatDateTime } from '../utils/dateUtils';
+import { formatDateTime, cycleToDateRange, formatCycleRange, formatDate } from '../utils/dateUtils';
 import { useCandidateData } from '../hooks/useCandidateData';
 import { useFinancialData } from '../hooks/useFinancialData';
 import { useCycleSelector } from '../hooks/useCycleSelector';
@@ -33,11 +33,19 @@ function CandidateDetailContent() {
   );
 
   // Manage cycle selection - start with latest cycle if available
-  const { selectedCycle, setCycle } = useCycleSelector({
+  const { selectedCycle, setCycle, hasMultipleCycles } = useCycleSelector({
     financials,
     initialCycle: latestFinancial?.cycle,
     onCycleChange: undefined, // Cycle changes will update context via FinancialSummary's onCycleChange
   });
+
+  // Calculate date range from selected cycle
+  const cycleDateRange = useMemo(() => {
+    if (selectedCycle) {
+      return cycleToDateRange(selectedCycle);
+    }
+    return { minDate: undefined, maxDate: undefined };
+  }, [selectedCycle]);
 
   const handleRefreshContactInfo = async () => {
     if (!candidateId) return;
@@ -181,6 +189,54 @@ function CandidateDetailContent() {
         selectedFinancial={selectedFinancial}
         availableCycles={availableCycles}
       >
+        {/* Cycle Indicator Banner */}
+        {selectedCycle && (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div className="flex items-center gap-4">
+                <div>
+                  <div className="text-sm font-medium text-blue-900">Election Cycle</div>
+                  <div className="text-xl font-bold text-blue-900">
+                    Cycle {selectedCycle}
+                    {cycleDateRange.minDate && cycleDateRange.maxDate && (
+                      <span className="text-base font-normal text-blue-700 ml-2">
+                        ({formatDate(cycleDateRange.minDate)} - {formatDate(cycleDateRange.maxDate)})
+                      </span>
+                    )}
+                  </div>
+                </div>
+                {cycleDateRange.minDate && cycleDateRange.maxDate && (
+                  <div className="text-sm text-blue-700">
+                    Range: {formatCycleRange(selectedCycle)}
+                  </div>
+                )}
+              </div>
+              {hasMultipleCycles && availableCycles.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <label htmlFor="page-cycle-select" className="text-sm font-medium text-blue-900">
+                    Switch Cycle:
+                  </label>
+                  <select
+                    id="page-cycle-select"
+                    value={selectedCycle}
+                    onChange={(e) => {
+                      const newCycle = e.target.value ? parseInt(e.target.value, 10) : undefined;
+                      setCycle(newCycle);
+                    }}
+                    className="px-3 py-2 border border-blue-300 rounded-md text-sm bg-white text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  >
+                    {availableCycles.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="space-y-6">
           <FinancialSummary 
             candidateId={candidateId!} 
@@ -195,10 +251,26 @@ function CandidateDetailContent() {
           <ContributionVelocity candidateId={candidateId} cycle={selectedCycle} />
           <EmployerTreemap candidateId={candidateId} cycle={selectedCycle} />
           <ExpenditureBreakdown candidateId={candidateId} cycle={selectedCycle} />
-          <NetworkGraph candidateId={candidateId!} />
-          <FraudRadarChart candidateId={candidateId!} />
-          <SmurfingScatter candidateId={candidateId} />
-          <FraudAlerts candidateId={candidateId!} />
+          <NetworkGraph 
+            candidateId={candidateId!} 
+            minDate={cycleDateRange.minDate}
+            maxDate={cycleDateRange.maxDate}
+          />
+          <FraudRadarChart 
+            candidateId={candidateId!} 
+            minDate={cycleDateRange.minDate}
+            maxDate={cycleDateRange.maxDate}
+          />
+          <SmurfingScatter 
+            candidateId={candidateId} 
+            minDate={cycleDateRange.minDate}
+            maxDate={cycleDateRange.maxDate}
+          />
+          <FraudAlerts 
+            candidateId={candidateId!} 
+            minDate={cycleDateRange.minDate}
+            maxDate={cycleDateRange.maxDate}
+          />
         </div>
       </CandidateContextProvider>
     </div>

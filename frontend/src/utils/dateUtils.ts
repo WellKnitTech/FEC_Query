@@ -138,3 +138,29 @@ export function getDateTimestamp(dateStr: string | null | undefined): number {
   return date ? date.getTime() : 0;
 }
 
+/**
+ * Convert an FEC election cycle to a date range.
+ * FEC cycles: For cycle YYYY, the cycle includes contributions from (YYYY-1)-01-01 to YYYY-12-31
+ * Example: Cycle 2026 includes contributions from 2025-01-01 through 2026-12-31
+ * 
+ * @param cycle - Election cycle year (e.g., 2026)
+ * @returns Object with minDate and maxDate in YYYY-MM-DD format
+ */
+export function cycleToDateRange(cycle: number): { minDate: string; maxDate: string } {
+  const cycleYear = cycle;
+  const minDate = `${cycleYear - 1}-01-01`;
+  const maxDate = `${cycleYear}-12-31`;
+  return { minDate, maxDate };
+}
+
+/**
+ * Format an election cycle as a date range string for display.
+ * Example: Cycle 2026 -> "2025-2026"
+ * 
+ * @param cycle - Election cycle year (e.g., 2026)
+ * @returns Formatted cycle range string
+ */
+export function formatCycleRange(cycle: number): string {
+  return `${cycle - 1}-${cycle}`;
+}
+

@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { Network } from 'vis-network';
 import { analysisApi, MoneyFlowGraph } from '../services/api';
+import { formatDate } from '../utils/dateUtils';
 
 interface NetworkGraphProps {
   candidateId: string;
   maxDepth?: number;
   minAmount?: number;
+  minDate?: string;
+  maxDate?: string;
 }
 
-export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 100 }: NetworkGraphProps) {
+export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 100, minDate, maxDate }: NetworkGraphProps) {
   const networkRef = useRef<HTMLDivElement>(null);
   const [graph, setGraph] = useState<MoneyFlowGraph | null>(null);
   const [loading, setLoading] = useState(true);
@@ -50,7 +53,7 @@ export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 10
     return () => {
       abortController.abort();
     };
-  }, [candidateId, maxDepth, minAmount, aggregateByEmployer]);
+  }, [candidateId, maxDepth, minAmount, aggregateByEmployer, minDate, maxDate]);
 
   useEffect(() => {
     if (!graph || !networkRef.current) return;
@@ -179,7 +182,14 @@ export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 10
   return (
     <div className="bg-white rounded-lg shadow p-6">
       <div className="flex justify-between items-center mb-4">
-        <h2 className="text-xl font-semibold">Money Flow Network</h2>
+        <div>
+          <h2 className="text-xl font-semibold">Money Flow Network</h2>
+          {minDate && maxDate && (
+            <p className="text-sm text-gray-500 mt-1">
+              Date Range: {formatDate(minDate)} - {formatDate(maxDate)}
+            </p>
+          )}
+        </div>
         <div className="flex items-center gap-4">
           <label className="flex items-center gap-2 cursor-pointer">
             <input
