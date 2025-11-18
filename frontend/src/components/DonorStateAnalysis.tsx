@@ -248,6 +248,9 @@ export default function DonorStateAnalysis({
         <p className="text-gray-600">
           Analysis of individual donors by state to identify funding sources
         </p>
+        <div className="mt-2 text-xs text-gray-500">
+          Note: This analysis is based on bulk-imported data. Check Contribution Analysis section for data completeness percentage.
+        </div>
       </div>
 
       {/* Alert Banner for High Out-of-State Funding */}

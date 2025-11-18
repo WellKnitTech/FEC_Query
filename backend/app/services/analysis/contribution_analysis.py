@@ -14,6 +14,7 @@ from app.models.schemas import (
 from app.services.shared.query_builders import ContributionQueryBuilder
 from app.services.shared.cycle_utils import convert_cycle_to_date_range, should_convert_cycle
 from app.services.shared.aggregation_helpers import calculate_distribution_bins
+from app.utils.thread_pool import async_to_numeric, async_dataframe_operation, async_aggregation
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,36 @@ class ContributionAnalysisService:
                 # Calculate distribution bins
                 contribution_distribution = calculate_distribution_bins(amounts) if amounts else {}
                 
+                # Get FEC API totals for comparison and data completeness calculation
+                data_completeness = None
+                total_from_api = None
+                if candidate_id:
+                    try:
+                        api_totals = await self.fec_client.get_candidate_totals(candidate_id, cycle=cycle)
+                        if api_totals and len(api_totals) > 0:
+                            # Find matching cycle or use first result
+                            matching_total = None
+                            for total in api_totals:
+                                total_cycle = total.get('cycle') or total.get('two_year_transaction_period') or total.get('election_year')
+                                if cycle is None or total_cycle == cycle:
+                                    matching_total = total
+                                    break
+                            
+                            if not matching_total and api_totals:
+                                # Use first result if no cycle match
+                                matching_total = api_totals[0]
+                            
+                            if matching_total:
+                                # Use individual_contributions for comparison (most accurate for Schedule A data)
+                                total_from_api = float(matching_total.get('individual_contributions', 0) or matching_total.get('contributions', 0) or 0)
+                                if total_from_api > 0:
+                                    data_completeness = min(100.0, (total_contributions / total_from_api) * 100.0)
+                                    logger.debug(f"Data completeness: {data_completeness:.1f}% (Local: ${total_contributions:,.2f}, API: ${total_from_api:,.2f})")
+                                else:
+                                    logger.debug(f"API total is 0, cannot calculate data completeness")
+                    except Exception as e:
+                        logger.warning(f"Error getting FEC API totals for data completeness: {e}")
+                
                 return ContributionAnalysis(
                     total_contributions=total_contributions,
                     total_contributors=total_contributors,
@@ -194,7 +225,9 @@ class ContributionAnalysisService:
                     contributions_by_date=contributions_by_date,
                     contributions_by_state=contributions_by_state,
                     top_donors=top_donors,
-                    contribution_distribution=contribution_distribution
+                    contribution_distribution=contribution_distribution,
+                    data_completeness=data_completeness,
+                    total_from_api=total_from_api
                 )
         except Exception as e:
             logger.warning(f"Error in optimized analyze_contributions, falling back to pandas method: {e}", exc_info=True)
@@ -232,29 +265,44 @@ class ContributionAnalysisService:
                 df['contributor_state'] = None
             
             # Convert contribution_amount to float, handling None, strings, and other types
-            df['contribution_amount'] = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0.0)
+            df['contribution_amount'] = await async_to_numeric(df['contribution_amount'], errors='coerce')
+            df['contribution_amount'] = df['contribution_amount'].fillna(0.0)
             
-            # Calculate totals
-            total_contributions = df['contribution_amount'].sum()
-            total_contributors = df['contributor_name'].fillna('Unknown').nunique()
+            # Calculate totals (offload to thread pool)
+            total_contributions = await async_dataframe_operation(df, lambda d: d['contribution_amount'].sum())
+            total_contributors = await async_dataframe_operation(df, lambda d: d['contributor_name'].fillna('Unknown').nunique())
             average_contribution = total_contributions / len(df) if len(df) > 0 else 0.0
             
             # Contributions by date
             df['date'] = pd.to_datetime(df['contribution_date'], errors='coerce')
-            date_grouped = df[df['date'].notna()].groupby(df['date'].dt.date)['contribution_amount'].sum()
+            df_dated = df[df['date'].notna()].copy()
+            date_grouped = await async_dataframe_operation(
+                df_dated,
+                lambda d: d.groupby(d['date'].dt.date)['contribution_amount'].sum()
+            )
             contributions_by_date = {str(k): float(v) for k, v in date_grouped.items() if k is not None}
             
             # Contributions by state
-            state_grouped = df[df['contributor_state'].notna()].groupby('contributor_state')['contribution_amount'].sum()
+            df_stated = df[df['contributor_state'].notna()].copy()
+            state_grouped = await async_dataframe_operation(
+                df_stated,
+                lambda d: d.groupby('contributor_state')['contribution_amount'].sum()
+            )
             contributions_by_state = {k: float(v) for k, v in state_grouped.items()}
             
             # Top donors
             if len(df) > 0:
-                top_donors_df = df.groupby('contributor_name').agg({
-                    'contribution_amount': ['sum', 'count']
-                }).reset_index()
+                top_donors_df = await async_dataframe_operation(
+                    df,
+                    lambda d: d.groupby('contributor_name').agg({
+                        'contribution_amount': ['sum', 'count']
+                    }).reset_index()
+                )
                 top_donors_df.columns = ['name', 'total', 'count']
-                top_donors_df = top_donors_df.sort_values('total', ascending=False).head(20)
+                top_donors_df = await async_dataframe_operation(
+                    top_donors_df,
+                    lambda d: d.sort_values('total', ascending=False).head(20)
+                )
                 top_donors = top_donors_df.to_dict('records')
             else:
                 top_donors = []
@@ -263,6 +311,34 @@ class ContributionAnalysisService:
             amounts = df['contribution_amount'].fillna(0).tolist()
             contribution_distribution = calculate_distribution_bins(amounts) if amounts else {}
             
+            # Get FEC API totals for comparison and data completeness calculation
+            data_completeness = None
+            total_from_api = None
+            if candidate_id:
+                try:
+                    api_totals = await self.fec_client.get_candidate_totals(candidate_id, cycle=cycle)
+                    if api_totals and len(api_totals) > 0:
+                        # Find matching cycle or use first result
+                        matching_total = None
+                        for total in api_totals:
+                            total_cycle = total.get('cycle') or total.get('two_year_transaction_period') or total.get('election_year')
+                            if cycle is None or total_cycle == cycle:
+                                matching_total = total
+                                break
+                        
+                        if not matching_total and api_totals:
+                            # Use first result if no cycle match
+                            matching_total = api_totals[0]
+                        
+                        if matching_total:
+                            # Use individual_contributions for comparison (most accurate for Schedule A data)
+                            total_from_api = float(matching_total.get('individual_contributions', 0) or matching_total.get('contributions', 0) or 0)
+                            if total_from_api > 0:
+                                data_completeness = min(100.0, (total_contributions / total_from_api) * 100.0)
+                                logger.debug(f"Data completeness (fallback): {data_completeness:.1f}% (Local: ${total_contributions:,.2f}, API: ${total_from_api:,.2f})")
+                except Exception as e:
+                    logger.warning(f"Error getting FEC API totals for data completeness (fallback): {e}")
+            
             return ContributionAnalysis(
                 total_contributions=float(total_contributions),
                 total_contributors=int(total_contributors),
@@ -270,7 +346,9 @@ class ContributionAnalysisService:
                 contributions_by_date=contributions_by_date,
                 contributions_by_state=contributions_by_state,
                 top_donors=top_donors,
-                contribution_distribution=contribution_distribution
+                contribution_distribution=contribution_distribution,
+                data_completeness=data_completeness,
+                total_from_api=total_from_api
             )
     
     async def analyze_by_employer(
@@ -416,27 +494,35 @@ class ContributionAnalysisService:
                 df['contributor_employer'] = None
             
             # Convert contribution_amount to float, handling None, strings, and other types
-            df['contribution_amount'] = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0.0)
+            df['contribution_amount'] = await async_to_numeric(df['contribution_amount'], errors='coerce')
+            df['contribution_amount'] = df['contribution_amount'].fillna(0.0)
             
             # Filter out null employers
             df_with_employer = df[df['contributor_employer'].notna()].copy()
             
             if len(df_with_employer) == 0:
+                total_contrib = await async_dataframe_operation(df, lambda d: d['contribution_amount'].sum())
                 return EmployerAnalysis(
                     total_by_employer={},
                     top_employers=[],
                     employer_count=0,
-                    total_contributions=float(df['contribution_amount'].sum())
+                    total_contributions=float(total_contrib)
                 )
             
-            # Normalize employer names for better aggregation
-            df_with_employer['normalized_employer'] = df_with_employer['contributor_employer'].apply(self._normalize_employer_name)
+            # Normalize employer names for better aggregation (offload to thread pool)
+            df_with_employer['normalized_employer'] = await async_dataframe_operation(
+                df_with_employer,
+                lambda d: d['contributor_employer'].apply(self._normalize_employer_name)
+            )
             
             # Group by normalized employer name
-            employer_grouped = df_with_employer.groupby('normalized_employer').agg({
-                'contribution_amount': ['sum', 'count'],
-                'contributor_employer': 'first'  # Keep original name for display
-            }).reset_index()
+            employer_grouped = await async_dataframe_operation(
+                df_with_employer,
+                lambda d: d.groupby('normalized_employer').agg({
+                    'contribution_amount': ['sum', 'count'],
+                    'contributor_employer': 'first'  # Keep original name for display
+                }).reset_index()
+            )
             employer_grouped.columns = ['employer', 'total', 'count', 'display_name']
             employer_grouped = employer_grouped.sort_values('total', ascending=False)
             
@@ -576,7 +662,8 @@ class ContributionAnalysisService:
                 df['contribution_amount'] = 0.0
             
             # Convert contribution_amount to float, handling None, strings, and other types
-            df['contribution_amount'] = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0.0)
+            df['contribution_amount'] = await async_to_numeric(df['contribution_amount'], errors='coerce')
+            df['contribution_amount'] = df['contribution_amount'].fillna(0.0)
             
             df['date'] = pd.to_datetime(df['contribution_date'], errors='coerce')
             df = df[df['date'].notna()].copy()
@@ -589,22 +676,34 @@ class ContributionAnalysisService:
                     average_daily_velocity=0.0
                 )
             
-            # Daily velocity (amount per day)
-            daily_amounts = df.groupby(df['date'].dt.date)['contribution_amount'].sum()
+            # Daily velocity (amount per day) - offload to thread pool
+            daily_amounts = await async_dataframe_operation(
+                df,
+                lambda d: d.groupby(d['date'].dt.date)['contribution_amount'].sum()
+            )
             velocity_by_date = {str(k): float(v) for k, v in daily_amounts.items()}
             
             # Weekly velocity
             df['week'] = df['date'].dt.to_period('W').astype(str)
-            weekly_amounts = df.groupby('week')['contribution_amount'].sum()
+            weekly_amounts = await async_dataframe_operation(
+                df,
+                lambda d: d.groupby('week')['contribution_amount'].sum()
+            )
             velocity_by_week = {k: float(v) for k, v in weekly_amounts.items()}
             
-            # Peak days (top 10 by amount)
-            peak_days_df = daily_amounts.sort_values(ascending=False).head(10).reset_index()
-            daily_counts = df.groupby(df['date'].dt.date).size()
+            # Peak days (top 10 by amount) - offload to thread pool
+            peak_days_df = await async_dataframe_operation(
+                daily_amounts.to_frame().reset_index(),
+                lambda d: d.sort_values(0, ascending=False).head(10)
+            )
+            daily_counts = await async_dataframe_operation(
+                df,
+                lambda d: d.groupby(d['date'].dt.date).size()
+            )
             peak_days = [
                 {
                     'date': str(row['date']),
-                    'amount': float(row['contribution_amount']),
+                    'amount': float(row[0]),
                     'count': int(daily_counts.get(row['date'], 0))
                 }
                 for _, row in peak_days_df.iterrows()
@@ -678,7 +777,16 @@ class ContributionAnalysisService:
                 last_date = None
                 
                 for row in rows:
-                    date_str = row.date.strftime("%Y-%m-%d") if row.date else None
+                    # SQLite's func.date() returns a string, not a datetime object
+                    # Handle both string and date objects for compatibility
+                    if row.date:
+                        if isinstance(row.date, str):
+                            date_str = row.date  # Already a string in YYYY-MM-DD format
+                        else:
+                            date_str = row.date.strftime("%Y-%m-%d")
+                    else:
+                        date_str = None
+                    
                     daily_total = float(row.daily_total) if row.daily_total else 0.0
                     
                     if date_str:

@@ -67,6 +67,8 @@ export interface Contribution {
 }
 
 export interface ContributionAnalysis {
+  data_completeness?: number | null;  // Percentage of total contributions in local DB (0-100)
+  total_from_api?: number | null;  // Total contributions from FEC API for comparison
   total_contributions: number;
   total_contributors: number;
   average_contribution: number;

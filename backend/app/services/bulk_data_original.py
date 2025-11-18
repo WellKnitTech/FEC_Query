@@ -6,10 +6,11 @@ import logging
 import uuid
 import gc
 import zipfile
+import hashlib
 from typing import Optional, Dict, List, Any, Set
 from datetime import datetime
 from pathlib import Path
-from sqlalchemy import select, and_, text
+from sqlalchemy import select, and_, or_, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from app.db.database import AsyncSessionLocal, Contribution, BulkDataMetadata, Committee, BulkImportJob, BulkDataImportStatus, AvailableCycle
 from app.services.fec_client import FECClient
@@ -89,6 +90,36 @@ class BulkDataService:
     async def _update_download_progress_wrapper(self, job_id, cycle, downloaded_mb, total_mb):
         """Wrapper for download progress updates"""
         await self._update_download_progress(job_id, cycle, downloaded_mb, total_mb)
+    
+    async def _calculate_file_hash(self, file_path: Path) -> Optional[str]:
+        """
+        Calculate MD5 hash of a file (runs in thread pool to avoid blocking)
+        
+        Args:
+            file_path: Path to the file
+            
+        Returns:
+            MD5 hash as hex string, or None if file doesn't exist or error occurs
+        """
+        if not file_path.exists():
+            return None
+        
+        def _hash_file():
+            """Calculate hash in thread pool"""
+            hash_md5 = hashlib.md5()
+            try:
+                with open(file_path, 'rb') as f:
+                    # Read in chunks to handle large files
+                    for chunk in iter(lambda: f.read(4096), b""):
+                        hash_md5.update(chunk)
+                return hash_md5.hexdigest()
+            except Exception as e:
+                logger.warning(f"Error calculating hash for {file_path}: {e}")
+                return None
+        
+        # Run in thread pool to avoid blocking
+        from app.utils.thread_pool import run_in_thread_pool
+        return await run_in_thread_pool(_hash_file)
     
     async def _download_schedule_a_csv_original(self, cycle: int, job_id: Optional[str] = None) -> Optional[str]:
         """Download Schedule A CSV (original implementation)"""
@@ -250,6 +281,29 @@ class BulkDataService:
             download_path = self.bulk_data_dir / f"{data_type.value}_{cycle}.csv"
             extracted_path = download_path
         
+        # Check if file already imported (by hash)
+        if not force_download:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(BulkDataMetadata).where(
+                        and_(
+                            BulkDataMetadata.cycle == cycle,
+                            BulkDataMetadata.data_type == data_type.value
+                        )
+                    )
+                )
+                metadata = result.scalar_one_or_none()
+                
+                # If file exists and we have a hash, check if it matches
+                if metadata and metadata.file_hash and extracted_path.exists():
+                    current_hash = await self._calculate_file_hash(extracted_path)
+                    if current_hash and current_hash == metadata.file_hash and metadata.imported:
+                        logger.info(
+                            f"Skipping download and import for {data_type.value} cycle {cycle}: "
+                            f"file already imported (hash: {current_hash[:16]}...)"
+                        )
+                        return str(extracted_path)
+        
         # Check if we should skip download (file size matches and file exists)
         # Skip this check if force_download is True
         if not force_download:
@@ -375,6 +429,42 @@ class BulkDataService:
                         
                         await session.commit()
                 
+                # For CSV files, calculate hash immediately after download
+                if config.file_format == FileFormat.CSV and download_path.exists():
+                    file_hash = await self._calculate_file_hash(download_path)
+                    if file_hash:
+                        async with AsyncSessionLocal() as session:
+                            result = await session.execute(
+                                select(BulkDataMetadata).where(
+                                    and_(
+                                        BulkDataMetadata.cycle == cycle,
+                                        BulkDataMetadata.data_type == data_type.value
+                                    )
+                                )
+                            )
+                            metadata = result.scalar_one_or_none()
+                            if metadata:
+                                # Reset imported flag if hash changed
+                                if metadata.file_hash and metadata.file_hash != file_hash:
+                                    logger.info(f"File hash changed for {data_type.value} cycle {cycle}, resetting imported flag")
+                                    metadata.imported = False
+                                metadata.file_hash = file_hash
+                                metadata.file_path = str(download_path)
+                                await session.commit()
+                            else:
+                                metadata = BulkDataMetadata(
+                                    cycle=cycle,
+                                    data_type=data_type.value,
+                                    file_path=str(download_path),
+                                    file_hash=file_hash,
+                                    imported=False,
+                                    file_size=file_size_to_store,
+                                    download_date=datetime.utcnow()
+                                )
+                                session.add(metadata)
+                                await session.commit()
+                        logger.info(f"Calculated file hash: {file_hash[:16]}... for {data_type.value} cycle {cycle}")
+                
                 # Extract if ZIP
                 if config.file_format == FileFormat.ZIP:
                     if job_id:
@@ -431,6 +521,38 @@ class BulkDataService:
                             extracted_path.mkdir(exist_ok=True)
                             zip_ref.extractall(extracted_path)
                             logger.info(f"Extracted all files to {extracted_path}")
+                
+                # Calculate file hash after file is ready
+                final_file_path = Path(extracted_path)
+                if final_file_path.exists():
+                    file_hash = await self._calculate_file_hash(final_file_path)
+                    if file_hash:
+                        # Update metadata with hash
+                        async with AsyncSessionLocal() as session:
+                            result = await session.execute(
+                                select(BulkDataMetadata).where(
+                                    and_(
+                                        BulkDataMetadata.cycle == cycle,
+                                        BulkDataMetadata.data_type == data_type.value
+                                    )
+                                )
+                            )
+                            metadata = result.scalar_one_or_none()
+                            if metadata:
+                                metadata.file_hash = file_hash
+                                await session.commit()
+                            else:
+                                # Create metadata entry if it doesn't exist
+                                metadata = BulkDataMetadata(
+                                    cycle=cycle,
+                                    data_type=data_type.value,
+                                    file_path=str(extracted_path),
+                                    file_hash=file_hash,
+                                    download_date=datetime.utcnow()
+                                )
+                                session.add(metadata)
+                                await session.commit()
+                        logger.info(f"Calculated file hash: {file_hash[:16]}... for {data_type.value} cycle {cycle}")
                 
                 return str(extracted_path)
                 
@@ -492,7 +614,8 @@ class BulkDataService:
                 
                 # Parse header file (typically CSV with column names)
                 try:
-                    df = pd.read_csv(header_path, nrows=0)  # Just read headers
+                    from app.utils.thread_pool import async_read_csv
+                    df = await async_read_csv(header_path, nrows=0)  # Just read headers
                     columns = df.columns.tolist()
                     logger.info(f"Loaded {len(columns)} columns from header file {header_file_url}")
                     return columns
@@ -626,7 +749,8 @@ class BulkDataService:
                     # Create a callable that returns True for rows to skip
                     skiprows_func = lambda x: x < rows_to_skip
                 
-                for chunk in pd.read_csv(
+                from app.utils.thread_pool import async_read_csv
+                chunk_reader = await async_read_csv(
                     file_path,
                     sep='|',
                     header=None,
@@ -636,7 +760,8 @@ class BulkDataService:
                     low_memory=False,
                     on_bad_lines='skip',
                     skiprows=skiprows_func
-                ):
+                )
+                async for chunk in chunk_reader:
                     # Check for cancellation before processing each chunk
                     if job_id and job_id in _cancelled_jobs:
                         logger.info(f"Import cancelled for job {job_id} during chunk processing")
@@ -973,10 +1098,54 @@ class BulkDataService:
                     del chunk, records
                     gc.collect()
                     
-            logger.info(
-                f"CSV import complete: {total_records} records imported, "
-                f"{skipped_duplicates} duplicates skipped"
-            )
+                logger.info(
+                    f"CSV import complete: {total_records} records imported, "
+                    f"{skipped_duplicates} duplicates skipped, "
+                    f"{chunk_count} chunks processed for cycle {cycle}"
+                )
+                
+                # Log summary statistics for verification
+                if total_records > 0:
+                    async with AsyncSessionLocal() as session:
+                        # Count total contributions for this candidate/cycle in database
+                        from app.db.database import Contribution
+                        from sqlalchemy import select, func, and_
+                        from datetime import datetime
+                        
+                        # Count all contributions for this cycle
+                        cycle_start = datetime(cycle - 1, 1, 1)
+                        cycle_end = datetime(cycle, 12, 31)
+                        count_query = select(func.count(Contribution.id)).where(
+                            or_(
+                                and_(
+                                    Contribution.contribution_date >= cycle_start,
+                                    Contribution.contribution_date <= cycle_end
+                                ),
+                                Contribution.contribution_date.is_(None)
+                            )
+                        )
+                        total_in_db = await session.execute(count_query)
+                        db_count = total_in_db.scalar() or 0
+                        
+                        # Sum total amounts
+                        sum_query = select(func.sum(Contribution.contribution_amount)).where(
+                            or_(
+                                and_(
+                                    Contribution.contribution_date >= cycle_start,
+                                    Contribution.contribution_date <= cycle_end
+                                ),
+                                Contribution.contribution_date.is_(None)
+                            )
+                        )
+                        total_amount_result = await session.execute(sum_query)
+                        db_total_amount = float(total_amount_result.scalar() or 0)
+                        
+                        logger.info(
+                            f"Bulk import verification for cycle {cycle}: "
+                            f"Imported {total_records} records, "
+                            f"Total in DB for cycle: {db_count} contributions, "
+                            f"Total amount: ${db_total_amount:,.2f}"
+                        )
             
             # Extract and cache unique committee IDs from contributions
             await self._extract_and_cache_committees()
@@ -1438,6 +1607,46 @@ class BulkDataService:
                     progress_data={"status": "parsing", "cycle": cycle, "data_type": data_type.value}
                 )
             
+            # Check if file already imported (by hash)
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(BulkDataMetadata).where(
+                        and_(
+                            BulkDataMetadata.cycle == cycle,
+                            BulkDataMetadata.data_type == data_type.value
+                        )
+                    )
+                )
+                metadata = result.scalar_one_or_none()
+                
+                if metadata and metadata.file_hash and metadata.imported:
+                    # Verify file still exists and hash matches
+                    file_path_obj = Path(file_path)
+                    if file_path_obj.exists() and file_path_obj.is_file():
+                        current_hash = await self._calculate_file_hash(file_path_obj)
+                        if current_hash and current_hash == metadata.file_hash:
+                            logger.info(
+                                f"Skipping import for {data_type.value} cycle {cycle}: "
+                                f"file already imported (hash: {current_hash[:16]}...)"
+                            )
+                            if job_id:
+                                await self._update_job_progress(
+                                    job_id,
+                                    status='completed',
+                                    imported_records=metadata.record_count,
+                                    progress_data={"status": "skipped", "reason": "already_imported"}
+                                )
+                            await self.update_data_type_status(data_type, cycle, 'imported', record_count=metadata.record_count)
+                            return {
+                                "success": True,
+                                "data_type": data_type.value,
+                                "cycle": cycle,
+                                "record_count": metadata.record_count,
+                                "file_path": file_path,
+                                "skipped": True,
+                                "reason": "already_imported"
+                            }
+            
             # Parse and store
             logger.info(f"Parsing and storing {data_type.value} for cycle {cycle}")
             # Check if we should resume
@@ -1477,16 +1686,28 @@ class BulkDataService:
                     metadata.file_path = file_path
                     metadata.record_count = record_count
                     metadata.last_updated = datetime.utcnow()
+                    metadata.imported = True  # Mark as imported after successful import
                     # file_size should already be set during download, but update if missing
                     if metadata.file_size is None:
                         # Try to get file size from downloaded file
-                        if Path(file_path).exists():
-                            metadata.file_size = Path(file_path).stat().st_size
+                        file_path_obj = Path(file_path)
+                        if file_path_obj.exists() and file_path_obj.is_file():
+                            metadata.file_size = file_path_obj.stat().st_size
+                    # Ensure file_hash is set (should be set during download, but verify)
+                    if not metadata.file_hash:
+                        file_path_obj = Path(file_path)
+                        if file_path_obj.exists() and file_path_obj.is_file():
+                            file_hash = await self._calculate_file_hash(file_path_obj)
+                            if file_hash:
+                                metadata.file_hash = file_hash
                 else:
-                    # Get file size from downloaded file if not already set
+                    # Get file size and hash from downloaded file if not already set
                     file_size = None
-                    if Path(file_path).exists():
-                        file_size = Path(file_path).stat().st_size
+                    file_hash = None
+                    file_path_obj = Path(file_path)
+                    if file_path_obj.exists() and file_path_obj.is_file():
+                        file_size = file_path_obj.stat().st_size
+                        file_hash = await self._calculate_file_hash(file_path_obj)
                     
                     metadata = BulkDataMetadata(
                         cycle=cycle,
@@ -1494,6 +1715,8 @@ class BulkDataService:
                         download_date=datetime.utcnow(),
                         file_path=file_path,
                         file_size=file_size,
+                        file_hash=file_hash,
+                        imported=True,  # Mark as imported after successful import
                         record_count=record_count,
                         last_updated=datetime.utcnow()
                     )

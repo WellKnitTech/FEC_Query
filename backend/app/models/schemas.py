@@ -62,6 +62,8 @@ class ContributionAnalysis(BaseModel):
     contributions_by_state: Dict[str, float]
     top_donors: List[Dict[str, Any]]
     contribution_distribution: Dict[str, int]
+    data_completeness: Optional[float] = None  # Percentage of total contributions in local DB (0-100)
+    total_from_api: Optional[float] = None  # Total contributions from FEC API for comparison
 
 
 class Expenditure(BaseModel):

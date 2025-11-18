@@ -182,6 +182,11 @@ export default function EmployerTreemap({
       onRetry={refresh}
     >
       <div className="space-y-6">
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+          <p className="text-sm text-blue-800">
+            <span className="font-medium">Note:</span> This analysis is based on bulk-imported data. Check Contribution Analysis section for data completeness percentage.
+          </p>
+        </div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
           <div>
             <div className="text-sm text-gray-600">Unique Employers</div>
