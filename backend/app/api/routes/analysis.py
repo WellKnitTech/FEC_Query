@@ -1,32 +1,16 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import Optional, List, Union
 from app.services.fec_client import FECClient
 from app.models.schemas import (
     MoneyFlowGraph, ExpenditureBreakdown, EmployerAnalysis, ContributionVelocity, DonorStateAnalysis, Contribution, AggregatedDonor
 )
 from app.services.analysis import AnalysisService
+from app.api.dependencies import get_fec_client, get_analysis_service
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-def get_fec_client():
-    """Get FEC client instance"""
-    from app.services.container import get_service_container
-    try:
-        container = get_service_container()
-        return container.get_fec_client()
-    except ValueError as e:
-        logger.error(f"FEC API key not configured: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="FEC API key not configured. Please set FEC_API_KEY in your .env file."
-        )
-
-def get_analysis_service():
-    """Get analysis service instance"""
-    return AnalysisService(get_fec_client())
 
 
 @router.get("/money-flow", response_model=MoneyFlowGraph)
@@ -34,11 +18,11 @@ async def get_money_flow(
     candidate_id: str = Query(..., description="Candidate ID"),
     max_depth: int = Query(2, ge=1, le=3, description="Maximum depth for flow tracking"),
     min_amount: float = Query(100.0, description="Minimum amount to include"),
-    aggregate_by_employer: bool = Query(True, description="Group by employer instead of individual donors")
+    aggregate_by_employer: bool = Query(True, description="Group by employer instead of individual donors"),
+    analysis_service: AnalysisService = Depends(get_analysis_service)
 ):
     """Get money flow network graph"""
     try:
-        analysis_service = get_analysis_service()
         graph = await analysis_service.build_money_flow_graph(
             candidate_id=candidate_id,
             max_depth=max_depth,
@@ -58,11 +42,11 @@ async def get_expenditure_breakdown(
     candidate_id: Optional[str] = Query(None, description="Candidate ID"),
     committee_id: Optional[str] = Query(None, description="Committee ID"),
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
-    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)")
+    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    analysis_service: AnalysisService = Depends(get_analysis_service)
 ):
     """Get expenditure breakdown with category aggregation"""
     try:
-        analysis_service = get_analysis_service()
         breakdown = await analysis_service.analyze_expenditures(
             candidate_id=candidate_id,
             committee_id=committee_id,
@@ -82,11 +66,11 @@ async def get_employer_breakdown(
     candidate_id: Optional[str] = Query(None, description="Candidate ID"),
     committee_id: Optional[str] = Query(None, description="Committee ID"),
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
-    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)")
+    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    analysis_service: AnalysisService = Depends(get_analysis_service)
 ):
     """Get contribution breakdown by employer"""
     try:
-        analysis_service = get_analysis_service()
         analysis = await analysis_service.analyze_by_employer(
             candidate_id=candidate_id,
             committee_id=committee_id,
@@ -106,11 +90,11 @@ async def get_contribution_velocity(
     candidate_id: Optional[str] = Query(None, description="Candidate ID"),
     committee_id: Optional[str] = Query(None, description="Committee ID"),
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
-    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)")
+    max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    analysis_service: AnalysisService = Depends(get_analysis_service)
 ):
     """Get contribution velocity (contributions per day/week)"""
     try:
-        analysis_service = get_analysis_service()
         velocity = await analysis_service.analyze_velocity(
             candidate_id=candidate_id,
             committee_id=committee_id,
@@ -132,7 +116,9 @@ async def get_out_of_state_contributions(
     max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     cycle: Optional[int] = Query(None, description="Election cycle"),
     limit: int = Query(10000, ge=1, le=50000, description="Maximum results"),
-    aggregate: bool = Query(False, description="If true, return aggregated donors instead of individual contributions")
+    aggregate: bool = Query(False, description="If true, return aggregated donors instead of individual contributions"),
+    fec_client: FECClient = Depends(get_fec_client),
+    analysis_service: AnalysisService = Depends(get_analysis_service)
 ) -> Union[List[Contribution], List[AggregatedDonor]]:
     """Get contributions from out-of-state donors for human analysis
     
@@ -142,7 +128,6 @@ async def get_out_of_state_contributions(
     """
     try:
         # Check candidate office type - only applicable to Senate and House
-        fec_client = get_fec_client()
         candidate = await fec_client.get_candidate(candidate_id)
         
         if not candidate:
@@ -154,8 +139,6 @@ async def get_out_of_state_contributions(
                 status_code=400,
                 detail="Out-of-state contribution analysis is not applicable to Presidential candidates. Only Senate (S) and House (H) candidates are supported."
             )
-        
-        analysis_service = get_analysis_service()
         
         # If aggregate is requested, return aggregated donors
         if aggregate:
@@ -245,7 +228,9 @@ async def get_donor_states(
     candidate_id: str = Query(..., description="Candidate ID"),
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
-    cycle: Optional[int] = Query(None, description="Election cycle")
+    cycle: Optional[int] = Query(None, description="Election cycle"),
+    fec_client: FECClient = Depends(get_fec_client),
+    analysis_service: AnalysisService = Depends(get_analysis_service)
 ):
     """Get donor state analysis - percentage of donors and amounts by state
     
@@ -253,7 +238,6 @@ async def get_donor_states(
     """
     try:
         # Check candidate office type - only applicable to Senate and House
-        fec_client = get_fec_client()
         candidate = await fec_client.get_candidate(candidate_id)
         
         if not candidate:
@@ -265,8 +249,6 @@ async def get_donor_states(
                 status_code=400,
                 detail="Donor state analysis is not applicable to Presidential candidates. Only Senate (S) and House (H) candidates are supported."
             )
-        
-        analysis_service = get_analysis_service()
         analysis = await analysis_service.analyze_donor_states(
             candidate_id=candidate_id,
             min_date=min_date,

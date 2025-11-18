@@ -193,21 +193,14 @@ function CandidateDetailContent() {
         {selectedCycle && (
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-              <div className="flex items-center gap-4">
-                <div>
-                  <div className="text-sm font-medium text-blue-900">Election Cycle</div>
-                  <div className="text-xl font-bold text-blue-900">
-                    Cycle {selectedCycle}
-                    {cycleDateRange.minDate && cycleDateRange.maxDate && (
-                      <span className="text-base font-normal text-blue-700 ml-2">
-                        ({formatDate(cycleDateRange.minDate)} - {formatDate(cycleDateRange.maxDate)})
-                      </span>
-                    )}
-                  </div>
+              <div className="flex flex-col gap-1">
+                <div className="text-sm font-medium text-blue-900">Election Cycle</div>
+                <div className="text-xl font-bold text-blue-900">
+                  Cycle {selectedCycle}
                 </div>
                 {cycleDateRange.minDate && cycleDateRange.maxDate && (
                   <div className="text-sm text-blue-700">
-                    Range: {formatCycleRange(selectedCycle)}
+                    {formatDate(cycleDateRange.minDate)} - {formatDate(cycleDateRange.maxDate)}
                   </div>
                 )}
               </div>

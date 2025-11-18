@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import Optional, List
 from app.services.fec_client import FECClient
 from app.services.committees import CommitteeService
 from app.models.schemas import CommitteeSummary, CommitteeFinancials, CommitteeTransfer, ContactInformation
+from app.api.dependencies import get_fec_client, get_committee_service
 import logging
 
 logger = logging.getLogger(__name__)
@@ -10,35 +11,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def get_fec_client():
-    """Get FEC client instance"""
-    from app.services.container import get_service_container
-    try:
-        container = get_service_container()
-        return container.get_fec_client()
-    except ValueError as e:
-        logger.error(f"FEC API key not configured: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="FEC API key not configured. Please set FEC_API_KEY in your .env file."
-        )
-
-
-def get_committee_service():
-    """Get committee service instance"""
-    return CommitteeService(get_fec_client())
-
-
 @router.get("/search", response_model=List[CommitteeSummary])
 async def search_committees(
     name: Optional[str] = Query(None, description="Committee name to search"),
     committee_type: Optional[str] = Query(None, description="Committee type"),
     state: Optional[str] = Query(None, description="State abbreviation"),
-    limit: int = Query(20, ge=1, le=100, description="Maximum results")
+    limit: int = Query(20, ge=1, le=100, description="Maximum results"),
+    fec_client: FECClient = Depends(get_fec_client)
 ):
     """Search for committees"""
     try:
-        fec_client = get_fec_client()
         results = await fec_client.get_committees(
             name=name,
             committee_type=committee_type,
@@ -97,10 +79,12 @@ async def search_committees(
 
 
 @router.get("/{committee_id}", response_model=CommitteeSummary)
-async def get_committee(committee_id: str):
+async def get_committee(
+    committee_id: str,
+    fec_client: FECClient = Depends(get_fec_client)
+):
     """Get committee details by ID"""
     try:
-        fec_client = get_fec_client()
         committees = await fec_client.get_committees(committee_id=committee_id, limit=1)
         if not committees:
             raise HTTPException(status_code=404, detail="Committee not found")
@@ -150,11 +134,11 @@ async def get_committee(committee_id: str):
 @router.get("/{committee_id}/financials", response_model=List[CommitteeFinancials])
 async def get_committee_financials(
     committee_id: str,
-    cycle: Optional[int] = Query(None, description="Election cycle")
+    cycle: Optional[int] = Query(None, description="Election cycle"),
+    service: CommitteeService = Depends(get_committee_service)
 ):
     """Get committee financial summary"""
     try:
-        service = get_committee_service()
         totals = await service.get_committee_financials(committee_id, cycle=cycle)
         
         financials = []
@@ -181,11 +165,11 @@ async def get_committee_contributions(
     committee_id: str,
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
-    limit: int = Query(1000, ge=1, le=10000, description="Maximum results")
+    limit: int = Query(1000, ge=1, le=10000, description="Maximum results"),
+    fec_client: FECClient = Depends(get_fec_client)
 ):
     """Get contributions received by committee"""
     try:
-        fec_client = get_fec_client()
         contributions = await fec_client.get_contributions(
             committee_id=committee_id,
             min_date=min_date,
@@ -203,11 +187,11 @@ async def get_committee_expenditures(
     committee_id: str,
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
-    limit: int = Query(1000, ge=1, le=10000, description="Maximum results")
+    limit: int = Query(1000, ge=1, le=10000, description="Maximum results"),
+    fec_client: FECClient = Depends(get_fec_client)
 ):
     """Get expenditures made by committee"""
     try:
-        fec_client = get_fec_client()
         expenditures = await fec_client.get_expenditures(
             committee_id=committee_id,
             min_date=min_date,
@@ -225,11 +209,11 @@ async def get_committee_transfers(
     committee_id: str,
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
-    limit: int = Query(1000, ge=1, le=10000, description="Maximum results")
+    limit: int = Query(1000, ge=1, le=10000, description="Maximum results"),
+    service: CommitteeService = Depends(get_committee_service)
 ):
     """Get committee-to-committee transfers"""
     try:
-        service = get_committee_service()
         transfers = await service.get_committee_transfers(
             committee_id=committee_id,
             min_date=min_date,

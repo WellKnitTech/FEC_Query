@@ -4,7 +4,7 @@ import os
 import logging
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
-from app.api.dependencies import get_fec_api_key, get_fec_api_base_url
+from app.utils.api_config import get_fec_api_key, get_fec_api_base_url
 from app.db.database import (
     AsyncSessionLocal, APICache, Contribution, BulkDataMetadata,
     Candidate, Committee, FinancialTotal
@@ -695,7 +695,7 @@ class FECClient:
                         (isinstance(trans_dt_val, str) and trans_dt_val.strip().lower() in ['none', 'nan', 'null', ''])
                     )
                     if is_invalid:
-                        logger.info(f"get_contribution_date: Bulk import data has no valid TRANSACTION_DT value for {contribution_id} (value: {trans_dt_val}), will try API fetch (API may have more up-to-date data)")
+                        logger.debug(f"get_contribution_date: Bulk import data has no valid TRANSACTION_DT value for {contribution_id} (value: {trans_dt_val}), will try API fetch (API may have more up-to-date data)")
                         # Continue to API fetch below - don't return None
                 else:
                     # raw_data exists but doesn't have TRANSACTION_DT - might be API data or missing field
@@ -708,7 +708,7 @@ class FECClient:
         # Step 3: Schedule API query in background (non-blocking)
         # Only do this if we don't have bulk import data, or if bulk import data might have a date from API
         # Don't block - schedule background task to fetch and store
-        logger.info(f"get_contribution_date: Date not in DB or raw_data, scheduling API fetch for {contribution_id}")
+        logger.debug(f"get_contribution_date: Date not in DB or raw_data, scheduling API fetch for {contribution_id}")
         asyncio.create_task(
             self._backfill_contribution_date(contribution_id, committee_id, candidate_id)
         )
@@ -1023,7 +1023,7 @@ class FECClient:
                                 else:
                                     logger.warning(f"_query_local_contributions: serialize_date returned None for: {contrib_date}")
                         else:
-                            logger.warning(f"_query_local_contributions: contrib_date is None, date_str will be None")
+                            logger.debug(f"_query_local_contributions: contrib_date is None, date_str will be None")
                         
                         contrib_dict = {
                             "sub_id": c.contribution_id,
@@ -1152,7 +1152,7 @@ class FECClient:
                             
                             if not min_date or new_min_date >= min_date:
                                 min_date = new_min_date
-                                logger.info(f"Fetching contributions from {min_date} onwards "
+                                logger.debug(f"Fetching contributions from {min_date} onwards "
                                           f"(latest in DB: {latest_db_date.strftime('%Y-%m-%d')}, "
                                           f"lookback: {self.contribution_lookback_days} days) "
                                           f"- duplicates and amendments will be handled via contribution_id")

@@ -1,10 +1,11 @@
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body, Depends
 from fastapi.responses import StreamingResponse, Response
 from typing import Optional, List, Dict
 from pydantic import BaseModel
 from app.services.fec_client import FECClient
 from app.services.report_generator import ReportGenerator
 from app.services.analysis import AnalysisService
+from app.api.dependencies import get_fec_client, get_analysis_service
 import logging
 import io
 import csv
@@ -27,38 +28,20 @@ class RaceExportRequest(BaseModel):
     format: str = "pdf"  # pdf, docx, md
 
 
-def get_fec_client():
-    """Get FEC client instance"""
-    from app.services.container import get_service_container
-    try:
-        container = get_service_container()
-        return container.get_fec_client()
-    except ValueError as e:
-        logger.error(f"FEC API key not configured: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="FEC API key not configured. Please set FEC_API_KEY in your .env file."
-        )
-
-
-def get_report_generator():
+def get_report_generator(fec_client: FECClient = Depends(get_fec_client)) -> ReportGenerator:
     """Get report generator instance"""
-    return ReportGenerator(get_fec_client())
-
-def get_analysis_service():
-    """Get analysis service instance"""
-    return AnalysisService(get_fec_client())
+    return ReportGenerator(fec_client)
 
 
 @router.get("/candidate/{candidate_id}")
 async def export_candidate(
     candidate_id: str,
     format: str = Query("pdf", regex="^(pdf|docx|md|csv|excel)$", description="Export format"),
-    cycle: Optional[int] = Query(None, description="Election cycle")
+    cycle: Optional[int] = Query(None, description="Election cycle"),
+    report_generator: ReportGenerator = Depends(get_report_generator)
 ):
     """Export candidate report in specified format"""
     try:
-        report_generator = get_report_generator()
         
         # Collect all candidate data
         data = await report_generator.collect_candidate_data(candidate_id, cycle=cycle)
@@ -129,8 +112,6 @@ async def export_race(request: RaceExportRequest):
         
         if not request.candidate_ids:
             raise HTTPException(status_code=400, detail="At least one candidate ID is required")
-        
-        report_generator = get_report_generator()
         
         # Collect race data
         data = await report_generator.collect_race_data(
@@ -214,11 +195,11 @@ async def export_contributions_csv(
     max_amount: Optional[float] = Query(None, description="Maximum amount"),
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
-    limit: int = Query(10000, ge=1, le=100000, description="Maximum results")
+    limit: int = Query(10000, ge=1, le=100000, description="Maximum results"),
+    fec_client: FECClient = Depends(get_fec_client)
 ):
     """Export contributions as CSV"""
     try:
-        fec_client = get_fec_client()
         contributions = await fec_client.get_contributions(
             candidate_id=candidate_id,
             committee_id=committee_id,
@@ -282,11 +263,11 @@ async def export_contributions_excel(
     max_amount: Optional[float] = Query(None, description="Maximum amount"),
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
-    limit: int = Query(10000, ge=1, le=100000, description="Maximum results")
+    limit: int = Query(10000, ge=1, le=100000, description="Maximum results"),
+    fec_client: FECClient = Depends(get_fec_client)
 ):
     """Export contributions as Excel"""
     try:
-        fec_client = get_fec_client()
         contributions = await fec_client.get_contributions(
             candidate_id=candidate_id,
             committee_id=committee_id,
@@ -371,11 +352,11 @@ async def export_out_of_state_contributions_csv(
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     cycle: Optional[int] = Query(None, description="Election cycle"),
-    limit: int = Query(10000, ge=1, le=100000, description="Maximum results")
+    limit: int = Query(10000, ge=1, le=100000, description="Maximum results"),
+    analysis_service: AnalysisService = Depends(get_analysis_service)
 ):
     """Export out-of-state contributions as CSV"""
     try:
-        analysis_service = get_analysis_service()
         contributions = await analysis_service.get_out_of_state_contributions(
             candidate_id=candidate_id,
             min_date=min_date,
@@ -433,11 +414,11 @@ async def export_out_of_state_donors_csv(
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     cycle: Optional[int] = Query(None, description="Election cycle"),
-    limit: int = Query(1000, ge=1, le=10000, description="Maximum results")
+    limit: int = Query(1000, ge=1, le=10000, description="Maximum results"),
+    analysis_service: AnalysisService = Depends(get_analysis_service)
 ):
     """Export aggregated out-of-state donors as CSV"""
     try:
-        analysis_service = get_analysis_service()
         donors = await analysis_service.get_aggregated_out_of_state_donors(
             candidate_id=candidate_id,
             min_date=min_date,

@@ -1,31 +1,15 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import Optional, List
 from app.services.fec_client import FECClient
 from app.models.schemas import Contribution, ContributionAnalysis, AggregatedDonor
 from app.services.analysis import AnalysisService
 from app.services.donor_aggregation import DonorAggregationService
+from app.api.dependencies import get_fec_client, get_analysis_service
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-def get_fec_client():
-    """Get FEC client instance"""
-    from app.services.container import get_service_container
-    try:
-        container = get_service_container()
-        return container.get_fec_client()
-    except ValueError as e:
-        logger.error(f"FEC API key not configured: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="FEC API key not configured. Please set FEC_API_KEY in your .env file."
-        )
-
-def get_analysis_service():
-    """Get analysis service instance"""
-    return AnalysisService(get_fec_client())
 
 
 @router.get("/", response_model=List[Contribution])
@@ -37,11 +21,11 @@ async def get_contributions(
     max_amount: Optional[float] = Query(None, description="Maximum contribution amount", ge=0),
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)", regex="^\\d{4}-\\d{2}-\\d{2}$"),
     max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)", regex="^\\d{4}-\\d{2}-\\d{2}$"),
-    limit: int = Query(100, ge=1, le=10000, description="Maximum results")
+    limit: int = Query(100, ge=1, le=10000, description="Maximum results"),
+    fec_client: FECClient = Depends(get_fec_client)
 ):
     """Get contributions"""
     try:
-        fec_client = get_fec_client()
         results = await fec_client.get_contributions(
             candidate_id=candidate_id,
             committee_id=committee_id,
@@ -103,7 +87,8 @@ async def get_contributions(
 @router.get("/unique-contributors")
 async def get_unique_contributors(
     search_term: str = Query(..., description="Search term for contributor name (e.g., 'Smith')", min_length=1, max_length=200),
-    limit: int = Query(100, ge=1, le=1000, description="Maximum results")
+    limit: int = Query(100, ge=1, le=1000, description="Maximum results"),
+    fec_client: FECClient = Depends(get_fec_client)
 ):
     """Get unique contributor names matching a search term"""
     # Validate and sanitize search term
@@ -344,11 +329,11 @@ async def get_aggregated_donors(
     max_amount: Optional[float] = Query(None, description="Maximum contribution amount"),
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
-    limit: int = Query(100, ge=1, le=1000, description="Maximum results")
+    limit: int = Query(100, ge=1, le=1000, description="Maximum results"),
+    fec_client: FECClient = Depends(get_fec_client)
 ):
     """Get aggregated donors (grouped by name variations)"""
     try:
-        fec_client = get_fec_client()
         # Fetch contributions using existing filters
         contributions = await fec_client.get_contributions(
             candidate_id=candidate_id,
@@ -438,11 +423,11 @@ async def analyze_contributions(
     committee_id: Optional[str] = Query(None, description="Committee ID"),
     min_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     max_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
-    cycle: Optional[int] = Query(None, description="Election cycle (two_year_transaction_period)")
+    cycle: Optional[int] = Query(None, description="Election cycle (two_year_transaction_period)"),
+    analysis_service: AnalysisService = Depends(get_analysis_service)
 ):
     """Analyze contributions with aggregations"""
     try:
-        analysis_service = get_analysis_service()
         analysis = await analysis_service.analyze_contributions(
             candidate_id=candidate_id,
             committee_id=committee_id,

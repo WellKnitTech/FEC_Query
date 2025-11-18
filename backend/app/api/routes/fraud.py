@@ -1,34 +1,13 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import Optional
-from app.services.fec_client import FECClient
 from app.models.schemas import FraudAnalysis
 from app.services.fraud_detection import FraudDetectionService
-from app.services.contribution_limits import ContributionLimitsService
-from app.db.database import get_db
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.api.dependencies import get_fraud_service
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-def get_fec_client():
-    """Get FEC client instance"""
-    from app.services.container import get_service_container
-    try:
-        container = get_service_container()
-        return container.get_fec_client()
-    except ValueError as e:
-        logger.error(f"FEC API key not configured: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="FEC API key not configured. Please set FEC_API_KEY in your .env file."
-        )
-
-async def get_fraud_service(db: AsyncSession = Depends(get_db)):
-    """Get fraud detection service instance with contribution limits service"""
-    limits_service = ContributionLimitsService(db)
-    return FraudDetectionService(get_fec_client(), limits_service=limits_service)
 
 
 @router.get("/analyze", response_model=FraudAnalysis)
