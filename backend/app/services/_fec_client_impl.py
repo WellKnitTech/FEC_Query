@@ -1124,7 +1124,8 @@ class FECClient:
         max_date: Optional[str] = None,
         limit: int = 100,
         two_year_transaction_period: Optional[int] = None,
-        fetch_new_only: bool = True
+        fetch_new_only: bool = True,
+        fetch_all: bool = False
     ) -> List[Dict]:
         """Get contributions/schedules/schedule_a - queries local DB first, falls back to API for new data only"""
         local_data = []
@@ -1371,7 +1372,7 @@ class FECClient:
                             "sort": "-contribution_receipt_date",
                             "committee_id": comm_id,
                             "two_year_transaction_period": two_year_transaction_period,
-                            "_original_limit": limit  # Store original limit for pagination
+                            "_original_limit": None if fetch_all else limit  # None = fetch all pages
                         }
                         if contributor_name:
                             params["contributor_name"] = contributor_name
@@ -1408,8 +1409,8 @@ class FECClient:
                                     existing_ids.add(contrib_id)
                             
                             # Continue querying committees until we have enough contributions
-                            # Don't break early - we want to get all contributions across all committees
-                            if len(all_contributions) >= limit * 2:  # Get extra to account for duplicates
+                            # If fetch_all is False, stop when we have enough
+                            if not fetch_all and len(all_contributions) >= limit * 2:  # Get extra to account for duplicates
                                 logger.debug(f"Collected {len(all_contributions)} contributions, stopping committee queries")
                                 break
                         except Exception:
@@ -1436,6 +1437,9 @@ class FECClient:
                 
                 new_count = len(all_contributions) - len(local_data) if local_data else len(all_contributions)
                 logger.info(f"Returning {len(all_contributions)} total contributions ({len(local_data)} from DB, {new_count} new from API)")
+                # Only apply limit if fetch_all is False
+                if fetch_all:
+                    return all_contributions
                 return all_contributions[:limit]
             else:
                 # No committees found, try with two_year_transaction_period
@@ -1460,7 +1464,7 @@ class FECClient:
             params = {
                 "per_page": 100,  # FEC API max is 100, pagination will handle more
                 "sort": "-contribution_receipt_date",
-                "_original_limit": limit  # Store original limit for pagination
+                "_original_limit": None if fetch_all else limit  # None = fetch all pages
             }
             
             # Always add two_year_transaction_period if not provided (must be even year)
@@ -1555,6 +1559,9 @@ class FECClient:
             )
             
             logger.info(f"Returning {len(all_results)} total contributions ({len(local_data)} from DB, {len(api_results)} new from API)")
+            # Only apply limit if fetch_all is False
+            if fetch_all:
+                return all_results
             return all_results[:limit]
         except Exception as e:
             logger.error(f"API fallback failed for contributions: {e}")

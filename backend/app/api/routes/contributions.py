@@ -14,12 +14,13 @@ Endpoints:
 All endpoints support filtering by candidate_id, committee_id, date ranges, and amounts.
 """
 from fastapi import APIRouter, HTTPException, Query, Depends
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import asyncio
 from app.services.fec_client import FECClient
 from app.models.schemas import Contribution, ContributionAnalysis, AggregatedDonor
 from app.services.analysis import AnalysisService
 from app.services.donor_aggregation import DonorAggregationService
+from app.services.contribution_fetcher import ContributionFetcherService
 from app.api.dependencies import get_fec_client, get_analysis_service
 from app.utils.field_mapping import map_contribution_fields, map_contribution_for_aggregation
 import logging
@@ -418,4 +419,53 @@ async def analyze_contributions(
     except Exception as e:
         logger.error(f"Error analyzing contributions: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to analyze contributions: {str(e)}")
+
+
+@router.post("/fetch-from-api")
+async def fetch_contributions_from_api(
+    candidate_id: Optional[str] = Query(None, description="Candidate ID"),
+    committee_id: Optional[str] = Query(None, description="Committee ID"),
+    cycle: Optional[int] = Query(None, description="Election cycle"),
+    fec_client: FECClient = Depends(get_fec_client),
+    analysis_service: AnalysisService = Depends(get_analysis_service)
+) -> Dict[str, Any]:
+    """
+    Fetch all contributions from FEC API and store them in the database.
+    After storing, automatically reruns contribution analysis.
+    
+    Returns:
+        Dictionary with fetch results and updated analysis
+    """
+    if not candidate_id and not committee_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Either candidate_id or committee_id must be provided"
+        )
+    
+    try:
+        # Create fetcher service
+        fetcher = ContributionFetcherService(fec_client, analysis_service)
+        
+        # Fetch and store contributions, then rerun analysis
+        result = await fetcher.fetch_and_store(
+            candidate_id=candidate_id,
+            committee_id=committee_id,
+            cycle=cycle
+        )
+        
+        return {
+            "success": True,
+            "fetched_count": result["fetched_count"],
+            "stored_count": result["stored_count"],
+            "message": f"Fetched {result['fetched_count']} contributions, stored {result['stored_count']} new records",
+            "analysis": result["analysis"]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching contributions from API: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch contributions from API: {str(e)}"
+        )
 
