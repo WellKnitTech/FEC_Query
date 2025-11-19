@@ -2,8 +2,9 @@
 Database connection pool management utilities
 """
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.engine import Engine
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +14,11 @@ class DatabasePoolManager:
     Manages database connection pool and provides utilities for connection handling
     """
     
-    def __init__(self, session_factory: Optional[async_sessionmaker] = None, engine_instance=None):
+    def __init__(
+        self, 
+        session_factory: Optional[async_sessionmaker] = None, 
+        engine_instance: Optional[Engine] = None
+    ) -> None:
         """
         Initialize database pool manager
         
@@ -62,7 +67,7 @@ class DatabasePoolManager:
         """
         return self.session_factory()
     
-    async def health_check(self) -> dict:
+    async def health_check(self) -> Dict[str, Any]:
         """
         Perform a health check on the database pool
         
@@ -81,13 +86,31 @@ class DatabasePoolManager:
             pool_size = self.get_pool_size()
             checked_out = self.get_checked_out_connections()
             overflow = self.get_overflow_connections()
+            available = (pool_size - checked_out) if pool_size and checked_out else None
+            
+            # Log warning if pool is getting exhausted
+            if pool_size and checked_out:
+                utilization = (checked_out / pool_size) * 100 if pool_size > 0 else 0
+                if utilization > 80:
+                    logger.warning(
+                        f"Database pool utilization high: {utilization:.1f}% "
+                        f"({checked_out}/{pool_size} connections in use)"
+                    )
+                elif utilization > 60:
+                    logger.debug(
+                        f"Database pool utilization: {utilization:.1f}% "
+                        f"({checked_out}/{pool_size} connections in use)"
+                    )
             
             return {
                 "status": "healthy",
                 "pool_size": pool_size,
                 "checked_out": checked_out,
                 "overflow": overflow,
-                "available": (pool_size - checked_out) if pool_size and checked_out else None
+                "available": available,
+                "utilization_percent": (
+                    (checked_out / pool_size * 100) if pool_size and checked_out else None
+                )
             }
         except Exception as e:
             logger.error(f"Database pool health check failed: {e}")
@@ -95,6 +118,20 @@ class DatabasePoolManager:
                 "status": "unhealthy",
                 "error": str(e)
             }
+    
+    def log_pool_stats(self) -> None:
+        """Log current pool statistics for monitoring"""
+        pool_size = self.get_pool_size()
+        checked_out = self.get_checked_out_connections()
+        overflow = self.get_overflow_connections()
+        
+        if pool_size:
+            utilization = (checked_out / pool_size * 100) if checked_out else 0
+            logger.info(
+                f"Database pool stats: size={pool_size}, "
+                f"checked_out={checked_out}, overflow={overflow}, "
+                f"utilization={utilization:.1f}%"
+            )
 
 
 # Global instance

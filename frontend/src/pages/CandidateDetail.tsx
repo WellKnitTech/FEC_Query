@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useMemo, lazy, Suspense } from 'react';
 import { useParams } from 'react-router-dom';
 import { candidateApi } from '../services/api';
-import { formatDateTime } from '../utils/dateUtils';
+import { formatDateTime, cycleToDateRange, formatCycleRange, formatDate } from '../utils/dateUtils';
 import { useCandidateData } from '../hooks/useCandidateData';
 import { useFinancialData } from '../hooks/useFinancialData';
 import { useCycleSelector } from '../hooks/useCycleSelector';
@@ -9,17 +9,20 @@ import { CandidateContextProvider } from '../contexts/CandidateContext';
 import FinancialSummary from '../components/FinancialSummary';
 import DonorStateAnalysis from '../components/DonorStateAnalysis';
 import ContributionAnalysis from '../components/ContributionAnalysis';
-import NetworkGraph from '../components/NetworkGraph';
-import FraudAlerts from '../components/FraudAlerts';
-import ExpenditureBreakdown from '../components/ExpenditureBreakdown';
-import EmployerTreemap from '../components/EmployerTreemap';
-import ContributionVelocity from '../components/ContributionVelocity';
-import CumulativeChart from '../components/CumulativeChart';
-import FraudRadarChart from '../components/FraudRadarChart';
-import SmurfingScatter from '../components/SmurfingScatter';
 import ExportButton from '../components/ExportButton';
 import LoadingState from '../components/candidate/LoadingState';
 import ErrorState from '../components/candidate/ErrorState';
+import ErrorBoundary from '../components/candidate/ErrorBoundary';
+
+// Lazy load heavy visualization components
+const NetworkGraph = lazy(() => import('../components/NetworkGraph'));
+const FraudAlerts = lazy(() => import('../components/FraudAlerts'));
+const ExpenditureBreakdown = lazy(() => import('../components/ExpenditureBreakdown'));
+const EmployerTreemap = lazy(() => import('../components/EmployerTreemap'));
+const ContributionVelocity = lazy(() => import('../components/ContributionVelocity'));
+const CumulativeChart = lazy(() => import('../components/CumulativeChart'));
+const FraudRadarChart = lazy(() => import('../components/FraudRadarChart'));
+const SmurfingScatter = lazy(() => import('../components/SmurfingScatter'));
 
 function CandidateDetailContent() {
   const { candidateId } = useParams<{ candidateId: string }>();
@@ -33,11 +36,19 @@ function CandidateDetailContent() {
   );
 
   // Manage cycle selection - start with latest cycle if available
-  const { selectedCycle, setCycle } = useCycleSelector({
+  const { selectedCycle, setCycle, hasMultipleCycles } = useCycleSelector({
     financials,
     initialCycle: latestFinancial?.cycle,
     onCycleChange: undefined, // Cycle changes will update context via FinancialSummary's onCycleChange
   });
+
+  // Calculate date range from selected cycle
+  const cycleDateRange = useMemo(() => {
+    if (selectedCycle) {
+      return cycleToDateRange(selectedCycle);
+    }
+    return { minDate: undefined, maxDate: undefined };
+  }, [selectedCycle]);
 
   const handleRefreshContactInfo = async () => {
     if (!candidateId) return;
@@ -181,24 +192,126 @@ function CandidateDetailContent() {
         selectedFinancial={selectedFinancial}
         availableCycles={availableCycles}
       >
+        {/* Cycle Indicator Banner */}
+        {selectedCycle && (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div className="flex flex-col gap-1">
+                <div className="text-sm font-medium text-blue-900">Election Cycle</div>
+                <div className="text-xl font-bold text-blue-900">
+                  Cycle {selectedCycle}
+                </div>
+                {cycleDateRange.minDate && cycleDateRange.maxDate && (
+                  <div className="text-sm text-blue-700">
+                    {formatDate(cycleDateRange.minDate)} - {formatDate(cycleDateRange.maxDate)}
+                  </div>
+                )}
+              </div>
+              {hasMultipleCycles && availableCycles.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <label htmlFor="page-cycle-select" className="text-sm font-medium text-blue-900">
+                    Switch Cycle:
+                  </label>
+                  <select
+                    id="page-cycle-select"
+                    value={selectedCycle}
+                    onChange={(e) => {
+                      const newCycle = e.target.value ? parseInt(e.target.value, 10) : undefined;
+                      setCycle(newCycle);
+                    }}
+                    className="px-3 py-2 border border-blue-300 rounded-md text-sm bg-white text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  >
+                    {availableCycles.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="space-y-6">
-          <FinancialSummary 
-            candidateId={candidateId!} 
-            cycle={selectedCycle} 
-            onCycleChange={(newCycle) => {
-              setCycle(newCycle);
-            }} 
-          />
-          <DonorStateAnalysis candidateId={candidateId} candidate={candidate} cycle={selectedCycle} />
-          <ContributionAnalysis candidateId={candidateId} cycle={selectedCycle} />
-          <CumulativeChart candidateId={candidateId} cycle={selectedCycle} />
-          <ContributionVelocity candidateId={candidateId} cycle={selectedCycle} />
-          <EmployerTreemap candidateId={candidateId} cycle={selectedCycle} />
-          <ExpenditureBreakdown candidateId={candidateId} cycle={selectedCycle} />
-          <NetworkGraph candidateId={candidateId!} />
-          <FraudRadarChart candidateId={candidateId!} />
-          <SmurfingScatter candidateId={candidateId} />
-          <FraudAlerts candidateId={candidateId!} />
+          {/* Critical components - load immediately with error boundaries */}
+          <ErrorBoundary>
+            <FinancialSummary 
+              candidateId={candidateId!} 
+              cycle={selectedCycle} 
+              onCycleChange={(newCycle) => {
+                setCycle(newCycle);
+              }} 
+            />
+          </ErrorBoundary>
+          <ErrorBoundary>
+            <DonorStateAnalysis candidateId={candidateId} candidate={candidate} cycle={selectedCycle} />
+          </ErrorBoundary>
+          <ErrorBoundary>
+            <ContributionAnalysis candidateId={candidateId} cycle={selectedCycle} />
+          </ErrorBoundary>
+          
+          {/* Deferred visualizations - lazy loaded with suspense and error boundaries */}
+          {selectedCycle && (
+            <>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <CumulativeChart candidateId={candidateId} cycle={selectedCycle} />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <ContributionVelocity candidateId={candidateId} cycle={selectedCycle} />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <EmployerTreemap candidateId={candidateId} cycle={selectedCycle} />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <ExpenditureBreakdown candidateId={candidateId} cycle={selectedCycle} />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-96 bg-gray-200 rounded"></div></div></div>}>
+                  <NetworkGraph 
+                    candidateId={candidateId!} 
+                    minDate={cycleDateRange.minDate}
+                    maxDate={cycleDateRange.maxDate}
+                  />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <FraudRadarChart 
+                    candidateId={candidateId!} 
+                    minDate={cycleDateRange.minDate}
+                    maxDate={cycleDateRange.maxDate}
+                  />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <SmurfingScatter 
+                    candidateId={candidateId} 
+                    minDate={cycleDateRange.minDate}
+                    maxDate={cycleDateRange.maxDate}
+                  />
+                </Suspense>
+              </ErrorBoundary>
+              <ErrorBoundary>
+                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                  <FraudAlerts 
+                    candidateId={candidateId!} 
+                    minDate={cycleDateRange.minDate}
+                    maxDate={cycleDateRange.maxDate}
+                  />
+                </Suspense>
+              </ErrorBoundary>
+            </>
+          )}
         </div>
       </CandidateContextProvider>
     </div>

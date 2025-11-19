@@ -67,6 +67,10 @@ export interface Contribution {
 }
 
 export interface ContributionAnalysis {
+  data_completeness?: number | null;  // Percentage of total contributions in local DB (0-100)
+  total_from_api?: number | null;  // Total contributions from FEC API for comparison
+  warning_message?: string | null;  // Warning when financial totals show contributions but records are missing
+  using_financial_totals_fallback?: boolean;  // True when using financial totals as estimate
   total_contributions: number;
   total_contributors: number;
   average_contribution: number;
@@ -238,6 +242,24 @@ export const contributionApi = {
     const response = await api.get('/api/contributions/analysis', { params, ...createRequestConfig(signal) });
     return response.data;
   },
+
+  fetchFromApi: async (params: {
+    candidate_id?: string;
+    committee_id?: string;
+    cycle?: number;
+  }, signal?: AbortSignal): Promise<{
+    success: boolean;
+    fetched_count: number;
+    stored_count: number;
+    message: string;
+    analysis: ContributionAnalysis;
+  }> => {
+    const response = await api.post('/api/contributions/fetch-from-api', null, {
+      params,
+      ...createRequestConfig(signal),
+    });
+    return response.data;
+  },
 };
 
 export interface ExpenditureBreakdown {
@@ -262,6 +284,13 @@ export interface ContributionVelocity {
   velocity_by_week: Record<string, number>;
   peak_days: Array<{ date: string; amount: number; count: number }>;
   average_daily_velocity: number;
+}
+
+export interface CumulativeTotals {
+  totals_by_date: Record<string, number>;
+  total_amount: number;
+  first_date?: string;
+  last_date?: string;
 }
 
 export interface DonorStateAnalysis {
@@ -342,6 +371,17 @@ export const analysisApi = {
     aggregate?: boolean;
   }, signal?: AbortSignal): Promise<Contribution[] | AggregatedDonor[]> => {
     const response = await api.get('/api/analysis/donor-states/out-of-state-contributions', { params, ...createRequestConfig(signal) });
+    return response.data;
+  },
+
+  getCumulativeTotals: async (params: {
+    candidate_id?: string;
+    committee_id?: string;
+    min_date?: string;
+    max_date?: string;
+    cycle?: number;
+  }, signal?: AbortSignal): Promise<CumulativeTotals> => {
+    const response = await api.get('/api/analysis/cumulative-totals', { params, ...createRequestConfig(signal) });
     return response.data;
   },
 };

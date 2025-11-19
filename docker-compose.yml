@@ -11,10 +11,13 @@ services:
       - FEC_API_KEY=${FEC_API_KEY}
       - DATABASE_URL=sqlite+aiosqlite:///./fec_data.db
       - CORS_ORIGINS=http://localhost:3000
+      - UVICORN_WORKERS=${UVICORN_WORKERS:-2}
+      - THREAD_POOL_WORKERS=${THREAD_POOL_WORKERS:-4}
     volumes:
       - ./backend:/app
       - backend_data:/app/data
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: >
+      sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --workers $${UVICORN_WORKERS:-2}"
 
   frontend:
     build:

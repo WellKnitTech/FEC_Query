@@ -216,7 +216,14 @@ export default function SmurfingScatter({
 
   return (
     <div className="bg-white rounded-lg shadow p-6">
-      <h2 className="text-xl font-semibold mb-4">Smurfing Detection Visualization</h2>
+      <div className="mb-4">
+        <h2 className="text-xl font-semibold">Smurfing Detection Visualization</h2>
+        {minDate && maxDate && (
+          <p className="text-sm text-gray-500 mt-1">
+            Date Range: {formatDate(minDate)} - {formatDate(maxDate)}
+          </p>
+        )}
+      </div>
       <div className="mb-4">
         <div className="grid grid-cols-3 gap-4 mb-4">
           <div>

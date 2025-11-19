@@ -6,7 +6,7 @@ import os
 import logging
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
-from app.api.dependencies import get_fec_api_key, get_fec_api_base_url
+from app.utils.api_config import get_fec_api_key, get_fec_api_base_url
 from app.db.database import (
     AsyncSessionLocal, Contribution, BulkDataMetadata,
     Candidate, Committee, FinancialTotal

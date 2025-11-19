@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
-import { contributionApi, Contribution } from '../services/api';
+import { analysisApi, CumulativeTotals } from '../services/api';
 import { Line } from 'react-chartjs-2';
-import { getDateTimestamp } from '../utils/dateUtils';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -11,6 +10,7 @@ import {
   Title,
   Tooltip,
   Legend,
+  Filler,
 } from 'chart.js';
 
 ChartJS.register(
@@ -20,7 +20,8 @@ ChartJS.register(
   LineElement,
   Title,
   Tooltip,
-  Legend
+  Legend,
+  Filler
 );
 
 import AnalysisSection from './candidate/AnalysisSection';
@@ -41,53 +42,71 @@ export default function CumulativeChart({
   maxDate,
   cycle,
 }: CumulativeChartProps) {
-  const [contributions, setContributions] = useState<Contribution[]>([]);
+  const [cumulativeTotals, setCumulativeTotals] = useState<CumulativeTotals | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const fetchContributions = async () => {
+    if (!candidateId && !committeeId) {
+      return;
+    }
+
+    const abortController = new AbortController();
+    
+    const fetchTotals = async () => {
       setLoading(true);
       setError(null);
       try {
-        const data = await contributionApi.get({
+        const data = await analysisApi.getCumulativeTotals({
           candidate_id: candidateId,
           committee_id: committeeId,
           min_date: minDate,
           max_date: maxDate,
-          limit: 10000,
-        });
-        setContributions(data);
+          cycle: cycle,
+        }, abortController.signal);
+        if (!abortController.signal.aborted) {
+          setCumulativeTotals(data);
+        }
       } catch (err: any) {
-        const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contributions';
-        setError(errorMessage);
-        console.error('Error loading contributions:', err);
+        // Don't set error if request was aborted
+        if (err.name === 'AbortError' || abortController.signal.aborted) {
+          return;
+        }
+        const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load cumulative totals';
+        if (!abortController.signal.aborted) {
+          setError(errorMessage);
+          console.error('Error loading cumulative totals:', err);
+        }
       } finally {
-        setLoading(false);
+        if (!abortController.signal.aborted) {
+          setLoading(false);
+        }
       }
     };
 
-    if (candidateId || committeeId) {
-      fetchContributions();
-    }
+    fetchTotals();
+    
+    return () => {
+      abortController.abort();
+    };
   }, [candidateId, committeeId, minDate, maxDate, cycle]);
 
   const refresh = async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await contributionApi.get({
+      const data = await analysisApi.getCumulativeTotals({
         candidate_id: candidateId,
         committee_id: committeeId,
         min_date: minDate,
         max_date: maxDate,
-        limit: 10000,
+        cycle: cycle,
       });
-      setContributions(data);
+      setCumulativeTotals(data);
     } catch (err: any) {
-      const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contributions';
+      const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load cumulative totals';
       setError(errorMessage);
-      console.error('Error loading contributions:', err);
+      console.error('Error loading cumulative totals:', err);
     } finally {
       setLoading(false);
     }
@@ -100,38 +119,12 @@ export default function CumulativeChart({
       error={error}
       onRetry={refresh}
     >
-      {contributions.length === 0 ? (
+      {!cumulativeTotals || Object.keys(cumulativeTotals.totals_by_date).length === 0 ? (
         <p className="text-gray-600">No contribution data available</p>
       ) : (() => {
-        // Sort contributions by date
-        const sortedContributions = [...contributions].sort((a, b) => {
-          const dateA = getDateTimestamp(a.contribution_date);
-          const dateB = getDateTimestamp(b.contribution_date);
-          return dateA - dateB;
-        });
-
-        // Calculate cumulative totals
-        let cumulativeTotal = 0;
-        const cumulativeData: { date: string; total: number }[] = [];
-
-        for (const contrib of sortedContributions) {
-          if (contrib.contribution_date) {
-            cumulativeTotal += contrib.contribution_amount || 0;
-            cumulativeData.push({
-              date: contrib.contribution_date,
-              total: cumulativeTotal,
-            });
-          }
-        }
-
-        // Group by date to avoid duplicate dates
-        const dateMap = new Map<string, number>();
-        for (const item of cumulativeData) {
-          dateMap.set(item.date, item.total);
-        }
-
-        const labels = Array.from(dateMap.keys()).sort();
-        const data = labels.map((date) => dateMap.get(date) || 0);
+        // Use pre-aggregated data from backend
+        const labels = Object.keys(cumulativeTotals.totals_by_date).sort();
+        const data = labels.map((date) => cumulativeTotals.totals_by_date[date] || 0);
 
         const chartData = {
           labels: labels,
@@ -147,9 +140,9 @@ export default function CumulativeChart({
           ],
         };
 
-        const totalAmount = cumulativeTotal;
-        const firstDate = labels[0] || 'N/A';
-        const lastDate = labels[labels.length - 1] || 'N/A';
+        const totalAmount = cumulativeTotals.total_amount;
+        const firstDate = cumulativeTotals.first_date || labels[0] || 'N/A';
+        const lastDate = cumulativeTotals.last_date || labels[labels.length - 1] || 'N/A';
 
         return (
           <>
@@ -176,7 +169,8 @@ export default function CumulativeChart({
                   tooltip: {
                     callbacks: {
                       label: (context) => {
-                        return `Total: $${context.parsed.y.toLocaleString()}`;
+                        const value = context.parsed.y ?? 0;
+                        return `Total: $${value.toLocaleString()}`;
                       },
                     },
                   },

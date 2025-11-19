@@ -62,6 +62,8 @@ class ContributionAnalysis(BaseModel):
     contributions_by_state: Dict[str, float]
     top_donors: List[Dict[str, Any]]
     contribution_distribution: Dict[str, int]
+    data_completeness: Optional[float] = None  # Percentage of total contributions in local DB (0-100)
+    total_from_api: Optional[float] = None  # Total contributions from FEC API for comparison
 
 
 class Expenditure(BaseModel):
@@ -141,6 +143,14 @@ class ContributionVelocity(BaseModel):
     velocity_by_week: Dict[str, float]  # contributions per week
     peak_days: List[Dict[str, Any]]
     average_daily_velocity: float
+
+
+class CumulativeTotals(BaseModel):
+    """Cumulative contribution totals aggregated by date"""
+    totals_by_date: Dict[str, float]  # Date -> cumulative total
+    total_amount: float
+    first_date: Optional[str] = None
+    last_date: Optional[str] = None
 
 
 class IndependentExpenditure(BaseModel):

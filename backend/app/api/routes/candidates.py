@@ -1,32 +1,16 @@
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body, Depends
 from typing import Optional, List, Dict
 import asyncio
 from app.services.fec_client import FECClient
 from app.models.schemas import CandidateSummary, FinancialSummary, BatchFinancialsRequest, ContactInformation
 from app.services.analysis import AnalysisService
+from app.api.dependencies import get_fec_client, get_analysis_service
 from app.utils.date_utils import serialize_datetime
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-def get_fec_client():
-    """Get FEC client instance"""
-    from app.services.container import get_service_container
-    try:
-        container = get_service_container()
-        return container.get_fec_client()
-    except ValueError as e:
-        logger.error(f"FEC API key not configured: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="FEC API key not configured. Please set FEC_API_KEY in your .env file."
-        )
-
-def get_analysis_service():
-    """Get analysis service instance"""
-    return AnalysisService(get_fec_client())
 
 
 def extract_candidate_contact_info(candidate: Dict) -> Optional[ContactInformation]:
@@ -38,8 +22,30 @@ def extract_candidate_contact_info(candidate: Dict) -> Optional[ContactInformati
     
     Matches the extraction logic in fec_client._extract_candidate_contact_info()
     """
+    # If candidate already has a contact_info dict (from local DB with processed data), use it
+    if isinstance(candidate.get("contact_info"), dict):
+        contact_dict = candidate.get("contact_info")
+        if any([
+            contact_dict.get("street_address"),
+            contact_dict.get("city"),
+            contact_dict.get("zip"),
+            contact_dict.get("email"),
+            contact_dict.get("phone"),
+            contact_dict.get("website")
+        ]):
+            return ContactInformation(
+                street_address=contact_dict.get("street_address"),
+                city=contact_dict.get("city"),
+                state=contact_dict.get("state"),
+                zip=contact_dict.get("zip"),
+                email=contact_dict.get("email"),
+                phone=contact_dict.get("phone"),
+                website=contact_dict.get("website")
+            )
+    
     # Try multiple field name variations to find contact info
     # This matches the logic in fec_client._extract_candidate_contact_info()
+    # First check direct fields (from local DB), then check API field variations
     extracted_contact = {
         "street_address": (
             candidate.get("street_address") or
@@ -49,7 +55,9 @@ def extract_candidate_contact_info(candidate: Dict) -> Optional[ContactInformati
             candidate.get("street_1") or
             candidate.get("address") or
             candidate.get("principal_committee_street") or
-            candidate.get("candidate_street_1")
+            candidate.get("candidate_street_1") or
+            candidate.get("street_address_1") or
+            candidate.get("street_address_2")
         ),
         "city": (
             candidate.get("city") or
@@ -73,14 +81,16 @@ def extract_candidate_contact_info(candidate: Dict) -> Optional[ContactInformati
             candidate.get("email") or
             candidate.get("principal_committee_email") or
             candidate.get("candidate_email") or
-            candidate.get("e_mail")
+            candidate.get("e_mail") or
+            candidate.get("email_address")
         ),
         "phone": (
             candidate.get("phone") or
             candidate.get("principal_committee_phone") or
             candidate.get("telephone") or
             candidate.get("candidate_phone") or
-            candidate.get("phone_number")
+            candidate.get("phone_number") or
+            candidate.get("phone_1")
         ),
         "website": (
             candidate.get("website") or
@@ -88,19 +98,22 @@ def extract_candidate_contact_info(candidate: Dict) -> Optional[ContactInformati
             candidate.get("web_site") or
             candidate.get("url") or
             candidate.get("candidate_website") or
-            candidate.get("web_url")
+            candidate.get("web_url") or
+            candidate.get("website_url")
         )
     }
     
-    # Only create ContactInformation if at least one field is present
-    if any([
+    # Only create ContactInformation if at least one field is present and not empty
+    has_contact_info = any([
         extracted_contact.get("street_address"),
         extracted_contact.get("city"),
         extracted_contact.get("zip"),
         extracted_contact.get("email"),
         extracted_contact.get("phone"),
         extracted_contact.get("website")
-    ]):
+    ])
+    
+    if has_contact_info:
         return ContactInformation(
             street_address=extracted_contact.get("street_address"),
             city=extracted_contact.get("city"),
@@ -121,11 +134,11 @@ async def search_candidates(
     state: Optional[str] = Query(None, description="State abbreviation"),
     party: Optional[str] = Query(None, description="Party"),
     year: Optional[int] = Query(None, description="Election year"),
-    limit: int = Query(20, ge=1, le=100, description="Maximum results")
+    limit: int = Query(20, ge=1, le=100, description="Maximum results"),
+    fec_client: FECClient = Depends(get_fec_client)
 ):
     """Search for candidates"""
     try:
-        fec_client = get_fec_client()
         results = await fec_client.search_candidates(
             name=name,
             office=office,
@@ -173,11 +186,11 @@ async def get_race_candidates(
     state: str = Query(..., description="State abbreviation (e.g., TX)"),
     district: Optional[str] = Query(None, description="District number (for House races)"),
     year: Optional[int] = Query(None, description="Election year"),
-    limit: int = Query(100, ge=1, le=200, description="Maximum results")
+    limit: int = Query(100, ge=1, le=200, description="Maximum results"),
+    fec_client: FECClient = Depends(get_fec_client)
 ):
     """Get all candidates for a specific race"""
     try:
-        fec_client = get_fec_client()
         results = await fec_client.get_race_candidates(
             office=office,
             state=state,
@@ -219,10 +232,12 @@ async def get_race_candidates(
 
 
 @router.get("/{candidate_id}", response_model=CandidateSummary)
-async def get_candidate(candidate_id: str):
+async def get_candidate(
+    candidate_id: str,
+    fec_client: FECClient = Depends(get_fec_client)
+):
     """Get candidate details by ID"""
     try:
-        fec_client = get_fec_client()
         candidate = await fec_client.get_candidate(candidate_id)
         if not candidate:
             raise HTTPException(status_code=404, detail="Candidate not found")
@@ -283,13 +298,14 @@ async def get_candidate(candidate_id: str):
 
 
 @router.get("/{candidate_id}/debug-contact")
-async def debug_candidate_contact_info(candidate_id: str):
+async def debug_candidate_contact_info(
+    candidate_id: str,
+    fec_client: FECClient = Depends(get_fec_client)
+):
     """Debug endpoint to inspect contact information sources"""
     try:
         from app.db.database import AsyncSessionLocal, Candidate
         from sqlalchemy import select
-        
-        fec_client = get_fec_client()
         
         # Get candidate from database
         db_contact_info = None
@@ -362,10 +378,12 @@ async def debug_candidate_contact_info(candidate_id: str):
 
 
 @router.post("/{candidate_id}/refresh-contact-info")
-async def refresh_candidate_contact_info(candidate_id: str):
+async def refresh_candidate_contact_info(
+    candidate_id: str,
+    fec_client: FECClient = Depends(get_fec_client)
+):
     """Manually refresh contact information for a candidate from the FEC API"""
     try:
-        fec_client = get_fec_client()
         # Force refresh by bypassing the cache and missing-only check
         refreshed = await fec_client.refresh_candidate_contact_info_if_needed(
             candidate_id,
@@ -402,11 +420,11 @@ async def refresh_candidate_contact_info(candidate_id: str):
 @router.get("/{candidate_id}/financials", response_model=List[FinancialSummary])
 async def get_candidate_financials(
     candidate_id: str,
-    cycle: Optional[int] = Query(None, description="Election cycle")
+    cycle: Optional[int] = Query(None, description="Election cycle"),
+    fec_client: FECClient = Depends(get_fec_client)
 ):
     """Get candidate financial summary"""
     try:
-        fec_client = get_fec_client()
         totals = await fec_client.get_candidate_totals(candidate_id, cycle=cycle)
         
         # Map API response to our schema
@@ -460,10 +478,12 @@ async def get_candidate_financials(
 
 
 @router.post("/financials/batch")
-async def get_batch_financials(request: BatchFinancialsRequest):
+async def get_batch_financials(
+    request: BatchFinancialsRequest,
+    fec_client: FECClient = Depends(get_fec_client)
+):
     """Get financial summaries for multiple candidates in one request"""
     try:
-        fec_client = get_fec_client()
         
         # Limit batch size to prevent abuse
         max_batch_size = 50

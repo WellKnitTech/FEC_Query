@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
-import { fraudApi, FraudAnalysis } from '../services/api';
+import { useFraudAnalysis } from '../hooks/useFraudAnalysis';
 import { Radar } from 'react-chartjs-2';
+import { formatDate } from '../utils/dateUtils';
 import {
   Chart as ChartJS,
   RadialLinearScale,
@@ -27,30 +27,8 @@ interface FraudRadarChartProps {
 }
 
 export default function FraudRadarChart({ candidateId, minDate, maxDate }: FraudRadarChartProps) {
-  const [analysis, setAnalysis] = useState<FraudAnalysis | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const fetchAnalysis = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const data = await fraudApi.analyze(candidateId, minDate, maxDate);
-        setAnalysis(data);
-      } catch (err: any) {
-        const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load fraud analysis';
-        setError(errorMessage);
-        console.error('Error loading fraud analysis:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    if (candidateId) {
-      fetchAnalysis();
-    }
-  }, [candidateId, minDate, maxDate]);
+  // Use shared hook - default to aggregation=false for radar chart (uses standard analysis)
+  const { analysis, loading, error } = useFraudAnalysis(candidateId, minDate, maxDate, false);
 
   if (loading) {
     return (
@@ -159,7 +137,14 @@ export default function FraudRadarChart({ candidateId, minDate, maxDate }: Fraud
 
   return (
     <div className="bg-white rounded-lg shadow p-6">
-      <h2 className="text-xl font-semibold mb-4">Fraud Pattern Analysis</h2>
+      <div className="mb-4">
+        <h2 className="text-xl font-semibold">Fraud Pattern Analysis</h2>
+        {minDate && maxDate && (
+          <p className="text-sm text-gray-500 mt-1">
+            Date Range: {formatDate(minDate)} - {formatDate(maxDate)}
+          </p>
+        )}
+      </div>
       <div className="mb-4">
         <div className="grid grid-cols-3 gap-4 mb-4">
           <div>

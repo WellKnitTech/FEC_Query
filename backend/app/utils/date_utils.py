@@ -401,3 +401,22 @@ def extract_and_serialize_date_from_raw_data(raw_data: Optional[Dict[str, Any]])
     date_obj = extract_date_from_raw_data(raw_data)
     return serialize_date(date_obj)
 
+
+def cycle_to_date_range(cycle: int) -> Dict[str, str]:
+    """
+    Convert an FEC election cycle to a date range.
+    
+    FEC cycles: For cycle YYYY, the cycle includes contributions from (YYYY-1)-01-01 to YYYY-12-31
+    Example: Cycle 2026 includes contributions from 2025-01-01 through 2026-12-31
+    
+    Args:
+        cycle: Election cycle year (e.g., 2026)
+        
+    Returns:
+        Dictionary with 'min_date' and 'max_date' in YYYY-MM-DD format
+    """
+    cycle_year = cycle
+    min_date = f"{cycle_year - 1}-01-01"
+    max_date = f"{cycle_year}-12-31"
+    return {"min_date": min_date, "max_date": max_date}
+

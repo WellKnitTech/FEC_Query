@@ -189,8 +189,16 @@ class APIClient:
                             except Exception:
                                 pass
                             raise FECAPIError(error_detail, status_code=e.response.status_code) from e
-                    except httpx.RequestError as e:
-                        raise FECAPIError(f"Failed to connect to FEC API: {str(e)}") from e
+                    except (httpx.RequestError, httpx.TimeoutException) as e:
+                        last_exception = e
+                        # Retry on network errors (transient)
+                        if attempt < max_retries - 1:
+                            wait_time = 0.5 * (2 ** attempt)  # Exponential backoff for network errors
+                            logger.debug(f"Network error in API request, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                            await asyncio.sleep(wait_time)
+                            continue
+                        else:
+                            raise FECAPIError(f"Failed to connect to FEC API after {max_retries} attempts: {str(e)}") from e
                 
                 # All retries exhausted
                 if last_exception:

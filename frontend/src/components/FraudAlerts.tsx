@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { fraudApi, FraudAnalysis } from '../services/api';
+import { useState } from 'react';
+import { useFraudAnalysis } from '../hooks/useFraudAnalysis';
 import { formatDate } from '../utils/dateUtils';
 
 interface FraudAlertsProps {
@@ -9,50 +9,11 @@ interface FraudAlertsProps {
 }
 
 export default function FraudAlerts({ candidateId, minDate, maxDate }: FraudAlertsProps) {
-  const [analysis, setAnalysis] = useState<FraudAnalysis | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [expandedPattern, setExpandedPattern] = useState<string | null>(null);
   const [useAggregation, setUseAggregation] = useState<boolean>(true);
-
-  useEffect(() => {
-    if (!candidateId) return;
-    
-    const abortController = new AbortController();
-    
-    const fetchAnalysis = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const data = useAggregation
-          ? await fraudApi.analyzeWithAggregation(candidateId, minDate, maxDate, true, abortController.signal)
-          : await fraudApi.analyze(candidateId, minDate, maxDate, abortController.signal);
-        if (!abortController.signal.aborted) {
-          setAnalysis(data);
-        }
-      } catch (err: any) {
-        // Don't set error if request was aborted
-        if (err.name === 'AbortError' || abortController.signal.aborted) {
-          return;
-        }
-        const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load fraud analysis';
-        if (!abortController.signal.aborted) {
-          setError(errorMessage);
-          console.error('Error loading fraud analysis:', err);
-        }
-      } finally {
-        if (!abortController.signal.aborted) {
-          setLoading(false);
-        }
-      }
-    };
-
-    fetchAnalysis();
-    
-    return () => {
-      abortController.abort();
-    };
-  }, [candidateId, minDate, maxDate, useAggregation]);
+  
+  // Use shared hook with aggregation option
+  const { analysis, loading, error, refresh } = useFraudAnalysis(candidateId, minDate, maxDate, useAggregation);
 
   if (loading) {
     return (
@@ -102,7 +63,14 @@ export default function FraudAlerts({ candidateId, minDate, maxDate }: FraudAler
   return (
     <div className="bg-white rounded-lg shadow p-6">
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-xl font-semibold">Fraud Detection Analysis</h2>
+        <div>
+          <h2 className="text-xl font-semibold">Fraud Detection Analysis</h2>
+          {minDate && maxDate && (
+            <p className="text-sm text-gray-500 mt-1">
+              Date Range: {formatDate(minDate)} - {formatDate(maxDate)}
+            </p>
+          )}
+        </div>
         <div className="flex items-center gap-4">
           <label className="flex items-center gap-2 cursor-pointer">
             <input

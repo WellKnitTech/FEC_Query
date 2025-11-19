@@ -1,10 +1,39 @@
+"""
+FEC API Client Implementation
+
+This module provides the main FECClient class for interacting with the OpenFEC API.
+It handles caching, rate limiting, local database queries, and smart data merging.
+
+The FECClient provides:
+- Cached API requests with configurable TTLs
+- Rate limiting to respect API constraints
+- Local database queries for faster access
+- Smart merging of bulk and API data sources
+- Automatic candidate/committee backfilling
+
+Example:
+    ```python
+    from app.services.fec_client import FECClient
+    
+    client = FECClient()
+    
+    # Get contributions for a candidate
+    contributions = await client.get_contributions(
+        candidate_id="P00003392",
+        limit=100
+    )
+    
+    # Get candidate information
+    candidate = await client.get_candidate("P00003392")
+    ```
+"""
 import httpx
 import asyncio
 import os
 import logging
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
-from app.api.dependencies import get_fec_api_key, get_fec_api_base_url
+from app.utils.api_config import get_fec_api_key, get_fec_api_base_url
 from app.db.database import (
     AsyncSessionLocal, APICache, Contribution, BulkDataMetadata,
     Candidate, Committee, FinancialTotal
@@ -32,6 +61,9 @@ _contact_info_check_cache_lock = asyncio.Lock()
 # Track ongoing backfill operations to prevent duplicates
 _backfill_in_progress: Dict[str, asyncio.Task] = {}
 _backfill_lock = asyncio.Lock()
+# Limit concurrent backfill tasks to prevent overwhelming the system
+# Max 10 concurrent backfill operations to avoid blocking database/API
+_backfill_semaphore = asyncio.Semaphore(10)
 
 class FECClient:
     """Client for interacting with OpenFEC API with caching and rate limiting"""
@@ -52,16 +84,13 @@ class FECClient:
             self._api_key_pending = True
         
         self.base_url = get_fec_api_base_url()
-        self.bulk_data_enabled = os.getenv("BULK_DATA_ENABLED", "true").lower() == "true"
+        from app.config import config
+        self.bulk_data_enabled = config.BULK_DATA_ENABLED
         
         # Initialize refactored modules
         cache_ttls = {
-            "candidates": int(os.getenv("CACHE_TTL_CANDIDATES_HOURS", "168")),
-            "committees": int(os.getenv("CACHE_TTL_COMMITTEES_HOURS", "168")),
-            "financials": int(os.getenv("CACHE_TTL_FINANCIALS_HOURS", "24")),
-            "contributions": int(os.getenv("CACHE_TTL_CONTRIBUTIONS_HOURS", "24")),
-            "expenditures": int(os.getenv("CACHE_TTL_EXPENDITURES_HOURS", "24")),
-            "default": int(os.getenv("CACHE_TTL_HOURS", "24")),
+            # Use centralized config for cache TTLs
+            **config.get_cache_ttls(),
         }
         
         self.rate_limiter = RateLimiter(
@@ -91,7 +120,7 @@ class FECClient:
         # Lookback window for catching late-filed contributions (in days)
         # FEC allows late filings and amendments, so we fetch contributions from
         # (latest_date - lookback_days) to catch any that were filed late
-        self.contribution_lookback_days = int(os.getenv("CONTRIBUTION_LOOKBACK_DAYS", "30"))  # 30 days default
+        self.contribution_lookback_days = config.CONTRIBUTION_LOOKBACK_DAYS
     
     def _get_semaphore(self):
         """Get or create the semaphore for limiting concurrent requests"""
@@ -391,20 +420,30 @@ class FECClient:
         candidate_id: str,
         cycle: Optional[int] = None
     ) -> Optional[List[Dict]]:
-        """Query financial totals from local database"""
+        """Query financial totals from local database
+        
+        Optimized to use composite index (candidate_id, cycle) efficiently.
+        When cycle is specified, uses the unique index for fast lookup.
+        When cycle is None, fetches all cycles ordered by cycle descending.
+        """
         if not self.bulk_data_enabled:
             return None
         
         try:
             async with AsyncSessionLocal() as session:
-                query = select(FinancialTotal).where(
-                    FinancialTotal.candidate_id == candidate_id
-                )
-                if cycle:
-                    query = query.where(FinancialTotal.cycle == cycle)
+                # Use composite index efficiently
+                if cycle is not None:
+                    # Single cycle lookup - uses unique composite index
+                    query = select(FinancialTotal).where(
+                        FinancialTotal.candidate_id == candidate_id,
+                        FinancialTotal.cycle == cycle
+                    )
                 else:
-                    # Get most recent cycle
-                    query = query.order_by(FinancialTotal.cycle.desc())
+                    # All cycles - uses candidate_id index, then orders by cycle
+                    # Limit to reasonable number of cycles (e.g., last 20 years = 10 cycles)
+                    query = select(FinancialTotal).where(
+                        FinancialTotal.candidate_id == candidate_id
+                    ).order_by(FinancialTotal.cycle.desc()).limit(20)
                 
                 result = await session.execute(query)
                 financials = result.scalars().all()
@@ -695,7 +734,7 @@ class FECClient:
                         (isinstance(trans_dt_val, str) and trans_dt_val.strip().lower() in ['none', 'nan', 'null', ''])
                     )
                     if is_invalid:
-                        logger.info(f"get_contribution_date: Bulk import data has no valid TRANSACTION_DT value for {contribution_id} (value: {trans_dt_val}), will try API fetch (API may have more up-to-date data)")
+                        logger.debug(f"get_contribution_date: Bulk import data has no valid TRANSACTION_DT value for {contribution_id} (value: {trans_dt_val}), will try API fetch (API may have more up-to-date data)")
                         # Continue to API fetch below - don't return None
                 else:
                     # raw_data exists but doesn't have TRANSACTION_DT - might be API data or missing field
@@ -708,10 +747,15 @@ class FECClient:
         # Step 3: Schedule API query in background (non-blocking)
         # Only do this if we don't have bulk import data, or if bulk import data might have a date from API
         # Don't block - schedule background task to fetch and store
-        logger.info(f"get_contribution_date: Date not in DB or raw_data, scheduling API fetch for {contribution_id}")
-        asyncio.create_task(
-            self._backfill_contribution_date(contribution_id, committee_id, candidate_id)
-        )
+        # Note: Concurrency is limited by semaphore in _backfill_contribution_date
+        logger.debug(f"get_contribution_date: Date not in DB or raw_data, scheduling API fetch for {contribution_id}")
+        try:
+            asyncio.create_task(
+                self._backfill_contribution_date(contribution_id, committee_id, candidate_id)
+            )
+        except Exception as e:
+            # If task creation fails, log but don't block
+            logger.warning(f"Failed to create backfill task for {contribution_id}: {e}")
         
         # Return None immediately - date will be available on next query after background task completes
         return None
@@ -815,57 +859,59 @@ class FECClient:
                     # Task completed, remove it
                     _backfill_in_progress.pop(contribution_id, None)
         
-        # Create the task
+        # Create the task with semaphore to limit concurrency
         async def _do_backfill():
-            try:
-                logger.info(f"_backfill_contribution_date: Starting background fetch for contribution_id: {contribution_id}")
-                
-                # First, check if date is already in DB or raw_data (might have been updated)
-                async with AsyncSessionLocal() as session:
-                    result = await session.execute(
-                        select(Contribution).where(Contribution.contribution_id == contribution_id)
-                    )
-                    contrib = result.scalar_one_or_none()
-                    if contrib:
-                        # Check if date is now available
-                        if contrib.contribution_date:
-                            logger.debug(f"_backfill_contribution_date: Date already available in DB for {contribution_id}, skipping API call")
-                            return
-                        
-                        # Check raw_data
-                        if contrib.raw_data:
-                            from app.utils.date_utils import extract_date_from_raw_data
-                            date_from_raw = extract_date_from_raw_data(contrib.raw_data)
-                            if date_from_raw:
-                                logger.debug(f"_backfill_contribution_date: Date found in raw_data for {contribution_id}, updating DB field")
-                                contrib.contribution_date = date_from_raw
-                                await session.commit()
+            # Acquire semaphore to limit concurrent operations
+            async with _backfill_semaphore:
+                try:
+                    logger.debug(f"_backfill_contribution_date: Starting background fetch for contribution_id: {contribution_id}")
+                    
+                    # First, check if date is already in DB or raw_data (might have been updated)
+                    async with AsyncSessionLocal() as session:
+                        result = await session.execute(
+                            select(Contribution).where(Contribution.contribution_id == contribution_id)
+                        )
+                        contrib = result.scalar_one_or_none()
+                        if contrib:
+                            # Check if date is now available
+                            if contrib.contribution_date:
+                                logger.debug(f"_backfill_contribution_date: Date already available in DB for {contribution_id}, skipping API call")
                                 return
-                
-                # Fetch from FEC API
-                api_contrib = await self._fetch_contribution_by_id(contribution_id, committee_id, candidate_id)
-                
-                if not api_contrib:
-                    logger.warning(f"_backfill_contribution_date: FEC API returned no data for contribution_id: {contribution_id}")
-                    return
-                
-                # Extract date from API response
-                from app.utils.date_utils import extract_date_from_raw_data
-                api_date = extract_date_from_raw_data(api_contrib)
-                
-                # Always store API response in DB (even if no date found) to avoid future API calls
-                await self._store_api_response_in_db(contribution_id, api_contrib, api_date)
-                
-                if api_date:
-                    logger.info(f"_backfill_contribution_date: Successfully fetched and stored date {api_date} for {contribution_id}")
-                else:
-                    logger.warning(f"_backfill_contribution_date: No date found for {contribution_id} (API response was still stored)")
-            except Exception as e:
-                logger.error(f"_backfill_contribution_date: Error in background task for contribution_id {contribution_id}: {e}", exc_info=True)
-            finally:
-                # Remove from in-progress tracking
-                async with _backfill_lock:
-                    _backfill_in_progress.pop(contribution_id, None)
+                            
+                            # Check raw_data
+                            if contrib.raw_data:
+                                from app.utils.date_utils import extract_date_from_raw_data
+                                date_from_raw = extract_date_from_raw_data(contrib.raw_data)
+                                if date_from_raw:
+                                    logger.debug(f"_backfill_contribution_date: Date found in raw_data for {contribution_id}, updating DB field")
+                                    contrib.contribution_date = date_from_raw
+                                    await session.commit()
+                                    return
+                    
+                    # Fetch from FEC API
+                    api_contrib = await self._fetch_contribution_by_id(contribution_id, committee_id, candidate_id)
+                    
+                    if not api_contrib:
+                        logger.debug(f"_backfill_contribution_date: FEC API returned no data for contribution_id: {contribution_id}")
+                        return
+                    
+                    # Extract date from API response
+                    from app.utils.date_utils import extract_date_from_raw_data
+                    api_date = extract_date_from_raw_data(api_contrib)
+                    
+                    # Always store API response in DB (even if no date found) to avoid future API calls
+                    await self._store_api_response_in_db(contribution_id, api_contrib, api_date)
+                    
+                    if api_date:
+                        logger.debug(f"_backfill_contribution_date: Successfully fetched and stored date {api_date} for {contribution_id}")
+                    else:
+                        logger.debug(f"_backfill_contribution_date: No date found for {contribution_id} (API response was still stored)")
+                except Exception as e:
+                    logger.warning(f"_backfill_contribution_date: Error in background task for contribution_id {contribution_id}: {e}")
+                finally:
+                    # Remove from in-progress tracking
+                    async with _backfill_lock:
+                        _backfill_in_progress.pop(contribution_id, None)
         
         # Track the task
         async with _backfill_lock:
@@ -1023,16 +1069,26 @@ class FECClient:
                                 else:
                                     logger.warning(f"_query_local_contributions: serialize_date returned None for: {contrib_date}")
                         else:
-                            logger.warning(f"_query_local_contributions: contrib_date is None, date_str will be None")
+                            logger.debug(f"_query_local_contributions: contrib_date is None, date_str will be None")
+                        
+                        # Extract contributor_state from raw_data if missing
+                        contributor_state = c.contributor_state
+                        if not contributor_state and c.raw_data and isinstance(c.raw_data, dict):
+                            contributor_state = c.raw_data.get('STATE') or c.raw_data.get('contributor_state') or c.raw_data.get('state')
+                        
+                        # Extract contributor_name from raw_data if missing
+                        contributor_name = c.contributor_name
+                        if not contributor_name and c.raw_data and isinstance(c.raw_data, dict):
+                            contributor_name = c.raw_data.get('NAME') or c.raw_data.get('contributor_name') or c.raw_data.get('name')
                         
                         contrib_dict = {
                             "sub_id": c.contribution_id,
                             "contribution_id": c.contribution_id,
                             "candidate_id": final_candidate_id,
                             "committee_id": c.committee_id,
-                            "contributor_name": c.contributor_name,
+                            "contributor_name": contributor_name,
                             "contributor_city": c.contributor_city,
-                            "contributor_state": c.contributor_state,
+                            "contributor_state": contributor_state,
                             "contributor_zip": c.contributor_zip,
                             "contributor_employer": c.contributor_employer,
                             "contributor_occupation": c.contributor_occupation,
@@ -1068,7 +1124,8 @@ class FECClient:
         max_date: Optional[str] = None,
         limit: int = 100,
         two_year_transaction_period: Optional[int] = None,
-        fetch_new_only: bool = True
+        fetch_new_only: bool = True,
+        fetch_all: bool = False
     ) -> List[Dict]:
         """Get contributions/schedules/schedule_a - queries local DB first, falls back to API for new data only"""
         local_data = []
@@ -1097,34 +1154,136 @@ class FECClient:
                         # Get committees for this candidate
                         committees = await self.get_committees(candidate_id=candidate_id, limit=100)
                         if committees:
-                            # Query contributions for each committee and merge
+                            # Fix N+1: Query all committee contributions in a single query using IN clause
+                            # instead of querying each committee separately
                             committee_ids = [c.get('committee_id') for c in committees if c.get('committee_id')]
-                            for comm_id in committee_ids[:50]:  # Limit to avoid too many queries
-                                if len(local_data) >= limit:
-                                    break
-                                committee_contribs = await self._query_local_contributions(
-                                    committee_id=comm_id,
-                                    contributor_name=contributor_name,
-                                    min_amount=min_amount,
-                                    max_amount=max_amount,
-                                    min_date=min_date,
-                                    max_date=max_date,
-                                    limit=limit - len(local_data),
-                                    two_year_transaction_period=two_year_transaction_period
-                                ) or []
+                            
+                            if committee_ids:
+                                from app.db.database import AsyncSessionLocal, Contribution
+                                from sqlalchemy import select, and_, in_
                                 
-                                # Merge, avoiding duplicates and ONLY including contributions that match the candidate_id
-                                existing_ids = {c.get('contribution_id') or c.get('sub_id') for c in local_data}
-                                for contrib in committee_contribs:
-                                    contrib_id = contrib.get('contribution_id') or contrib.get('sub_id')
-                                    if contrib_id and contrib_id not in existing_ids:
-                                        # Only include if candidate_id matches or is missing (will be set to requested candidate_id)
-                                        contrib_candidate_id = contrib.get('candidate_id')
-                                        if not contrib_candidate_id or contrib_candidate_id == candidate_id:
-                                            if not contrib.get('candidate_id'):
-                                                contrib['candidate_id'] = candidate_id
-                                            local_data.append(contrib)
-                                            existing_ids.add(contrib_id)
+                                async with AsyncSessionLocal() as session:
+                                    # Build query with IN clause for all committee IDs (limit to 50 to avoid huge queries)
+                                    query = select(Contribution).where(
+                                        Contribution.committee_id.in_(committee_ids[:50])
+                                    )
+                                    
+                                    # Apply other filters
+                                    conditions = []
+                                    if contributor_name:
+                                        conditions.append(Contribution.contributor_name.ilike(f"%{contributor_name}%"))
+                                    if min_amount:
+                                        conditions.append(Contribution.contribution_amount >= min_amount)
+                                    if max_amount:
+                                        conditions.append(Contribution.contribution_amount <= max_amount)
+                                    if min_date:
+                                        from datetime import datetime
+                                        try:
+                                            min_date_obj = datetime.strptime(min_date, "%Y-%m-%d")
+                                            conditions.append(Contribution.contribution_date >= min_date_obj)
+                                        except ValueError:
+                                            pass
+                                    if max_date:
+                                        from datetime import datetime
+                                        try:
+                                            max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
+                                            conditions.append(Contribution.contribution_date <= max_date_obj)
+                                        except ValueError:
+                                            pass
+                                    
+                                    if conditions:
+                                        query = query.where(and_(*conditions))
+                                    
+                                    # Order and limit
+                                    query = query.order_by(Contribution.contribution_date.desc().nulls_last())
+                                    remaining_limit = limit - len(local_data)
+                                    if remaining_limit > 0:
+                                        query = query.limit(remaining_limit * 2)  # Get more to account for filtering
+                                    
+                                    result = await session.execute(query)
+                                    committee_contribs_objs = result.scalars().all()
+                                    
+                                    # Convert to dict format and merge with existing data
+                                    existing_ids = {c.get('contribution_id') or c.get('sub_id') for c in local_data}
+                                    for c in committee_contribs_objs:
+                                        contrib_id = c.contribution_id
+                                        if contrib_id not in existing_ids:
+                                            # Convert contribution object to dict (reuse logic from _query_local_contributions)
+                                            amount = float(c.contribution_amount) if c.contribution_amount else 0.0
+                                            if amount == 0.0 and c.raw_data and isinstance(c.raw_data, dict):
+                                                for amt_key in ['TRANSACTION_AMT', 'CONTB_AMT', 'contribution_amount', 'transaction_amt']:
+                                                    if amt_key in c.raw_data:
+                                                        try:
+                                                            amt_val = str(c.raw_data[amt_key]).strip()
+                                                            amt_val = amt_val.replace('$', '').replace(',', '').strip()
+                                                            if amt_val:
+                                                                amount = float(amt_val)
+                                                                break
+                                                        except (ValueError, TypeError):
+                                                            continue
+                                            
+                                            contrib_candidate_id = c.candidate_id
+                                            if not contrib_candidate_id and c.raw_data and isinstance(c.raw_data, dict):
+                                                contrib_candidate_id = c.raw_data.get('CAND_ID') or c.raw_data.get('candidate_id')
+                                            
+                                            final_candidate_id = contrib_candidate_id or candidate_id
+                                            
+                                            # Get date
+                                            contrib_date = await self.get_contribution_date(
+                                                contribution_id=c.contribution_id,
+                                                contribution_obj=c,
+                                                committee_id=c.committee_id,
+                                                candidate_id=final_candidate_id
+                                            )
+                                            
+                                            date_str = None
+                                            if contrib_date:
+                                                if isinstance(contrib_date, datetime):
+                                                    date_str = contrib_date.strftime("%Y-%m-%d")
+                                                else:
+                                                    from app.utils.date_utils import serialize_date
+                                                    date_str = serialize_date(contrib_date)
+                                            
+                                            contributor_state = c.contributor_state
+                                            if not contributor_state and c.raw_data and isinstance(c.raw_data, dict):
+                                                contributor_state = c.raw_data.get('STATE') or c.raw_data.get('contributor_state') or c.raw_data.get('state')
+                                            
+                                            contributor_name_val = c.contributor_name
+                                            if not contributor_name_val and c.raw_data and isinstance(c.raw_data, dict):
+                                                contributor_name_val = c.raw_data.get('NAME') or c.raw_data.get('contributor_name') or c.raw_data.get('name')
+                                            
+                                            contrib_dict = {
+                                                "sub_id": c.contribution_id,
+                                                "contribution_id": c.contribution_id,
+                                                "candidate_id": final_candidate_id,
+                                                "committee_id": c.committee_id,
+                                                "contributor_name": contributor_name_val,
+                                                "contributor_city": c.contributor_city,
+                                                "contributor_state": contributor_state,
+                                                "contributor_zip": c.contributor_zip,
+                                                "contributor_employer": c.contributor_employer,
+                                                "contributor_occupation": c.contributor_occupation,
+                                                "contribution_amount": amount,
+                                                "contribution_receipt_date": date_str,
+                                                "contribution_date": date_str,
+                                                "contribution_type": c.contribution_type,
+                                                "receipt_type": None
+                                            }
+                                            
+                                            if c.raw_data and isinstance(c.raw_data, dict):
+                                                for key, value in c.raw_data.items():
+                                                    if key not in contrib_dict or not contrib_dict[key]:
+                                                        contrib_dict[key] = value
+                                            
+                                            # Only include if candidate_id matches or is missing (will be set to requested candidate_id)
+                                            contrib_candidate_id = contrib_dict.get('candidate_id')
+                                            if not contrib_candidate_id or contrib_candidate_id == candidate_id:
+                                                if not contrib_dict.get('candidate_id'):
+                                                    contrib_dict['candidate_id'] = candidate_id
+                                                local_data.append(contrib_dict)
+                                                existing_ids.add(contrib_id)
+                                                if len(local_data) >= limit:
+                                                    break
                     except Exception as e:
                         logger.debug(f"Error querying contributions by committees: {e}")
                 
@@ -1152,7 +1311,7 @@ class FECClient:
                             
                             if not min_date or new_min_date >= min_date:
                                 min_date = new_min_date
-                                logger.info(f"Fetching contributions from {min_date} onwards "
+                                logger.debug(f"Fetching contributions from {min_date} onwards "
                                           f"(latest in DB: {latest_db_date.strftime('%Y-%m-%d')}, "
                                           f"lookback: {self.contribution_lookback_days} days) "
                                           f"- duplicates and amendments will be handled via contribution_id")
@@ -1213,7 +1372,7 @@ class FECClient:
                             "sort": "-contribution_receipt_date",
                             "committee_id": comm_id,
                             "two_year_transaction_period": two_year_transaction_period,
-                            "_original_limit": limit  # Store original limit for pagination
+                            "_original_limit": None if fetch_all else limit  # None = fetch all pages
                         }
                         if contributor_name:
                             params["contributor_name"] = contributor_name
@@ -1250,8 +1409,8 @@ class FECClient:
                                     existing_ids.add(contrib_id)
                             
                             # Continue querying committees until we have enough contributions
-                            # Don't break early - we want to get all contributions across all committees
-                            if len(all_contributions) >= limit * 2:  # Get extra to account for duplicates
+                            # If fetch_all is False, stop when we have enough
+                            if not fetch_all and len(all_contributions) >= limit * 2:  # Get extra to account for duplicates
                                 logger.debug(f"Collected {len(all_contributions)} contributions, stopping committee queries")
                                 break
                         except Exception:
@@ -1278,6 +1437,9 @@ class FECClient:
                 
                 new_count = len(all_contributions) - len(local_data) if local_data else len(all_contributions)
                 logger.info(f"Returning {len(all_contributions)} total contributions ({len(local_data)} from DB, {new_count} new from API)")
+                # Only apply limit if fetch_all is False
+                if fetch_all:
+                    return all_contributions
                 return all_contributions[:limit]
             else:
                 # No committees found, try with two_year_transaction_period
@@ -1302,7 +1464,7 @@ class FECClient:
             params = {
                 "per_page": 100,  # FEC API max is 100, pagination will handle more
                 "sort": "-contribution_receipt_date",
-                "_original_limit": limit  # Store original limit for pagination
+                "_original_limit": None if fetch_all else limit  # None = fetch all pages
             }
             
             # Always add two_year_transaction_period if not provided (must be even year)
@@ -1334,16 +1496,15 @@ class FECClient:
             api_results = data.get("results", [])
             logger.debug(f"Direct API query returned {len(api_results)} contributions for candidate {candidate_id}")
             
-            # Store new contributions in database for caching
+            # Store new contributions in database for caching (non-blocking background task)
             if api_results:
-                logger.info(f"Storing {len(api_results)} new contributions from API in database")
-                # Store contributions in batches to avoid exhausting connection pool
-                # Limit concurrent storage operations to prevent connection pool exhaustion
-                batch_size = 50  # Store 50 contributions at a time
-                semaphore = asyncio.Semaphore(10)  # Max 10 concurrent storage operations
+                logger.debug(f"Queueing {len(api_results)} contributions for background storage")
+                # Store contributions in background to avoid blocking the request
+                # Use a semaphore to limit concurrent storage operations
+                storage_semaphore = asyncio.Semaphore(5)  # Max 5 concurrent storage operations
                 
                 async def store_with_semaphore(contrib_data):
-                    async with semaphore:
+                    async with storage_semaphore:
                         try:
                             await self._store_contribution(contrib_data)
                         except Exception as e:
@@ -1353,21 +1514,29 @@ class FECClient:
                             else:
                                 logger.warning(f"Error storing contribution: {e}")
                 
-                # Process in batches to avoid overwhelming the database
-                for i in range(0, len(api_results), batch_size):
-                    batch = api_results[i:i + batch_size]
-                    tasks = []
-                    for contrib in batch:
-                        # Ensure candidate_id is set when storing contributions
-                        if candidate_id and not contrib.get('candidate_id'):
-                            contrib['candidate_id'] = candidate_id
-                        tasks.append(store_with_semaphore(contrib))
-                    
-                    # Wait for batch to complete before starting next batch
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    # Small delay between batches to allow connections to be released
-                    if i + batch_size < len(api_results):
-                        await asyncio.sleep(0.1)
+                # Process in background without blocking the request
+                async def store_all_contributions():
+                    try:
+                        batch_size = 50  # Process 50 contributions at a time
+                        for i in range(0, len(api_results), batch_size):
+                            batch = api_results[i:i + batch_size]
+                            tasks = []
+                            for contrib in batch:
+                                # Ensure candidate_id is set when storing contributions
+                                if candidate_id and not contrib.get('candidate_id'):
+                                    contrib['candidate_id'] = candidate_id
+                                tasks.append(store_with_semaphore(contrib))
+                            
+                            # Wait for batch to complete before starting next batch
+                            await asyncio.gather(*tasks, return_exceptions=True)
+                            # Small delay between batches to allow connections to be released
+                            if i + batch_size < len(api_results):
+                                await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logger.warning(f"Error in background contribution storage: {e}")
+                
+                # Start background task without awaiting (fire and forget)
+                asyncio.create_task(store_all_contributions())
             
             # Merge local and API results, avoiding duplicates
             all_results = local_data.copy() if local_data else []
@@ -1390,6 +1559,9 @@ class FECClient:
             )
             
             logger.info(f"Returning {len(all_results)} total contributions ({len(local_data)} from DB, {len(api_results)} new from API)")
+            # Only apply limit if fetch_all is False
+            if fetch_all:
+                return all_results
             return all_results[:limit]
         except Exception as e:
             logger.error(f"API fallback failed for contributions: {e}")

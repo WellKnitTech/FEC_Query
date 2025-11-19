@@ -45,36 +45,52 @@ export default function DonorStateAnalysis({
   const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
+    if (!candidateId) {
+      setLoading(false);
+      return;
+    }
+
+    // Only show for Senate (S) and House (H) candidates
+    if (candidate?.office && candidate.office.toUpperCase() === 'P') {
+      setLoading(false);
+      return;
+    }
+
+    const abortController = new AbortController();
+    
     const fetchAnalysis = async () => {
-      if (!candidateId) {
-        setLoading(false);
-        return;
-      }
-
-      // Only show for Senate (S) and House (H) candidates
-      if (candidate?.office && candidate.office.toUpperCase() === 'P') {
-        setLoading(false);
-        return;
-      }
-
       setLoading(true);
       setError(null);
       try {
         const data = await analysisApi.getDonorStates({
           candidate_id: candidateId,
           cycle: cycle,
-        });
-        setAnalysis(data);
+        }, abortController.signal);
+        if (!abortController.signal.aborted) {
+          setAnalysis(data);
+        }
       } catch (err: any) {
+        // Don't set error if request was aborted
+        if (err.name === 'AbortError' || abortController.signal.aborted) {
+          return;
+        }
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load donor state analysis';
-        setError(errorMessage);
-        console.error('Error loading donor state analysis:', err);
+        if (!abortController.signal.aborted) {
+          setError(errorMessage);
+          console.error('Error loading donor state analysis:', err);
+        }
       } finally {
-        setLoading(false);
+        if (!abortController.signal.aborted) {
+          setLoading(false);
+        }
       }
     };
 
     fetchAnalysis();
+    
+    return () => {
+      abortController.abort();
+    };
   }, [candidateId, candidate?.office, cycle]);
 
   const loadOutOfStateContributions = async (aggregate: boolean = false) => {
@@ -232,6 +248,9 @@ export default function DonorStateAnalysis({
         <p className="text-gray-600">
           Analysis of individual donors by state to identify funding sources
         </p>
+        <div className="mt-2 text-xs text-gray-500">
+          Note: This analysis is based on bulk-imported data. Check Contribution Analysis section for data completeness percentage.
+        </div>
       </div>
 
       {/* Alert Banner for High Out-of-State Funding */}

@@ -44,6 +44,12 @@ export default function EmployerTreemap({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!candidateId && !committeeId) {
+      return;
+    }
+
+    const abortController = new AbortController();
+    
     const fetchAnalysis = async () => {
       setLoading(true);
       setError(null);
@@ -53,20 +59,32 @@ export default function EmployerTreemap({
           committee_id: committeeId,
           min_date: minDate,
           max_date: maxDate,
-        });
-        setAnalysis(data);
+        }, abortController.signal);
+        if (!abortController.signal.aborted) {
+          setAnalysis(data);
+        }
       } catch (err: any) {
+        // Don't set error if request was aborted
+        if (err.name === 'AbortError' || abortController.signal.aborted) {
+          return;
+        }
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load employer analysis';
-        setError(errorMessage);
-        console.error('Error loading employer analysis:', err);
+        if (!abortController.signal.aborted) {
+          setError(errorMessage);
+          console.error('Error loading employer analysis:', err);
+        }
       } finally {
-        setLoading(false);
+        if (!abortController.signal.aborted) {
+          setLoading(false);
+        }
       }
     };
 
-    if (candidateId || committeeId) {
-      fetchAnalysis();
-    }
+    fetchAnalysis();
+    
+    return () => {
+      abortController.abort();
+    };
   }, [candidateId, committeeId, minDate, maxDate, cycle]);
 
   const refresh = async () => {
@@ -164,6 +182,11 @@ export default function EmployerTreemap({
       onRetry={refresh}
     >
       <div className="space-y-6">
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+          <p className="text-sm text-blue-800">
+            <span className="font-medium">Note:</span> This analysis is based on bulk-imported data. Check Contribution Analysis section for data completeness percentage.
+          </p>
+        </div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
           <div>
             <div className="text-sm text-gray-600">Unique Employers</div>

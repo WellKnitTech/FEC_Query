@@ -12,7 +12,7 @@ interface CandidateContextValue {
   availableCycles: number[];
 }
 
-const CandidateContext = createContext<CandidateContextValue | undefined>(undefined);
+export const CandidateContext = createContext<CandidateContextValue | undefined>(undefined);
 
 interface CandidateContextProviderProps {
   children: ReactNode;
