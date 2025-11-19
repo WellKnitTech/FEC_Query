@@ -1202,7 +1202,8 @@ class GenericBulkDataParser:
                         return result
                     
                     # Get candidate_id (try multiple column name variations)
-                    cand_id_col = get_col(chunk, 'candidate_id', 'CAND_ID')
+                    # Note: FEC files use 'Cand_Id' (with capital I), not 'CAND_ID'
+                    cand_id_col = get_col(chunk, 'candidate_id', 'CAND_ID', 'Cand_Id', 'Cand_ID')
                     chunk = chunk[cand_id_col.notna() & (cand_id_col.astype(str).str.strip() != '')]
                     if len(chunk) == 0:
                         del chunk
@@ -1210,11 +1211,12 @@ class GenericBulkDataParser:
                         continue
                     
                     chunk['candidate_id'] = cand_id_col.astype(str).str.strip()
-                    chunk['candidate_name'] = clean_str_field(get_col(chunk, 'candidate_name', 'CAND_NAME'))
-                    chunk['office'] = clean_str_field(get_col(chunk, 'office', 'CAND_OFFICE'))
-                    chunk['party'] = clean_str_field(get_col(chunk, 'party', 'PTY_CD', 'CAND_PTY_AFFILIATION'))
-                    chunk['state'] = clean_str_field(get_col(chunk, 'state', 'CAND_OFFICE_ST'))
-                    chunk['district'] = clean_str_field(get_col(chunk, 'district', 'CAND_OFFICE_DISTRICT'))
+                    # Handle FEC column name variations
+                    chunk['candidate_name'] = clean_str_field(get_col(chunk, 'candidate_name', 'CAND_NAME', 'Cand_Name'))
+                    chunk['office'] = clean_str_field(get_col(chunk, 'office', 'CAND_OFFICE', 'Cand_Office'))
+                    chunk['party'] = clean_str_field(get_col(chunk, 'party', 'PTY_CD', 'CAND_PTY_AFFILIATION', 'Cand_Party_Affiliation'))
+                    chunk['state'] = clean_str_field(get_col(chunk, 'state', 'CAND_OFFICE_ST', 'Cand_Office_St'))
+                    chunk['district'] = clean_str_field(get_col(chunk, 'district', 'CAND_OFFICE_DISTRICT', 'Cand_Office_Dist'))
                     
                     # Vectorized amount parsing
                     def parse_amount_vectorized(series):
@@ -1223,9 +1225,10 @@ class GenericBulkDataParser:
                             errors='coerce'
                         ).fillna(0.0)
                     
-                    receipts_col = get_col(chunk, 'total_receipts', 'TTL_RECEIPTS')
-                    disb_col = get_col(chunk, 'total_disbursements', 'TTL_DISB')
-                    coh_col = get_col(chunk, 'cash_on_hand', 'COH_COP')
+                    # Handle FEC column name variations
+                    receipts_col = get_col(chunk, 'total_receipts', 'TTL_RECEIPTS', 'Total_Receipt')
+                    disb_col = get_col(chunk, 'total_disbursements', 'TTL_DISB', 'Total_Disbursement')
+                    coh_col = get_col(chunk, 'cash_on_hand', 'COH_COP', 'Cash_On_Hand_COP')
                     
                     chunk['total_receipts'] = parse_amount_vectorized(receipts_col)
                     chunk['total_disbursements'] = parse_amount_vectorized(disb_col)
