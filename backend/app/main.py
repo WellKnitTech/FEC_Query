@@ -15,24 +15,22 @@ import asyncio
 from dotenv import load_dotenv
 from starlette.middleware.base import BaseHTTPMiddleware
 
-load_dotenv()
+from app.config import config
+from app.utils.structured_logging import setup_structured_logging
 
-# Configure logging with more detail
-log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, log_level, logging.INFO),
-    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
-    handlers=[
-        logging.StreamHandler(),  # Console output
-    ]
+# Configure structured logging
+# Use JSON format in production (when LOG_JSON=true), human-readable in development
+use_json_logging = os.getenv("LOG_JSON", "false").lower() == "true"
+setup_structured_logging(
+    level=config.LOG_LEVEL,
+    use_json=use_json_logging,
+    include_console=True
 )
 
-# Set specific loggers
-logging.getLogger("httpx").setLevel(logging.WARNING)  # Reduce httpx verbosity
-logging.getLogger("httpcore").setLevel(logging.WARNING)  # Reduce httpcore verbosity
-logging.getLogger("uvicorn.access").setLevel(logging.WARNING)  # Reduce access log verbosity
+logger = logging.getLogger(__name__)
 
-# Filter to suppress CancelledError in SQLAlchemy pool during shutdown (expected behavior)
+# Apply filter to suppress CancelledError in SQLAlchemy pool during shutdown
+# This filter is applied to the root logger to catch all SQLAlchemy pool errors
 class SuppressCancelledErrorFilter(logging.Filter):
     def filter(self, record):
         # Suppress CancelledError exceptions in connection pool cleanup during shutdown
@@ -58,7 +56,7 @@ sqlalchemy_pool_logger = logging.getLogger("sqlalchemy.pool")
 sqlalchemy_pool_logger.addFilter(SuppressCancelledErrorFilter())
 
 # Our application loggers should be more verbose
-logging.getLogger("app").setLevel(logging.DEBUG if log_level == "DEBUG" else logging.INFO)
+logging.getLogger("app").setLevel(logging.DEBUG if config.LOG_LEVEL == "DEBUG" else logging.INFO)
 logging.getLogger("app.services.bulk_data").setLevel(logging.INFO)
 logging.getLogger("app.services.bulk_data_parsers").setLevel(logging.INFO)
 logging.getLogger("app.services.bulk_updater").setLevel(logging.INFO)
@@ -77,10 +75,15 @@ app = FastAPI(
 try:
     from slowapi import Limiter
     
-    limiter = Limiter(key_func=get_remote_address, app=app, default_limits=["1000/hour"])
+    # Initialize limiter - for FastAPI, we don't pass app to constructor
+    # Instead, we assign it to app.state.limiter and slowapi handles the rest
+    limiter = Limiter(
+        key_func=get_remote_address,
+        default_limits=["1000/hour"]
+    )
     app.state.limiter = limiter
     
-    # Add exception handler for rate limit exceeded
+    # Add exception handler for rate limit exceeded with security logging
     @app.exception_handler(RateLimitExceeded)
     async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
         from app.api.security import log_security_event
@@ -135,7 +138,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(SecurityHeadersMiddleware)
 
 # CORS configuration - restrict to specific origins and methods
-cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
+cors_origins = config.CORS_ORIGINS
 # Clean up origins (remove empty strings)
 cors_origins = [origin.strip() for origin in cors_origins if origin.strip()]
 app.add_middleware(
@@ -164,6 +167,26 @@ app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 async def startup_event():
     """Initialize database and set up startup tasks"""
     logger.info("Starting application startup...")
+    
+    # Validate configuration
+    config_warnings = config.validate()
+    if config_warnings:
+        for warning in config_warnings:
+            logger.warning(f"Config warning: {warning}")
+    
+    # Initialize thread pool for CPU-bound operations
+    from app.utils.thread_pool import get_thread_pool
+    thread_pool = get_thread_pool()
+    logger.info(f"Thread pool initialized with {config.THREAD_POOL_WORKERS} workers")
+    
+    # Log uvicorn worker configuration (if available)
+    import multiprocessing
+    try:
+        # Try to detect worker count from process name or environment
+        logger.info(f"Uvicorn workers: {config.UVICORN_WORKERS}")
+    except Exception:
+        pass
+    
     await init_db()
     logger.info("Database initialization complete")
     
@@ -174,43 +197,85 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
+    # Shutdown thread pool
+    from app.utils.thread_pool import shutdown_thread_pool
+    shutdown_thread_pool()
+    
     await setup_shutdown_handlers()
 
 
 # Global exception handlers
 @app.exception_handler(APIError)
 async def api_error_handler(request: Request, exc: APIError):
-    """Handle custom API exceptions"""
+    """Handle custom API exceptions with structured error response"""
+    # Log error with context
+    logger.error(
+        f"API Error [{exc.request_id}]: {exc.code} - {exc.message}",
+        extra={
+            "request_id": exc.request_id,
+            "error_code": exc.code,
+            "status_code": exc.status_code,
+            "is_transient": exc.is_transient,
+            "path": request.url.path,
+            "method": request.method,
+            "details": exc.details
+        }
+    )
+    
     return JSONResponse(
         status_code=exc.status_code,
         content={
-            "error": {
-                "code": exc.code,
-                "message": exc.message,
-                "details": exc.details
-            }
+            "error": exc.to_dict()
         }
     )
 
 
 @app.exception_handler(FECServiceError)
 async def fec_service_error_handler(request: Request, exc: FECServiceError):
-    """Handle FEC service errors"""
+    """Handle FEC service errors with structured response"""
+    request_id = str(uuid.uuid4())[:8]
     status_code = 500
     code = "SERVICE_ERROR"
+    is_transient = False
+    error_details = {}
     
     if isinstance(exc, FECAPIError):
         status_code = exc.status_code or 500
         code = "FEC_API_ERROR"
+        is_transient = True  # API errors are often transient
         if isinstance(exc, RateLimitError):
             status_code = 429
             code = "RATE_LIMIT_ERROR"
+            error_details = {
+                "suggestion": "Please wait before making more requests",
+                "retry_after": 60
+            }
     elif isinstance(exc, DatabaseLockError):
         status_code = 503
         code = "DATABASE_LOCK_ERROR"
+        is_transient = True
+        error_details = {
+            "suggestion": "Database is busy. Please try again in a moment."
+        }
     elif isinstance(exc, BulkDataError):
         status_code = 500
         code = "BULK_DATA_ERROR"
+        is_transient = False  # Bulk data errors are usually permanent
+        error_details = {
+            "error_type": "BulkDataError"
+        }
+    
+    logger.error(
+        f"FEC Service Error [{request_id}]: {code} - {str(exc)}",
+        extra={
+            "request_id": request_id,
+            "error_code": code,
+            "status_code": status_code,
+            "is_transient": is_transient,
+            "path": request.url.path,
+            "method": request.method
+        }
+    )
     
     return JSONResponse(
         status_code=status_code,
@@ -218,7 +283,9 @@ async def fec_service_error_handler(request: Request, exc: FECServiceError):
             "error": {
                 "code": code,
                 "message": str(exc),
-                "details": {}
+                "details": error_details,
+                "request_id": request_id,
+                "is_transient": is_transient
             }
         }
     )
@@ -226,15 +293,92 @@ async def fec_service_error_handler(request: Request, exc: FECServiceError):
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
-    """Handle generic exceptions (500)"""
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    """Handle generic exceptions (500) with error classification"""
+    import traceback
+    from sqlalchemy.exc import OperationalError, DatabaseError as SQLAlchemyDatabaseError
+    from httpx import TimeoutException, RequestError
+    import asyncio
+    
+    # Generate request ID for tracking
+    request_id = str(uuid.uuid4())[:8]
+    
+    # Classify error type
+    error_code = "INTERNAL_SERVER_ERROR"
+    status_code = 500
+    is_transient = False
+    error_message = "An internal server error occurred"
+    error_details = {}
+    
+    # Classify specific error types
+    if isinstance(exc, (OperationalError, SQLAlchemyDatabaseError)):
+        error_code = "DATABASE_ERROR"
+        status_code = 503
+        is_transient = True
+        error_message = "Database operation failed"
+        error_details = {
+            "error_type": type(exc).__name__,
+            "suggestion": "This may be a temporary issue. Please try again."
+        }
+    elif isinstance(exc, (TimeoutException, asyncio.TimeoutError)):
+        error_code = "TIMEOUT_ERROR"
+        status_code = 504
+        is_transient = True
+        error_message = "Request timeout"
+        error_details = {
+            "error_type": type(exc).__name__,
+            "suggestion": "The operation took too long. Please try again with a smaller dataset."
+        }
+    elif isinstance(exc, RequestError):
+        error_code = "NETWORK_ERROR"
+        status_code = 503
+        is_transient = True
+        error_message = "Network request failed"
+        error_details = {
+            "error_type": type(exc).__name__,
+            "suggestion": "Network issue detected. Please try again."
+        }
+    elif isinstance(exc, ValueError):
+        error_code = "VALIDATION_ERROR"
+        status_code = 400
+        is_transient = False
+        error_message = str(exc) or "Invalid input"
+        error_details = {
+            "error_type": "ValueError"
+        }
+    elif isinstance(exc, KeyError):
+        error_code = "MISSING_FIELD_ERROR"
+        status_code = 400
+        is_transient = False
+        error_message = f"Missing required field: {exc}"
+        error_details = {
+            "error_type": "KeyError",
+            "missing_field": str(exc)
+        }
+    
+    # Log error with full context
+    logger.error(
+        f"Unhandled exception [{request_id}]: {type(exc).__name__}: {exc}",
+        exc_info=True,
+        extra={
+            "request_id": request_id,
+            "error_code": error_code,
+            "status_code": status_code,
+            "is_transient": is_transient,
+            "path": request.url.path,
+            "method": request.method,
+            "error_type": type(exc).__name__
+        }
+    )
+    
     return JSONResponse(
-        status_code=500,
+        status_code=status_code,
         content={
             "error": {
-                "code": "INTERNAL_SERVER_ERROR",
-                "message": "An internal server error occurred",
-                "details": {}
+                "code": error_code,
+                "message": error_message,
+                "details": error_details,
+                "request_id": request_id,
+                "is_transient": is_transient
             }
         }
     )
@@ -247,5 +391,17 @@ async def root():
 
 @app.get("/health")
 async def health():
+    """Basic health check endpoint"""
     return {"status": "healthy"}
+
+
+@app.get("/health/database")
+async def health_database():
+    """Database health check with pool monitoring"""
+    from app.services.shared.db_pool import get_db_pool_manager
+    
+    pool_manager = get_db_pool_manager()
+    health_info = await pool_manager.health_check()
+    
+    return health_info
 

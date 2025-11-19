@@ -7,6 +7,7 @@ from app.services.fec_client import FECClient
 from app.services.donor_aggregation import DonorAggregationService
 from app.services.contribution_limits import ContributionLimitsService
 from app.models.schemas import FraudPattern, FraudAnalysis
+from app.utils.thread_pool import async_to_numeric, async_dataframe_operation
 
 
 class FraudDetectionService:
@@ -24,8 +25,8 @@ class FraudDetectionService:
         """
         Determine contributor category from contribution data.
         
-        Uses FEC transaction type codes and committee types to determine if the
-        contributor is an individual, PAC, party committee, etc.
+        Uses centralized transaction type parser to determine if the contributor
+        is an individual, PAC, party committee, etc.
         
         Args:
             contribution: Contribution dictionary with fields like contribution_type, 
@@ -34,53 +35,21 @@ class FraudDetectionService:
         Returns:
             Contributor category string
         """
-        # Use the contribution limits service helper if available
-        if self.limits_service:
-            contribution_type_code = contribution.get('contribution_type') or contribution.get('transaction_type')
-            committee_type = contribution.get('committee_type')
-            has_employer_occupation = bool(
-                contribution.get('contributor_employer') or 
-                contribution.get('contributor_occupation')
-            )
-            
-            return ContributionLimitsService._infer_contributor_category(
-                contribution_type_code=contribution_type_code,
-                committee_type=committee_type,
-                has_employer_occupation=has_employer_occupation
-            )
+        from app.utils.transaction_types import get_contributor_category_from_code
         
-        # Fallback: use simple heuristics if limits service not available
-        contribution_type = contribution.get('contribution_type') or contribution.get('transaction_type')
+        contribution_type_code = contribution.get('contribution_type') or contribution.get('transaction_type')
         committee_type = contribution.get('committee_type')
+        has_employer_occupation = bool(
+            contribution.get('contributor_employer') or 
+            contribution.get('contributor_occupation')
+        )
         
-        # Check committee type first
-        if committee_type:
-            committee_type_upper = committee_type.upper()
-            if committee_type_upper in ['X', 'Y']:
-                return ContributionLimitsService.CONTRIBUTOR_PARTY_COMMITTEE
-            if committee_type_upper in ['H', 'S', 'P']:
-                return ContributionLimitsService.CONTRIBUTOR_CANDIDATE_COMMITTEE
-            if committee_type_upper in ['N', 'Q', 'O', 'V', 'W']:
-                return ContributionLimitsService.CONTRIBUTOR_MULTICANDIDATE_PAC
-        
-        # Check transaction type code
-        if contribution_type:
-            code_str = str(contribution_type).strip()
-            if code_str.startswith('1'):  # Individual
-                return ContributionLimitsService.CONTRIBUTOR_INDIVIDUAL
-            elif code_str.startswith('2'):  # Party
-                return ContributionLimitsService.CONTRIBUTOR_PARTY_COMMITTEE
-            elif code_str.startswith('3'):  # Multicandidate PAC
-                return ContributionLimitsService.CONTRIBUTOR_MULTICANDIDATE_PAC
-            elif code_str.startswith('4'):  # Non-multicandidate PAC
-                return ContributionLimitsService.CONTRIBUTOR_NON_MULTICANDIDATE_PAC
-        
-        # If we have employer/occupation info, it's likely an individual
-        if contribution.get('contributor_employer') or contribution.get('contributor_occupation'):
-            return ContributionLimitsService.CONTRIBUTOR_INDIVIDUAL
-        
-        # Default to individual
-        return ContributionLimitsService.CONTRIBUTOR_INDIVIDUAL
+        # Use centralized parser for consistent behavior
+        return get_contributor_category_from_code(
+            contribution_type_code=contribution_type_code,
+            committee_type=committee_type,
+            has_employer_occupation=has_employer_occupation
+        )
     
     async def _get_contribution_limit(self, contribution_date: datetime, contribution: Dict[str, Any]) -> float:
         """
@@ -286,7 +255,7 @@ class FraudDetectionService:
         patterns = []
         
         # Detect smurfing patterns
-        smurfing_patterns = self._detect_smurfing(df)
+        smurfing_patterns = await self._detect_smurfing(df)
         patterns.extend(smurfing_patterns)
         
         # Detect threshold clustering
@@ -294,22 +263,23 @@ class FraudDetectionService:
         patterns.extend(threshold_patterns)
         
         # Detect temporal anomalies
-        temporal_patterns = self._detect_temporal_anomalies(df)
+        temporal_patterns = await self._detect_temporal_anomalies(df)
         patterns.extend(temporal_patterns)
         
         # Detect round number patterns
-        round_patterns = self._detect_round_number_patterns(df)
+        round_patterns = await self._detect_round_number_patterns(df)
         patterns.extend(round_patterns)
         
         # Detect same-day multiple contributions
-        same_day_patterns = self._detect_same_day_patterns(df)
+        same_day_patterns = await self._detect_same_day_patterns(df)
         patterns.extend(same_day_patterns)
         
         # Calculate risk score
         total_suspicious = sum(p.total_amount for p in patterns)
         # Convert to numeric and fill NaN values
-        contribution_amounts = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0)
-        total_contributions = contribution_amounts.sum()
+        contribution_amounts = await async_to_numeric(df['contribution_amount'], errors='coerce')
+        contribution_amounts = contribution_amounts.fillna(0)
+        total_contributions = await async_dataframe_operation(contribution_amounts, lambda s: s.sum())
         risk_score = min(100.0, (total_suspicious / total_contributions * 100) if total_contributions > 0 else 0.0)
         
         return FraudAnalysis(
@@ -319,12 +289,13 @@ class FraudDetectionService:
             total_suspicious_amount=total_suspicious
         )
     
-    def _detect_smurfing(self, df: pd.DataFrame) -> List[FraudPattern]:
+    async def _detect_smurfing(self, df: pd.DataFrame) -> List[FraudPattern]:
         """Detect smurfing: multiple contributions just under reporting threshold"""
         patterns = []
         
         # Convert to numeric and fill NaN values
-        contribution_amounts = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0)
+        contribution_amounts = await async_to_numeric(df['contribution_amount'], errors='coerce')
+        contribution_amounts = contribution_amounts.fillna(0)
         
         # Find contributions just under threshold
         smurf_contributions = df[
@@ -397,7 +368,8 @@ class FraudDetectionService:
         patterns = []
         
         # Convert to numeric and fill NaN values
-        contribution_amounts = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0)
+        contribution_amounts = await async_to_numeric(df['contribution_amount'], errors='coerce')
+        contribution_amounts = contribution_amounts.fillna(0)
         
         # Get limits for each contribution based on date
         # Group by date to minimize database queries
@@ -430,9 +402,12 @@ class FraudDetectionService:
             near_limit = df.loc[near_limit_indices].copy()
             
             # Group by contributor
-            grouped = near_limit.groupby('contributor_name').agg({
-                'contribution_amount': ['sum', 'count']
-            }).reset_index()
+            grouped = await async_dataframe_operation(
+                near_limit,
+                lambda d: d.groupby('contributor_name').agg({
+                    'contribution_amount': ['sum', 'count']
+                }).reset_index()
+            )
             grouped.columns = ['name', 'total', 'count']
             
             # Find contributors with multiple near-limit contributions
@@ -451,7 +426,7 @@ class FraudDetectionService:
         
         return patterns
     
-    def _detect_temporal_anomalies(self, df: pd.DataFrame) -> List[FraudPattern]:
+    async def _detect_temporal_anomalies(self, df: pd.DataFrame) -> List[FraudPattern]:
         """Detect unusual timing patterns"""
         patterns = []
         
@@ -463,9 +438,12 @@ class FraudDetectionService:
         
         # Group by contributor and date
         df['date_str'] = df['date'].dt.date.astype(str)
-        grouped = df.groupby(['contributor_name', 'date_str']).agg({
-            'contribution_amount': ['sum', 'count']
-        }).reset_index()
+        grouped = await async_dataframe_operation(
+            df,
+            lambda d: d.groupby(['contributor_name', 'date_str']).agg({
+                'contribution_amount': ['sum', 'count']
+            }).reset_index()
+        )
         grouped.columns = ['name', 'date', 'total', 'count']
         
         # Find contributors with many contributions on same day
@@ -488,12 +466,13 @@ class FraudDetectionService:
         
         return patterns
     
-    def _detect_round_number_patterns(self, df: pd.DataFrame) -> List[FraudPattern]:
+    async def _detect_round_number_patterns(self, df: pd.DataFrame) -> List[FraudPattern]:
         """Detect excessive round number contributions"""
         patterns = []
         
         # Convert to numeric and fill NaN values
-        contribution_amounts = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0)
+        contribution_amounts = await async_to_numeric(df['contribution_amount'], errors='coerce')
+        contribution_amounts = contribution_amounts.fillna(0)
         
         # Round numbers: multiples of 100, 500, 1000
         df['is_round'] = (
@@ -506,9 +485,12 @@ class FraudDetectionService:
         
         if len(round_contribs) > len(df) * 0.7:  # More than 70% are round numbers
             # Group by contributor
-            grouped = round_contribs.groupby('contributor_name').agg({
-                'contribution_amount': ['sum', 'count']
-            }).reset_index()
+            grouped = await async_dataframe_operation(
+                round_contribs,
+                lambda d: d.groupby('contributor_name').agg({
+                    'contribution_amount': ['sum', 'count']
+                }).reset_index()
+            )
             grouped.columns = ['name', 'total', 'count']
             
             # Find contributors with many round number contributions
@@ -530,7 +512,7 @@ class FraudDetectionService:
         
         return patterns
     
-    def _detect_same_day_patterns(self, df: pd.DataFrame) -> List[FraudPattern]:
+    async def _detect_same_day_patterns(self, df: pd.DataFrame) -> List[FraudPattern]:
         """Detect multiple contributions from same source on same day"""
         patterns = []
         
@@ -548,9 +530,12 @@ class FraudDetectionService:
             df['date'].dt.date.astype(str)
         )
         
-        grouped = df.groupby('key').agg({
-            'contribution_amount': ['sum', 'count']
-        }).reset_index()
+        grouped = await async_dataframe_operation(
+            df,
+            lambda d: d.groupby('key').agg({
+                'contribution_amount': ['sum', 'count']
+            }).reset_index()
+        )
         grouped.columns = ['key', 'total', 'count']
         
         # Find groups with multiple contributions
@@ -641,14 +626,15 @@ class FraudDetectionService:
         patterns.extend(await self._detect_threshold_clustering_with_aggregation(aggregated_donors, contributions))
         
         # Keep existing temporal and round number patterns
-        patterns.extend(self._detect_temporal_anomalies(df))
-        patterns.extend(self._detect_round_number_patterns(df))
-        patterns.extend(self._detect_same_day_patterns(df))
+        patterns.extend(await self._detect_temporal_anomalies(df))
+        patterns.extend(await self._detect_round_number_patterns(df))
+        patterns.extend(await self._detect_same_day_patterns(df))
         
         # Calculate risk score
         total_suspicious = sum(p.total_amount for p in patterns)
-        contribution_amounts = pd.to_numeric(df['contribution_amount'], errors='coerce').fillna(0)
-        total_contributions = contribution_amounts.sum()
+        contribution_amounts = await async_to_numeric(df['contribution_amount'], errors='coerce')
+        contribution_amounts = contribution_amounts.fillna(0)
+        total_contributions = await async_dataframe_operation(contribution_amounts, lambda s: s.sum())
         risk_score = min(100.0, (total_suspicious / total_contributions * 100) if total_contributions > 0 else 0.0)
         
         return FraudAnalysis(

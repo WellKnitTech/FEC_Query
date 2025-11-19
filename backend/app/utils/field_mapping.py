@@ -1,365 +1,343 @@
 """
-Unified field mapping for FEC data sources.
+Utility functions for mapping FEC API response fields to internal schema
 
-This module provides mappings between bulk import field names and API field names,
-and functions to normalize data from either source to a unified format.
+This module provides functions to normalize data from different sources (bulk CSV files,
+FEC API responses) into a unified format for consistent processing and storage.
 """
-
-from typing import Dict, Any, Optional
-from datetime import datetime
+from typing import Dict, Any, Optional, Union
+from datetime import datetime, date
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Mapping from bulk import field names to unified/canonical field names
-BULK_TO_UNIFIED = {
-    # Core identifiers
-    'SUB_ID': 'contribution_id',
-    'CMTE_ID': 'committee_id',
-    'CAND_ID': 'candidate_id',
-    'TRAN_ID': 'transaction_id',
-    
-    # Dates
-    'TRANSACTION_DT': 'contribution_date',
-    
-    # Amounts
-    'TRANSACTION_AMT': 'contribution_amount',
-    
-    # Contributor information
-    'NAME': 'contributor_name',
-    'CITY': 'contributor_city',
-    'STATE': 'contributor_state',
-    'ZIP_CODE': 'contributor_zip',
-    'EMPLOYER': 'contributor_employer',
-    'OCCUPATION': 'contributor_occupation',
-    
-    # FEC metadata
-    'AMNDT_IND': 'amendment_indicator',
-    'RPT_TP': 'report_type',
-    'ENTITY_TP': 'entity_type',
-    'OTHER_ID': 'other_id',
-    'FILE_NUM': 'file_number',
-    'MEMO_CD': 'memo_code',
-    'MEMO_TEXT': 'memo_text',
-    'TRAN_TP': 'contribution_type',
-}
 
-# Mapping from API field names to unified/canonical field names
-API_TO_UNIFIED = {
-    # Core identifiers
-    'sub_id': 'contribution_id',
-    'committee_id': 'committee_id',
-    'candidate_id': 'candidate_id',
-    'transaction_id': 'transaction_id',
+def map_contribution_fields(api_response: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Map FEC API contribution response to internal Contribution schema
     
-    # Dates
-    'contribution_receipt_date': 'contribution_date',
-    'contribution_date': 'contribution_date',
-    'receipt_date': 'contribution_date',
+    Handles multiple field name variations used by the FEC API.
     
-    # Amounts
-    'contribution_receipt_amount': 'contribution_amount',
-    'contribution_amount': 'contribution_amount',
-    'contb_receipt_amt': 'contribution_amount',
-    'amount': 'contribution_amount',
+    Args:
+        api_response: Raw contribution data from FEC API
     
-    # Contributor information
-    'contributor_name': 'contributor_name',
-    'contributor': 'contributor_name',
-    'name': 'contributor_name',
-    'contributor_name_1': 'contributor_name',
-    'contributor_city': 'contributor_city',
-    'contributor_state': 'contributor_state',
-    'contributor_zip': 'contributor_zip',
-    'contributor_employer': 'contributor_employer',
-    'contributor_occupation': 'contributor_occupation',
+    Returns:
+        Dictionary with standardized field names matching Contribution schema
+    """
+    # Extract amount from multiple possible field names (FEC API uses contb_receipt_amt)
+    amount = 0.0
+    for amt_key in ['contb_receipt_amt', 'contribution_amount', 'contribution_receipt_amount', 
+                    'amount', 'contribution_receipt_amt']:
+        amt_val = api_response.get(amt_key)
+        if amt_val is not None:
+            try:
+                amount = float(amt_val)
+                if amount > 0:
+                    break
+            except (ValueError, TypeError):
+                continue
     
-    # FEC metadata
-    'amendment_indicator': 'amendment_indicator',
-    'report_type': 'report_type',
-    'entity_type': 'entity_type',
-    'other_id': 'other_id',
-    'file_number': 'file_number',
-    'memo_code': 'memo_code',
-    'memo_text': 'memo_text',
-    'contribution_type': 'contribution_type',
-    'receipt_type': 'contribution_type',
-}
+    # Extract contributor name from multiple possible fields
+    contributor_name = (
+        api_response.get("contributor_name") or 
+        api_response.get("contributor") or 
+        api_response.get("name") or 
+        api_response.get("contributor_name_1")
+    )
+    
+    # Map common field name variations
+    contrib_data = {
+        "contribution_id": api_response.get("sub_id") or api_response.get("contribution_id"),
+        "candidate_id": api_response.get("candidate_id"),
+        "committee_id": api_response.get("committee_id"),
+        "contributor_name": contributor_name,
+        "contributor_city": api_response.get("contributor_city") or api_response.get("city"),
+        "contributor_state": api_response.get("contributor_state") or api_response.get("state"),
+        "contributor_zip": (
+            api_response.get("contributor_zip") or 
+            api_response.get("zip_code") or 
+            api_response.get("zip")
+        ),
+        "contributor_employer": api_response.get("contributor_employer") or api_response.get("employer"),
+        "contributor_occupation": api_response.get("contributor_occupation") or api_response.get("occupation"),
+        "contribution_amount": amount,
+        "contribution_date": (
+            api_response.get("contribution_receipt_date") or 
+            api_response.get("contribution_date") or 
+            api_response.get("receipt_date")
+        ),
+        "contribution_type": (
+            api_response.get("contribution_type") or 
+            api_response.get("transaction_type")
+        ),
+        "receipt_type": api_response.get("receipt_type")
+    }
+    
+    return contrib_data
 
-# Reverse mapping: unified field names to bulk import field names
-UNIFIED_TO_BULK = {v: k for k, v in BULK_TO_UNIFIED.items()}
 
-# Reverse mapping: unified field names to API field names (prefer most common)
-UNIFIED_TO_API = {
-    'contribution_id': 'sub_id',
-    'committee_id': 'committee_id',
-    'candidate_id': 'candidate_id',
-    'transaction_id': 'transaction_id',
-    'contribution_date': 'contribution_receipt_date',
-    'contribution_amount': 'contribution_receipt_amount',
-    'contributor_name': 'contributor_name',
-    'contributor_city': 'contributor_city',
-    'contributor_state': 'contributor_state',
-    'contributor_zip': 'contributor_zip',
-    'contributor_employer': 'contributor_employer',
-    'contributor_occupation': 'contributor_occupation',
-    'amendment_indicator': 'amendment_indicator',
-    'report_type': 'report_type',
-    'entity_type': 'entity_type',
-    'other_id': 'other_id',
-    'file_number': 'file_number',
-    'memo_code': 'memo_code',
-    'memo_text': 'memo_text',
-    'contribution_type': 'contribution_type',
-}
-
-# Fields that should be preserved from bulk import when merging with API data
-BULK_PRESERVE_FIELDS = [
-    'TRANSACTION_DT', 'TRANSACTION_AMT', 'CMTE_ID', 'CAND_ID',
-    'AMNDT_IND', 'RPT_TP', 'TRAN_ID', 'ENTITY_TP', 'FILE_NUM',
-    'MEMO_CD', 'MEMO_TEXT', 'SUB_ID', 'NAME', 'CITY', 'STATE',
-    'ZIP_CODE', 'EMPLOYER', 'OCCUPATION', 'TRAN_TP', 'OTHER_ID'
-]
+def map_contribution_for_aggregation(api_response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Map FEC API contribution response for donor aggregation
+    
+    Similar to map_contribution_fields but returns None if contributor_name is missing
+    (required for aggregation).
+    
+    Args:
+        api_response: Raw contribution data from FEC API
+    
+    Returns:
+        Dictionary with standardized field names, or None if contributor_name is missing
+    """
+    # Extract contributor name from multiple possible fields
+    contributor_name = (
+        api_response.get('contributor_name') or 
+        api_response.get('contributor') or 
+        api_response.get('name') or
+        api_response.get('contributor_name_1')
+    )
+    
+    # Only include contributions with a valid name
+    if not contributor_name:
+        return None
+    
+    # Extract amount from multiple possible field names
+    amount = 0.0
+    for amt_key in ['contb_receipt_amt', 'contribution_amount', 'contribution_receipt_amount', 
+                    'amount', 'contribution_receipt_amt']:
+        amt_val = api_response.get(amt_key)
+        if amt_val is not None:
+            try:
+                amount = float(amt_val)
+                # Use the first valid numeric value found, even if it's 0
+                break
+            except (ValueError, TypeError):
+                continue
+    
+    contrib_dict = {
+        'contribution_id': api_response.get('contribution_id') or api_response.get('sub_id'),
+        'contributor_name': contributor_name,
+        'contributor_city': api_response.get('contributor_city') or api_response.get('city'),
+        'contributor_state': api_response.get('contributor_state') or api_response.get('state'),
+        'contributor_zip': api_response.get('contributor_zip') or api_response.get('zip'),
+        'contributor_employer': api_response.get('contributor_employer') or api_response.get('employer'),
+        'contributor_occupation': api_response.get('contributor_occupation') or api_response.get('occupation'),
+        'contribution_amount': amount,
+        'contribution_date': (
+            api_response.get('contribution_date') or 
+            api_response.get('contribution_receipt_date')
+        )
+    }
+    
+    return contrib_dict
 
 
 def normalize_from_bulk(bulk_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Normalize bulk import data to unified field names.
+    Normalize bulk import data (CSV format) to unified schema
+    
+    Maps FEC bulk CSV field names (e.g., SUB_ID, TRANSACTION_DT, TRANSACTION_AMT)
+    to internal schema field names (contribution_id, contribution_date, contribution_amount).
     
     Args:
-        bulk_data: Dictionary with bulk import field names
+        bulk_data: Raw bulk data dictionary with FEC CSV field names
         
     Returns:
-        Dictionary with unified field names
+        Dictionary with normalized field names matching internal schema
     """
     normalized = {}
     
-    for bulk_key, value in bulk_data.items():
-        unified_key = BULK_TO_UNIFIED.get(bulk_key, bulk_key)
-        normalized[unified_key] = value
+    # Map contribution ID
+    normalized['contribution_id'] = bulk_data.get('SUB_ID') or bulk_data.get('contribution_id')
+    
+    # Map dates - bulk data uses TRANSACTION_DT in MMDDYYYY format
+    normalized['contribution_date'] = bulk_data.get('TRANSACTION_DT') or bulk_data.get('contribution_date')
+    
+    # Map amounts - bulk data uses TRANSACTION_AMT
+    normalized['contribution_amount'] = bulk_data.get('TRANSACTION_AMT') or bulk_data.get('contribution_amount')
+    
+    # Map committee and candidate IDs
+    normalized['committee_id'] = bulk_data.get('CMTE_ID') or bulk_data.get('committee_id')
+    normalized['candidate_id'] = bulk_data.get('CAND_ID') or bulk_data.get('candidate_id')
+    
+    # Map contributor information
+    normalized['contributor_name'] = bulk_data.get('NAME') or bulk_data.get('contributor_name')
+    normalized['contributor_city'] = bulk_data.get('CITY') or bulk_data.get('contributor_city')
+    normalized['contributor_state'] = bulk_data.get('STATE') or bulk_data.get('contributor_state')
+    normalized['contributor_zip'] = bulk_data.get('ZIP_CODE') or bulk_data.get('ZIP') or bulk_data.get('contributor_zip')
+    normalized['contributor_employer'] = bulk_data.get('EMPLOYER') or bulk_data.get('contributor_employer')
+    normalized['contributor_occupation'] = bulk_data.get('OCCUPATION') or bulk_data.get('contributor_occupation')
+    
+    # Map transaction type
+    normalized['contribution_type'] = bulk_data.get('TRAN_TP') or bulk_data.get('contribution_type')
+    
+    # Map other fields
+    normalized['amendment_indicator'] = bulk_data.get('AMNDT_IND') or bulk_data.get('amendment_indicator')
+    normalized['report_type'] = bulk_data.get('RPT_TP') or bulk_data.get('report_type')
+    normalized['transaction_id'] = bulk_data.get('TRAN_ID') or bulk_data.get('transaction_id')
+    normalized['other_id'] = bulk_data.get('OTHER_ID') or bulk_data.get('other_id')
+    normalized['file_number'] = bulk_data.get('FILE_NUM') or bulk_data.get('file_number')
+    normalized['memo_code'] = bulk_data.get('MEMO_CD') or bulk_data.get('memo_code')
     
     return normalized
 
 
 def normalize_from_api(api_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Normalize API response data to unified field names.
+    Normalize FEC API response data to unified schema
+    
+    Maps FEC API field names (e.g., sub_id, contribution_receipt_date, contribution_receipt_amount)
+    to internal schema field names (contribution_id, contribution_date, contribution_amount).
     
     Args:
-        api_data: Dictionary with API field names
+        api_data: Raw API response data dictionary
         
     Returns:
-        Dictionary with unified field names
+        Dictionary with normalized field names matching internal schema
     """
     normalized = {}
     
-    for api_key, value in api_data.items():
-        unified_key = API_TO_UNIFIED.get(api_key, api_key)
-        # If multiple API fields map to same unified key, prefer non-None values
-        if unified_key not in normalized or normalized[unified_key] is None:
-            normalized[unified_key] = value
+    # Map contribution ID
+    normalized['contribution_id'] = api_data.get('sub_id') or api_data.get('contribution_id')
+    
+    # Map dates - API uses contribution_receipt_date
+    normalized['contribution_date'] = (
+        api_data.get('contribution_receipt_date') or 
+        api_data.get('contribution_date') or 
+        api_data.get('receipt_date')
+    )
+    
+    # Map amounts - API uses contribution_receipt_amount
+    normalized['contribution_amount'] = (
+        api_data.get('contribution_receipt_amount') or 
+        api_data.get('contribution_amount') or 
+        api_data.get('contb_receipt_amt')
+    )
+    
+    # Map committee and candidate IDs
+    normalized['committee_id'] = api_data.get('committee_id')
+    normalized['candidate_id'] = api_data.get('candidate_id')
+    
+    # Map contributor information
+    normalized['contributor_name'] = (
+        api_data.get('contributor_name') or 
+        api_data.get('contributor') or 
+        api_data.get('name')
+    )
+    normalized['contributor_city'] = api_data.get('contributor_city') or api_data.get('city')
+    normalized['contributor_state'] = api_data.get('contributor_state') or api_data.get('state')
+    normalized['contributor_zip'] = (
+        api_data.get('contributor_zip') or 
+        api_data.get('zip_code') or 
+        api_data.get('zip')
+    )
+    normalized['contributor_employer'] = api_data.get('contributor_employer') or api_data.get('employer')
+    normalized['contributor_occupation'] = api_data.get('contributor_occupation') or api_data.get('occupation')
+    
+    # Map transaction type
+    normalized['contribution_type'] = (
+        api_data.get('contribution_type') or 
+        api_data.get('transaction_type')
+    )
+    
+    # Map other fields
+    normalized['amendment_indicator'] = api_data.get('amendment_indicator')
+    normalized['report_type'] = api_data.get('report_type')
+    normalized['transaction_id'] = api_data.get('transaction_id')
+    normalized['other_id'] = api_data.get('other_id')
+    normalized['file_number'] = api_data.get('file_number')
+    normalized['memo_code'] = api_data.get('memo_code')
     
     return normalized
 
 
-def extract_unified_field(data: Dict[str, Any], unified_field: str, source: Optional[str] = None) -> Any:
+def extract_unified_field(data: Dict[str, Any], field_name: str, source: str) -> Optional[Any]:
     """
-    Extract a unified field from data, checking both bulk and API field names.
+    Extract a unified field from data based on source type
     
     Args:
-        data: Dictionary with either bulk or API field names
-        unified_field: The unified field name to extract
-        source: Optional hint about source ('bulk' or 'api')
+        data: Data dictionary (bulk or API format)
+        field_name: Unified field name (e.g., 'contribution_date', 'contribution_amount')
+        source: Source type ('bulk' or 'api')
         
     Returns:
-        The field value, or None if not found
+        Field value or None if not found
     """
-    # If source is known, use appropriate mapping
     if source == 'bulk':
-        bulk_field = UNIFIED_TO_BULK.get(unified_field)
-        if bulk_field and bulk_field in data:
-            return data[bulk_field]
-    elif source == 'api':
-        api_field = UNIFIED_TO_API.get(unified_field)
-        if api_field and api_field in data:
-            return data[api_field]
-        # Also check other API field variants
-        for api_key, mapped_unified in API_TO_UNIFIED.items():
-            if mapped_unified == unified_field and api_key in data:
-                return data[api_key]
-    
-    # Unknown source or field not found - try both mappings
-    # Try bulk import field
-    bulk_field = UNIFIED_TO_BULK.get(unified_field)
-    if bulk_field and bulk_field in data:
-        return data[bulk_field]
-    
-    # Try API field
-    api_field = UNIFIED_TO_API.get(unified_field)
-    if api_field and api_field in data:
-        return data[api_field]
-    
-    # Try all API field variants
-    for api_key, mapped_unified in API_TO_UNIFIED.items():
-        if mapped_unified == unified_field and api_key in data:
-            return data[api_key]
-    
-    # Try direct match
-    if unified_field in data:
-        return data[unified_field]
-    
-    return None
+        # Map unified field names to bulk CSV field names
+        field_mapping = {
+            'contribution_id': 'SUB_ID',
+            'contribution_date': 'TRANSACTION_DT',
+            'contribution_amount': 'TRANSACTION_AMT',
+            'committee_id': 'CMTE_ID',
+            'candidate_id': 'CAND_ID',
+            'contributor_name': 'NAME',
+            'contributor_city': 'CITY',
+            'contributor_state': 'STATE',
+            'contributor_zip': 'ZIP_CODE',
+            'contributor_employer': 'EMPLOYER',
+            'contributor_occupation': 'OCCUPATION',
+        }
+        bulk_field = field_mapping.get(field_name, field_name)
+        return data.get(bulk_field) or data.get(field_name)
+    else:
+        # For API, use the unified field name directly or common variations
+        return data.get(field_name)
 
 
-def get_date_field(data: Dict[str, Any], source: Optional[str] = None) -> Optional[str]:
+def get_date_field(data: Dict[str, Any], source: str) -> Optional[str]:
     """
-    Extract contribution date from data, checking all possible field names.
+    Get contribution date field from data based on source
     
     Args:
-        data: Dictionary with either bulk or API field names
-        source: Optional hint about source ('bulk' or 'api')
+        data: Data dictionary
+        source: Source type ('bulk' or 'api')
         
     Returns:
-        String date value if found, None otherwise (will be parsed by date_utils)
+        Date value as string or None
     """
-    # Try unified field first
-    date_value = extract_unified_field(data, 'contribution_date', source)
-    
-    if date_value:
-        if isinstance(date_value, datetime):
-            return date_value.strftime('%Y-%m-%d')
-        if isinstance(date_value, str) and date_value.strip() and date_value.lower() != 'none':
-            # Will be parsed by date_utils
-            return date_value
-    
-    # Try bulk import field directly
-    if 'TRANSACTION_DT' in data:
-        trans_dt = data['TRANSACTION_DT']
-        # Debug logging
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.debug(f"get_date_field: Found TRANSACTION_DT in data: value={trans_dt}, type={type(trans_dt).__name__ if trans_dt else 'None'}")
-        
-        # Skip None, empty strings, string "None", and string "nan" (pandas NaN conversion issue)
-        if trans_dt is not None:
-            trans_dt_str = str(trans_dt).strip().lower()
-            # Skip empty, "none", "nan", "null", etc.
-            if trans_dt_str and trans_dt_str not in ['none', 'nan', 'null', '']:
-                result = str(trans_dt).strip()
-                logger.debug(f"get_date_field: Returning TRANSACTION_DT value: '{result}'")
-                return result
-            else:
-                logger.debug(f"get_date_field: TRANSACTION_DT value is None, empty, or invalid string: '{trans_dt}'")
-        else:
-            logger.debug(f"get_date_field: TRANSACTION_DT value is None")
-    
-    # Try API fields directly
-    for api_field in ['contribution_receipt_date', 'contribution_date', 'receipt_date']:
-        if api_field in data and data[api_field]:
-            api_date = data[api_field]
-            if api_date and str(api_date).strip() and str(api_date).lower() != 'none':
-                return str(api_date).strip()
-    
-    return None
+    return extract_unified_field(data, 'contribution_date', source)
 
 
-def get_amount_field(data: Dict[str, Any], source: Optional[str] = None) -> Optional[float]:
+def get_amount_field(data: Dict[str, Any], source: str) -> Optional[Union[str, float]]:
     """
-    Extract contribution amount from data, checking all possible field names.
+    Get contribution amount field from data based on source
     
     Args:
-        data: Dictionary with either bulk or API field names
-        source: Optional hint about source ('bulk' or 'api')
+        data: Data dictionary
+        source: Source type ('bulk' or 'api')
         
     Returns:
-        float amount if found, None otherwise
+        Amount value (string for bulk, float for API) or None
     """
-    # Try unified field first
-    amount_value = extract_unified_field(data, 'contribution_amount', source)
-    
-    if amount_value is not None:
-        try:
-            return float(amount_value)
-        except (ValueError, TypeError):
-            pass
-    
-    # Try bulk import field directly
-    if 'TRANSACTION_AMT' in data and data['TRANSACTION_AMT']:
-        try:
-            return float(str(data['TRANSACTION_AMT']).replace('$', '').replace(',', ''))
-        except (ValueError, TypeError):
-            pass
-    
-    # Try API fields directly
-    for api_field in ['contribution_receipt_amount', 'contribution_amount', 'contb_receipt_amt', 'amount']:
-        if api_field in data and data[api_field] is not None:
-            try:
-                return float(data[api_field])
-            except (ValueError, TypeError):
-                pass
-    
-    return None
+    return extract_unified_field(data, 'contribution_amount', source)
 
 
-def merge_raw_data(existing_raw_data: Dict[str, Any], new_raw_data: Dict[str, Any], source: str) -> Dict[str, Any]:
+def merge_raw_data(existing_raw: Optional[Dict[str, Any]], new_raw: Dict[str, Any], source: str) -> Dict[str, Any]:
     """
-    Intelligently merge raw_data from two sources.
-    
-    Strategy:
-    - Preserve bulk import fields (TRANSACTION_DT, etc.) when merging API data
-    - Add new fields from new source
-    - Prefer non-None values from new source for overlapping fields
-    - Track data source in metadata
+    Intelligently merge raw_data dictionaries, preserving bulk fields and adding API fields
     
     Args:
-        existing_raw_data: Existing raw_data dictionary
-        new_raw_data: New raw_data dictionary to merge
+        existing_raw: Existing raw_data dictionary (may be None)
+        new_raw: New raw_data dictionary
         source: Source of new data ('bulk' or 'api')
         
     Returns:
         Merged raw_data dictionary
     """
-    if not existing_raw_data:
-        return new_raw_data.copy() if new_raw_data else {}
+    if existing_raw is None:
+        return new_raw.copy()
     
-    if not isinstance(existing_raw_data, dict):
-        logger.warning(f"merge_raw_data: existing_raw_data is not a dict, type: {type(existing_raw_data)}")
-        return new_raw_data.copy() if new_raw_data else {}
+    merged = existing_raw.copy()
     
-    if not new_raw_data:
-        return existing_raw_data.copy()
-    
-    # Start with existing data
-    merged = existing_raw_data.copy()
-    
-    # Determine which fields to preserve from existing data
-    if source == 'api':
-        # When merging API data, preserve bulk import fields
-        bulk_fields_to_preserve = {
-            k: v for k, v in existing_raw_data.items()
-            if k in BULK_PRESERVE_FIELDS and v is not None
-        }
-    
-    # Merge new data (new data takes precedence for non-None values)
-    for key, value in new_raw_data.items():
-        if value is not None:
-            merged[key] = value
-        elif key not in merged:
-            # Add key even if None, to track that it was checked
-            merged[key] = value
-    
-    # Restore preserved bulk fields if they were overwritten with None
-    if source == 'api':
-        for key, value in bulk_fields_to_preserve.items():
+    if source == 'bulk':
+        # For bulk data, preserve existing API fields, update/add bulk fields
+        # Bulk fields take precedence for bulk updates
+        merged.update(new_raw)
+    else:
+        # For API data, preserve existing bulk fields, add/update API fields
+        # Only add API-specific fields, don't overwrite bulk fields
+        for key, value in new_raw.items():
             if key not in merged or merged[key] is None:
                 merged[key] = value
     
-    # Track data sources in metadata
-    if '_sources' not in merged:
-        merged['_sources'] = []
-    
-    if source not in merged['_sources']:
-        merged['_sources'].append(source)
-    
     return merged
-

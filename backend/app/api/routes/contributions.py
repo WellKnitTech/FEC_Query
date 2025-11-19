@@ -1,10 +1,27 @@
+"""
+API routes for contribution-related endpoints
+
+This module provides FastAPI routes for querying and analyzing campaign contributions.
+It handles both API and database queries, with support for filtering, aggregation,
+and analysis operations.
+
+Endpoints:
+- GET /: List contributions with filtering
+- GET /unique-contributors: Get unique contributors for a candidate
+- GET /analysis: Get contribution analysis statistics
+- GET /aggregated-donors: Get aggregated donor information
+
+All endpoints support filtering by candidate_id, committee_id, date ranges, and amounts.
+"""
 from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import Optional, List
+import asyncio
 from app.services.fec_client import FECClient
 from app.models.schemas import Contribution, ContributionAnalysis, AggregatedDonor
 from app.services.analysis import AnalysisService
 from app.services.donor_aggregation import DonorAggregationService
 from app.api.dependencies import get_fec_client, get_analysis_service
+from app.utils.field_mapping import map_contribution_fields, map_contribution_for_aggregation
 import logging
 
 logger = logging.getLogger(__name__)
@@ -36,41 +53,11 @@ async def get_contributions(
             max_date=max_date,
             limit=limit
         )
-        # Map API response to our schema, handling missing fields
+        # Map API response to our schema using shared utility
         contributions = []
         for contrib in results:
             try:
-                # Extract amount from multiple possible field names (FEC API uses contb_receipt_amt)
-                amount = 0.0
-                for amt_key in ['contb_receipt_amt', 'contribution_amount', 'contribution_receipt_amount', 'amount', 'contribution_receipt_amt']:
-                    amt_val = contrib.get(amt_key)
-                    if amt_val is not None:
-                        try:
-                            amount = float(amt_val)
-                            if amount > 0:
-                                break
-                        except (ValueError, TypeError):
-                            continue
-                
-                # Also check contributor_name field variations (FEC API uses contributor)
-                contributor_name = contrib.get("contributor_name") or contrib.get("contributor") or contrib.get("name") or contrib.get("contributor_name_1")
-                
-                # Map common field name variations
-                contrib_data = {
-                    "contribution_id": contrib.get("sub_id") or contrib.get("contribution_id"),
-                    "candidate_id": contrib.get("candidate_id"),
-                    "committee_id": contrib.get("committee_id"),
-                    "contributor_name": contributor_name,
-                    "contributor_city": contrib.get("contributor_city") or contrib.get("city"),
-                    "contributor_state": contrib.get("contributor_state") or contrib.get("state"),
-                    "contributor_zip": contrib.get("contributor_zip") or contrib.get("zip_code") or contrib.get("zip"),
-                    "contributor_employer": contrib.get("contributor_employer") or contrib.get("employer"),
-                    "contributor_occupation": contrib.get("contributor_occupation") or contrib.get("occupation"),
-                    "contribution_amount": amount,
-                    "contribution_date": contrib.get("contribution_receipt_date") or contrib.get("contribution_date") or contrib.get("receipt_date"),
-                    "contribution_type": contrib.get("contribution_type") or contrib.get("transaction_type"),
-                    "receipt_type": contrib.get("receipt_type")
-                }
+                contrib_data = map_contribution_fields(contrib)
                 contributions.append(Contribution(**contrib_data))
             except Exception as e:
                 logger.warning(f"Skipping invalid contribution: {e}")
@@ -138,7 +125,7 @@ async def get_unique_contributors(
         # Also query FEC API to get contributions matching the search term
         # This ensures we find contributors even if they're not in the local database yet
         try:
-            fec_client = get_fec_client()
+            # fec_client is already injected via Depends(get_fec_client) in function signature
             logger.info(f"Querying FEC API for contributions matching '{search_term}'")
             
             # The FEC API's contributor_name parameter may require exact matches
@@ -148,24 +135,26 @@ async def get_unique_contributors(
             # 3. Try searching by last name variations
             
             # Strategy 1: Try exact/partial search via API
-            api_contributions = await fec_client.get_contributions(
-                contributor_name=search_term,
-                limit=5000  # Get a good sample to extract unique names
-            )
+            # Strategy 2: If search term looks like a last name, also query database in parallel
+            # Parallelize API call and database query for better performance
+            search_term_is_last_name = len(search_term.split()) == 1
             
-            logger.info(f"FEC API returned {len(api_contributions)} contributions for exact search '{search_term}'")
+            async def fetch_api_contributions():
+                """Fetch contributions from FEC API"""
+                return await fec_client.get_contributions(
+                    contributor_name=search_term,
+                    limit=5000  # Get a good sample to extract unique names
+                )
             
-            # Strategy 2: If we got few results and search term looks like a last name (single word),
-            # check the database first (which may have cached contributions from previous searches)
-            # before doing expensive API calls
-            if len(api_contributions) < 100 and len(search_term.split()) == 1:
-                logger.info(f"Search term '{search_term}' appears to be a last name, checking database cache first")
+            async def fetch_db_contributions():
+                """Fetch contributions from local database if search term is a last name"""
+                if not search_term_is_last_name:
+                    return []
                 
-                # First, try querying the database with a broader search
                 try:
                     from app.db.database import AsyncSessionLocal
                     from app.db.database import Contribution
-                    from sqlalchemy import select, func, distinct
+                    from sqlalchemy import select
                     
                     async with AsyncSessionLocal() as session:
                         # Search database for any contributions matching the search term
@@ -175,39 +164,60 @@ async def get_unique_contributors(
                         
                         db_result = await session.execute(db_query)
                         db_contribs = db_result.scalars().all()
-                        
-                        if db_contribs:
-                            logger.info(f"Found {len(db_contribs)} cached contributions in database matching '{search_term}'")
-                            # Convert database contributions to dict format
-                            for c in db_contribs:
-                                contrib_dict = {
-                                    'contribution_id': c.contribution_id,
-                                    'sub_id': c.contribution_id,
-                                    'contributor_name': c.contributor_name,
-                                    'contributor_city': c.contributor_city,
-                                    'contributor_state': c.contributor_state,
-                                    'contributor_zip': c.contributor_zip,
-                                    'contributor_employer': c.contributor_employer,
-                                    'contributor_occupation': c.contributor_occupation,
-                                    'contribution_amount': c.contribution_amount or 0,
-                                    'contribution_date': c.contribution_date.strftime('%Y-%m-%d') if c.contribution_date else None,
-                                    'contribution_receipt_date': c.contribution_date.strftime('%Y-%m-%d') if c.contribution_date else None,
-                                    'candidate_id': c.candidate_id,
-                                    'committee_id': c.committee_id,
-                                    'contribution_type': c.contribution_type
-                                }
-                                if c.raw_data:
-                                    contrib_dict.update(c.raw_data)
-                                
-                                # Check if already in api_contributions
-                                contrib_id = contrib_dict.get('contribution_id') or contrib_dict.get('sub_id')
-                                if not any((c.get('contribution_id') == contrib_id or c.get('sub_id') == contrib_id) 
-                                          for c in api_contributions):
-                                    api_contributions.append(contrib_dict)
-                            
-                            logger.info(f"Total contributions after database merge: {len(api_contributions)}")
-                except Exception as db_error:
-                    logger.warning(f"Error querying database cache: {db_error}")
+                        return [c for c in db_contribs]
+                except Exception as e:
+                    logger.warning(f"Error querying database for contributions: {e}")
+                    return []
+            
+            # Execute API and database queries in parallel
+            api_contributions, db_contribs = await asyncio.gather(
+                fetch_api_contributions(),
+                fetch_db_contributions(),
+                return_exceptions=True
+            )
+            
+            # Handle exceptions
+            if isinstance(api_contributions, Exception):
+                logger.error(f"Error fetching from API: {api_contributions}")
+                api_contributions = []
+            if isinstance(db_contribs, Exception):
+                logger.error(f"Error fetching from database: {db_contribs}")
+                db_contribs = []
+            
+            logger.info(f"FEC API returned {len(api_contributions)} contributions for exact search '{search_term}'")
+            
+            # If we got few results and search term looks like a last name (single word),
+            # use database results as well
+            if len(api_contributions) < 100 and search_term_is_last_name and db_contribs:
+                logger.info(f"Found {len(db_contribs)} cached contributions in database matching '{search_term}'")
+                # Convert database contributions to dict format
+                for c in db_contribs:
+                    contrib_dict = {
+                        'contribution_id': c.contribution_id,
+                        'sub_id': c.contribution_id,
+                        'contributor_name': c.contributor_name,
+                        'contributor_city': c.contributor_city,
+                        'contributor_state': c.contributor_state,
+                        'contributor_zip': c.contributor_zip,
+                        'contributor_employer': c.contributor_employer,
+                        'contributor_occupation': c.contributor_occupation,
+                        'contribution_amount': c.contribution_amount or 0,
+                        'contribution_date': c.contribution_date.strftime('%Y-%m-%d') if c.contribution_date else None,
+                        'contribution_receipt_date': c.contribution_date.strftime('%Y-%m-%d') if c.contribution_date else None,
+                        'candidate_id': c.candidate_id,
+                        'committee_id': c.committee_id,
+                        'contribution_type': c.contribution_type
+                    }
+                    if c.raw_data:
+                        contrib_dict.update(c.raw_data)
+                    
+                    # Check if already in api_contributions
+                    contrib_id = contrib_dict.get('contribution_id') or contrib_dict.get('sub_id')
+                    if not any((c.get('contribution_id') == contrib_id or c.get('sub_id') == contrib_id) 
+                              for c in api_contributions):
+                        api_contributions.append(contrib_dict)
+                
+                logger.info(f"Total contributions after database merge: {len(api_contributions)}")
                 
                 # Only do expensive API call if we still have very few results
                 if len(api_contributions) < 50:
@@ -354,45 +364,12 @@ async def get_aggregated_donors(
         
         logger.info(f"Found {len(contributions)} contributions to aggregate")
         
-        # Convert contributions to dictionaries for aggregation service
+        # Convert contributions to dictionaries for aggregation service using shared utility
         contrib_dicts = []
         for contrib in contributions:
-            # Extract contributor name from multiple possible fields
-            contrib_name = (
-                contrib.get('contributor_name') or 
-                contrib.get('contributor') or 
-                contrib.get('name') or
-                contrib.get('contributor_name_1')
-            )
-            
-            # Only include contributions with a valid name
-            if not contrib_name:
-                continue
-            
-            # Extract amount from multiple possible field names (FEC API uses contb_receipt_amt)
-            amount = 0.0
-            for amt_key in ['contb_receipt_amt', 'contribution_amount', 'contribution_receipt_amount', 'amount', 'contribution_receipt_amt']:
-                amt_val = contrib.get(amt_key)
-                if amt_val is not None:
-                    try:
-                        amount = float(amt_val)
-                        # Use the first valid numeric value found, even if it's 0
-                        break
-                    except (ValueError, TypeError):
-                        continue
-                
-            contrib_dict = {
-                'contribution_id': contrib.get('contribution_id') or contrib.get('sub_id'),
-                'contributor_name': contrib_name,
-                'contributor_city': contrib.get('contributor_city') or contrib.get('city'),
-                'contributor_state': contrib.get('contributor_state') or contrib.get('state'),
-                'contributor_zip': contrib.get('contributor_zip') or contrib.get('zip'),
-                'contributor_employer': contrib.get('contributor_employer') or contrib.get('employer'),
-                'contributor_occupation': contrib.get('contributor_occupation') or contrib.get('occupation'),
-                'contribution_amount': amount,
-                'contribution_date': contrib.get('contribution_date') or contrib.get('contribution_receipt_date')
-            }
-            contrib_dicts.append(contrib_dict)
+            contrib_dict = map_contribution_for_aggregation(contrib)
+            if contrib_dict:  # Only include if contributor_name is present
+                contrib_dicts.append(contrib_dict)
         
         logger.info(f"Processing {len(contrib_dicts)} contributions for aggregation")
         

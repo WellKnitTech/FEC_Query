@@ -5,6 +5,7 @@ from typing import Optional
 
 from app.services.fec_client import FECClient
 from app.models.schemas import ExpenditureBreakdown
+from app.utils.thread_pool import async_to_numeric, async_dataframe_operation
 
 logger = logging.getLogger(__name__)
 
@@ -55,16 +56,21 @@ class ExpenditureAnalysisService:
             df['expenditure_purpose'] = None
         
         # Convert expenditure_amount to float, handling None, strings, and other types
-        df['expenditure_amount'] = pd.to_numeric(df['expenditure_amount'], errors='coerce').fillna(0.0)
+        df['expenditure_amount'] = await async_to_numeric(df['expenditure_amount'], errors='coerce')
+        df['expenditure_amount'] = df['expenditure_amount'].fillna(0.0)
         
-        # Calculate totals
-        total_expenditures = df['expenditure_amount'].sum()
+        # Calculate totals (offload to thread pool)
+        total_expenditures = await async_dataframe_operation(df, lambda d: d['expenditure_amount'].sum())
         total_transactions = len(df)
         average_expenditure = total_expenditures / total_transactions if total_transactions > 0 else 0.0
         
         # Expenditures by date
         df['date'] = pd.to_datetime(df['expenditure_date'], errors='coerce')
-        date_grouped = df[df['date'].notna()].groupby(df['date'].dt.date)['expenditure_amount'].sum()
+        df_dated = df[df['date'].notna()].copy()
+        date_grouped = await async_dataframe_operation(
+            df_dated,
+            lambda d: d.groupby(d['date'].dt.date)['expenditure_amount'].sum()
+        )
         expenditures_by_date = {str(k): float(v) for k, v in date_grouped.items() if k is not None}
         
         # Categorize expenditures by purpose keywords
@@ -91,20 +97,35 @@ class ExpenditureAnalysisService:
             else:
                 return 'Other'
         
-        df['category'] = df['expenditure_purpose'].apply(categorize_expenditure)
-        category_grouped = df.groupby('category')['expenditure_amount'].sum()
+        df['category'] = await async_dataframe_operation(
+            df,
+            lambda d: d['expenditure_purpose'].apply(categorize_expenditure)
+        )
+        category_grouped = await async_dataframe_operation(
+            df,
+            lambda d: d.groupby('category')['expenditure_amount'].sum()
+        )
         expenditures_by_category = {k: float(v) for k, v in category_grouped.items()}
         
         # Top recipients
-        recipient_df = df.groupby('recipient_name').agg({
-            'expenditure_amount': ['sum', 'count']
-        }).reset_index()
+        recipient_df = await async_dataframe_operation(
+            df,
+            lambda d: d.groupby('recipient_name').agg({
+                'expenditure_amount': ['sum', 'count']
+            }).reset_index()
+        )
         recipient_df.columns = ['name', 'total', 'count']
-        recipient_df = recipient_df.sort_values('total', ascending=False).head(20)
+        recipient_df = await async_dataframe_operation(
+            recipient_df,
+            lambda d: d.sort_values('total', ascending=False).head(20)
+        )
         top_recipients = recipient_df.to_dict('records')
         
         # Expenditures by recipient (all)
-        recipient_all = df.groupby('recipient_name')['expenditure_amount'].sum().to_dict()
+        recipient_all = await async_dataframe_operation(
+            df,
+            lambda d: d.groupby('recipient_name')['expenditure_amount'].sum().to_dict()
+        )
         expenditures_by_recipient = [{'name': k, 'amount': float(v)} for k, v in recipient_all.items()]
         
         return ExpenditureBreakdown(

@@ -4,14 +4,19 @@ import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from sqlalchemy import select, and_, func
-
 from app.db.database import AsyncSessionLocal, Contribution
 from app.services.fec_client import FECClient
 from app.models.schemas import DonorStateAnalysis
 from app.services.shared.cycle_utils import convert_cycle_to_date_range, should_convert_cycle
+from app.services.shared.chunked_processor import ChunkedProcessor, DEFAULT_CHUNK_SIZE
 from app.utils.date_utils import serialize_date, extract_date_from_raw_data
+from app.utils.thread_pool import async_dataframe_operation
+from app.config import config
 
 logger = logging.getLogger(__name__)
+
+# Get chunk size from centralized config
+ANALYSIS_CHUNK_SIZE = config.ANALYSIS_CHUNK_SIZE
 
 
 class DonorAnalysisService:
@@ -32,21 +37,155 @@ class DonorAnalysisService:
         candidate = await self.fec_client.get_candidate(candidate_id)
         candidate_state = candidate.get('state') if candidate else None
         
+        # Store original cycle value before conversion
+        original_cycle = cycle
+        original_min_date = min_date
+        original_max_date = max_date
+        
         # Convert cycle to date range if provided and no explicit dates given
         if should_convert_cycle(cycle, min_date, max_date):
             min_date, max_date = convert_cycle_to_date_range(cycle)
             logger.debug(f"analyze_donor_states: Converted cycle {cycle} to date range: {min_date} to {max_date}")
         
-        # Get contributions
-        contributions = await self.fec_client.get_contributions(
-            candidate_id=candidate_id,
-            min_date=min_date,
-            max_date=max_date,
-            limit=10000,
-            two_year_transaction_period=cycle if not min_date and not max_date else None
-        )
+        # Try to get contributions directly from database first (more reliable)
+        contributions = None
+        try:
+            from app.db.database import AsyncSessionLocal, Contribution
+            from sqlalchemy import select, and_, func, or_
+            from datetime import datetime
+            
+            async with AsyncSessionLocal() as session:
+                # Build base query without limit for chunked processing
+                base_query = select(Contribution).where(
+                    Contribution.candidate_id == candidate_id
+                )
+                
+                # Filter by dates if provided
+                # Note: For cycle-based queries, we'll filter in memory after retrieval
+                # to avoid excluding contributions without dates
+                if min_date and not original_cycle:
+                    # Only filter by date if explicit dates provided (not from cycle conversion)
+                    try:
+                        min_date_obj = datetime.strptime(min_date, "%Y-%m-%d")
+                        base_query = base_query.where(Contribution.contribution_date >= min_date_obj)
+                    except ValueError:
+                        pass
+                
+                if max_date and not original_cycle:
+                    # Only filter by date if explicit dates provided (not from cycle conversion)
+                    try:
+                        max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
+                        base_query = base_query.where(Contribution.contribution_date <= max_date_obj)
+                    except ValueError:
+                        pass
+                
+                # Only get contributions with contributor_name (required for analysis)
+                base_query = base_query.where(Contribution.contributor_name.isnot(None))
+                base_query = base_query.where(Contribution.contributor_name != '')
+                base_query = base_query.order_by(Contribution.contribution_date.desc().nulls_last())
+                
+                # Use chunked processing to handle >10k contributions
+                processor = ChunkedProcessor(chunk_size=ANALYSIS_CHUNK_SIZE)
+                
+                def process_chunk(chunk_data):
+                    """Process a chunk of contributions and return them as dicts"""
+                    chunk_contributions = []
+                    for c in chunk_data:
+                        amount = float(c.contribution_amount) if c.contribution_amount else 0.0
+                        if amount == 0.0 and c.raw_data and isinstance(c.raw_data, dict):
+                            for amt_key in ['TRANSACTION_AMT', 'CONTB_AMT', 'contribution_amount', 'transaction_amt', 'contb_receipt_amt']:
+                                if amt_key in c.raw_data:
+                                    try:
+                                        amt_val = str(c.raw_data[amt_key]).strip()
+                                        amt_val = amt_val.replace('$', '').replace(',', '').strip()
+                                        if amt_val:
+                                            amount = float(amt_val)
+                                            break
+                                    except (ValueError, TypeError):
+                                        continue
+                        
+                        # Extract contributor_state from raw_data if missing
+                        contributor_state = c.contributor_state
+                        if not contributor_state and c.raw_data and isinstance(c.raw_data, dict):
+                            contributor_state = c.raw_data.get('STATE') or c.raw_data.get('contributor_state') or c.raw_data.get('state')
+                        
+                        contrib_dict = {
+                            "sub_id": c.contribution_id,
+                            "contribution_id": c.contribution_id,
+                            "candidate_id": c.candidate_id,
+                            "committee_id": c.committee_id,
+                            "contributor_name": c.contributor_name,
+                            "contributor_city": c.contributor_city,
+                            "contributor_state": contributor_state,
+                            "contributor_zip": c.contributor_zip,
+                            "contributor_employer": c.contributor_employer,
+                            "contributor_occupation": c.contributor_occupation,
+                            "contribution_amount": amount,
+                            "contribution_date": c.contribution_date,
+                            "contribution_type": c.contribution_type,
+                            "raw_data": c.raw_data
+                        }
+                        
+                        if c.raw_data and isinstance(c.raw_data, dict):
+                            for key, value in c.raw_data.items():
+                                if key not in contrib_dict or not contrib_dict[key]:
+                                    contrib_dict[key] = value
+                        
+                        chunk_contributions.append(contrib_dict)
+                    return {'contributions': chunk_contributions}
+                
+                # Process all contributions in chunks
+                processed = await processor.process_contributions_in_chunks(
+                    session, base_query, process_chunk
+                )
+                contributions = processed.get('contributions', [])
+                metadata = processed.get('metadata', {})
+                
+                logger.debug(f"analyze_donor_states: Retrieved {len(contributions)} contributions from database "
+                            f"({metadata.get('chunks_processed', 0)} chunks, "
+                            f"total processed: {metadata.get('total_processed', 0)})")
+                
+                # If cycle was provided, filter contributions by date range in memory
+                # This ensures we include contributions without dates (they belong to the cycle)
+                if original_cycle and not original_min_date and not original_max_date:
+                    filtered_contributions = []
+                    cycle_start = datetime(original_cycle - 1, 1, 1)
+                    cycle_end = datetime(original_cycle, 12, 31)
+                    
+                    for contrib in contributions:
+                        contrib_date = contrib.get('contribution_date')
+                        # Include if date is in range OR if date is None (undated contributions belong to cycle)
+                        if contrib_date is None:
+                            filtered_contributions.append(contrib)
+                        elif isinstance(contrib_date, datetime):
+                            if cycle_start <= contrib_date <= cycle_end:
+                                filtered_contributions.append(contrib)
+                        elif isinstance(contrib_date, str):
+                            try:
+                                contrib_date_obj = datetime.strptime(contrib_date, "%Y-%m-%d")
+                                if cycle_start <= contrib_date_obj <= cycle_end:
+                                    filtered_contributions.append(contrib)
+                            except (ValueError, TypeError):
+                                # If we can't parse the date, include it (undated)
+                                filtered_contributions.append(contrib)
+                    
+                    contributions = filtered_contributions
+                    logger.debug(f"analyze_donor_states: Filtered to {len(contributions)} contributions for cycle {original_cycle}")
+        except Exception as e:
+            logger.warning(f"analyze_donor_states: Error querying database directly, falling back to FEC client: {e}")
+            # Fallback to FEC client if database query fails
+            # Note: FEC API has its own pagination, so we'll get what we can
+            contributions = await self.fec_client.get_contributions(
+                candidate_id=candidate_id,
+                min_date=min_date,
+                max_date=max_date,
+                limit=ANALYSIS_CHUNK_SIZE,  # Use chunk size as limit
+                two_year_transaction_period=cycle if not min_date and not max_date else None
+            )
+            logger.debug(f"analyze_donor_states: Retrieved {len(contributions)} contributions from FEC client for candidate {candidate_id}, cycle {cycle}")
         
         if not contributions:
+            logger.warning(f"analyze_donor_states: No contributions found for candidate {candidate_id}, cycle {cycle}")
             return DonorStateAnalysis(
                 donors_by_state={},
                 donor_percentages_by_state={},
@@ -64,13 +203,22 @@ class DonorAnalysisService:
         
         df = pd.DataFrame(contributions)
         
+        logger.debug(f"analyze_donor_states: DataFrame created with {len(df)} rows, columns: {list(df.columns)}")
+        
         # Ensure required columns exist
         if 'contribution_amount' not in df.columns:
             df['contribution_amount'] = 0.0
         if 'contributor_name' not in df.columns:
             df['contributor_name'] = None
+            logger.warning(f"analyze_donor_states: contributor_name column missing from contributions")
         if 'contributor_state' not in df.columns:
             df['contributor_state'] = None
+            logger.warning(f"analyze_donor_states: contributor_state column missing from contributions")
+        
+        # Log how many have contributor_name and contributor_state
+        has_name_count = df['contributor_name'].notna().sum() if 'contributor_name' in df.columns else 0
+        has_state_count = df['contributor_state'].notna().sum() if 'contributor_state' in df.columns else 0
+        logger.debug(f"analyze_donor_states: {has_name_count}/{len(df)} contributions have contributor_name, {has_state_count}/{len(df)} have contributor_state")
         
         # Convert contribution_amount to float, and extract from raw_data if needed
         def extract_amount(row):
@@ -108,14 +256,25 @@ class DonorAnalysisService:
             
             return 0.0
         
-        df['contribution_amount'] = df.apply(extract_amount, axis=1)
+        # Offload apply operation to thread pool
+        df['contribution_amount'] = await async_dataframe_operation(
+            df,
+            lambda d: d.apply(extract_amount, axis=1)
+        )
         
-        logger.debug(f"analyze_donor_states: Total contribution amount: ${df['contribution_amount'].sum():,.2f}")
+        total_contrib_amount = await async_dataframe_operation(df, lambda d: d['contribution_amount'].sum())
+        logger.debug(f"analyze_donor_states: Total contribution amount: ${total_contrib_amount:,.2f}")
         logger.debug(f"analyze_donor_states: Number of contributions: {len(df)}")
         
+        # Filter out contributions without contributor_name
+        before_filter = len(df)
         df = df[df['contributor_name'].notna()].copy()
+        after_filter = len(df)
+        if before_filter > after_filter:
+            logger.debug(f"analyze_donor_states: Filtered out {before_filter - after_filter} contributions without contributor_name")
         
         if len(df) == 0:
+            logger.warning(f"analyze_donor_states: No contributions with contributor_name for candidate {candidate_id}, cycle {cycle}")
             return DonorStateAnalysis(
                 donors_by_state={},
                 donor_percentages_by_state={},
@@ -131,23 +290,35 @@ class DonorAnalysisService:
                 is_highly_out_of_state=False
             )
         
+        # Fill missing contributor_state with 'Unknown' for analysis
+        # But log how many are missing state info
+        missing_state_count = df['contributor_state'].isna().sum()
+        if missing_state_count > 0:
+            logger.warning(f"analyze_donor_states: {missing_state_count}/{len(df)} contributions missing contributor_state")
         df['contributor_state'] = df['contributor_state'].fillna('Unknown')
         
-        df['donor_key'] = df.apply(
-            lambda row: f"{row['contributor_name']}|{row['contributor_state']}" 
-            if pd.notna(row['contributor_state']) and row['contributor_state'] != 'Unknown'
-            else row['contributor_name'],
-            axis=1
+        df['donor_key'] = await async_dataframe_operation(
+            df,
+            lambda d: d.apply(
+                lambda row: f"{row['contributor_name']}|{row['contributor_state']}" 
+                if pd.notna(row['contributor_state']) and row['contributor_state'] != 'Unknown'
+                else row['contributor_name'],
+                axis=1
+            )
         )
         
         donor_states = {}
         donor_amounts = {}
         
+        # Process donors - this loop is necessary for logic, but groupby operations are offloaded
         for donor_key in df['donor_key'].unique():
             donor_df = df[df['donor_key'] == donor_key]
-            state_counts = donor_df.groupby('contributor_state')['contribution_amount'].sum()
+            state_counts = await async_dataframe_operation(
+                donor_df,
+                lambda d: d.groupby('contributor_state')['contribution_amount'].sum()
+            )
             primary_state = state_counts.idxmax() if len(state_counts) > 0 else 'Unknown'
-            total_amount = donor_df['contribution_amount'].sum()
+            total_amount = await async_dataframe_operation(donor_df, lambda d: d['contribution_amount'].sum())
             
             donor_states[donor_key] = primary_state
             donor_amounts[donor_key] = total_amount
@@ -163,7 +334,7 @@ class DonorAnalysisService:
             state_amounts[state] += donor_amounts[donor_key]
         
         total_unique_donors = len(donor_states)
-        total_contributions = df['contribution_amount'].sum()
+        total_contributions = await async_dataframe_operation(df, lambda d: d['contribution_amount'].sum())
         
         donor_percentages = {}
         amount_percentages = {}
@@ -252,7 +423,7 @@ class DonorAnalysisService:
                 query = query.order_by(
                     Contribution.contribution_amount.desc().nulls_last(),
                     Contribution.contribution_date.desc().nulls_last()
-                ).limit(limit)
+                ).limit(min(limit, 10000))  # Cap at 10k for listing queries
                 
                 result = await session.execute(query)
                 contributions = result.scalars().all()

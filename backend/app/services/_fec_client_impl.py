@@ -1,3 +1,32 @@
+"""
+FEC API Client Implementation
+
+This module provides the main FECClient class for interacting with the OpenFEC API.
+It handles caching, rate limiting, local database queries, and smart data merging.
+
+The FECClient provides:
+- Cached API requests with configurable TTLs
+- Rate limiting to respect API constraints
+- Local database queries for faster access
+- Smart merging of bulk and API data sources
+- Automatic candidate/committee backfilling
+
+Example:
+    ```python
+    from app.services.fec_client import FECClient
+    
+    client = FECClient()
+    
+    # Get contributions for a candidate
+    contributions = await client.get_contributions(
+        candidate_id="P00003392",
+        limit=100
+    )
+    
+    # Get candidate information
+    candidate = await client.get_candidate("P00003392")
+    ```
+"""
 import httpx
 import asyncio
 import os
@@ -55,16 +84,13 @@ class FECClient:
             self._api_key_pending = True
         
         self.base_url = get_fec_api_base_url()
-        self.bulk_data_enabled = os.getenv("BULK_DATA_ENABLED", "true").lower() == "true"
+        from app.config import config
+        self.bulk_data_enabled = config.BULK_DATA_ENABLED
         
         # Initialize refactored modules
         cache_ttls = {
-            "candidates": int(os.getenv("CACHE_TTL_CANDIDATES_HOURS", "168")),
-            "committees": int(os.getenv("CACHE_TTL_COMMITTEES_HOURS", "168")),
-            "financials": int(os.getenv("CACHE_TTL_FINANCIALS_HOURS", "24")),
-            "contributions": int(os.getenv("CACHE_TTL_CONTRIBUTIONS_HOURS", "24")),
-            "expenditures": int(os.getenv("CACHE_TTL_EXPENDITURES_HOURS", "24")),
-            "default": int(os.getenv("CACHE_TTL_HOURS", "24")),
+            # Use centralized config for cache TTLs
+            **config.get_cache_ttls(),
         }
         
         self.rate_limiter = RateLimiter(
@@ -94,7 +120,7 @@ class FECClient:
         # Lookback window for catching late-filed contributions (in days)
         # FEC allows late filings and amendments, so we fetch contributions from
         # (latest_date - lookback_days) to catch any that were filed late
-        self.contribution_lookback_days = int(os.getenv("CONTRIBUTION_LOOKBACK_DAYS", "30"))  # 30 days default
+        self.contribution_lookback_days = config.CONTRIBUTION_LOOKBACK_DAYS
     
     def _get_semaphore(self):
         """Get or create the semaphore for limiting concurrent requests"""
@@ -1045,14 +1071,24 @@ class FECClient:
                         else:
                             logger.debug(f"_query_local_contributions: contrib_date is None, date_str will be None")
                         
+                        # Extract contributor_state from raw_data if missing
+                        contributor_state = c.contributor_state
+                        if not contributor_state and c.raw_data and isinstance(c.raw_data, dict):
+                            contributor_state = c.raw_data.get('STATE') or c.raw_data.get('contributor_state') or c.raw_data.get('state')
+                        
+                        # Extract contributor_name from raw_data if missing
+                        contributor_name = c.contributor_name
+                        if not contributor_name and c.raw_data and isinstance(c.raw_data, dict):
+                            contributor_name = c.raw_data.get('NAME') or c.raw_data.get('contributor_name') or c.raw_data.get('name')
+                        
                         contrib_dict = {
                             "sub_id": c.contribution_id,
                             "contribution_id": c.contribution_id,
                             "candidate_id": final_candidate_id,
                             "committee_id": c.committee_id,
-                            "contributor_name": c.contributor_name,
+                            "contributor_name": contributor_name,
                             "contributor_city": c.contributor_city,
-                            "contributor_state": c.contributor_state,
+                            "contributor_state": contributor_state,
                             "contributor_zip": c.contributor_zip,
                             "contributor_employer": c.contributor_employer,
                             "contributor_occupation": c.contributor_occupation,
@@ -1117,34 +1153,136 @@ class FECClient:
                         # Get committees for this candidate
                         committees = await self.get_committees(candidate_id=candidate_id, limit=100)
                         if committees:
-                            # Query contributions for each committee and merge
+                            # Fix N+1: Query all committee contributions in a single query using IN clause
+                            # instead of querying each committee separately
                             committee_ids = [c.get('committee_id') for c in committees if c.get('committee_id')]
-                            for comm_id in committee_ids[:50]:  # Limit to avoid too many queries
-                                if len(local_data) >= limit:
-                                    break
-                                committee_contribs = await self._query_local_contributions(
-                                    committee_id=comm_id,
-                                    contributor_name=contributor_name,
-                                    min_amount=min_amount,
-                                    max_amount=max_amount,
-                                    min_date=min_date,
-                                    max_date=max_date,
-                                    limit=limit - len(local_data),
-                                    two_year_transaction_period=two_year_transaction_period
-                                ) or []
+                            
+                            if committee_ids:
+                                from app.db.database import AsyncSessionLocal, Contribution
+                                from sqlalchemy import select, and_, in_
                                 
-                                # Merge, avoiding duplicates and ONLY including contributions that match the candidate_id
-                                existing_ids = {c.get('contribution_id') or c.get('sub_id') for c in local_data}
-                                for contrib in committee_contribs:
-                                    contrib_id = contrib.get('contribution_id') or contrib.get('sub_id')
-                                    if contrib_id and contrib_id not in existing_ids:
-                                        # Only include if candidate_id matches or is missing (will be set to requested candidate_id)
-                                        contrib_candidate_id = contrib.get('candidate_id')
-                                        if not contrib_candidate_id or contrib_candidate_id == candidate_id:
-                                            if not contrib.get('candidate_id'):
-                                                contrib['candidate_id'] = candidate_id
-                                            local_data.append(contrib)
-                                            existing_ids.add(contrib_id)
+                                async with AsyncSessionLocal() as session:
+                                    # Build query with IN clause for all committee IDs (limit to 50 to avoid huge queries)
+                                    query = select(Contribution).where(
+                                        Contribution.committee_id.in_(committee_ids[:50])
+                                    )
+                                    
+                                    # Apply other filters
+                                    conditions = []
+                                    if contributor_name:
+                                        conditions.append(Contribution.contributor_name.ilike(f"%{contributor_name}%"))
+                                    if min_amount:
+                                        conditions.append(Contribution.contribution_amount >= min_amount)
+                                    if max_amount:
+                                        conditions.append(Contribution.contribution_amount <= max_amount)
+                                    if min_date:
+                                        from datetime import datetime
+                                        try:
+                                            min_date_obj = datetime.strptime(min_date, "%Y-%m-%d")
+                                            conditions.append(Contribution.contribution_date >= min_date_obj)
+                                        except ValueError:
+                                            pass
+                                    if max_date:
+                                        from datetime import datetime
+                                        try:
+                                            max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
+                                            conditions.append(Contribution.contribution_date <= max_date_obj)
+                                        except ValueError:
+                                            pass
+                                    
+                                    if conditions:
+                                        query = query.where(and_(*conditions))
+                                    
+                                    # Order and limit
+                                    query = query.order_by(Contribution.contribution_date.desc().nulls_last())
+                                    remaining_limit = limit - len(local_data)
+                                    if remaining_limit > 0:
+                                        query = query.limit(remaining_limit * 2)  # Get more to account for filtering
+                                    
+                                    result = await session.execute(query)
+                                    committee_contribs_objs = result.scalars().all()
+                                    
+                                    # Convert to dict format and merge with existing data
+                                    existing_ids = {c.get('contribution_id') or c.get('sub_id') for c in local_data}
+                                    for c in committee_contribs_objs:
+                                        contrib_id = c.contribution_id
+                                        if contrib_id not in existing_ids:
+                                            # Convert contribution object to dict (reuse logic from _query_local_contributions)
+                                            amount = float(c.contribution_amount) if c.contribution_amount else 0.0
+                                            if amount == 0.0 and c.raw_data and isinstance(c.raw_data, dict):
+                                                for amt_key in ['TRANSACTION_AMT', 'CONTB_AMT', 'contribution_amount', 'transaction_amt']:
+                                                    if amt_key in c.raw_data:
+                                                        try:
+                                                            amt_val = str(c.raw_data[amt_key]).strip()
+                                                            amt_val = amt_val.replace('$', '').replace(',', '').strip()
+                                                            if amt_val:
+                                                                amount = float(amt_val)
+                                                                break
+                                                        except (ValueError, TypeError):
+                                                            continue
+                                            
+                                            contrib_candidate_id = c.candidate_id
+                                            if not contrib_candidate_id and c.raw_data and isinstance(c.raw_data, dict):
+                                                contrib_candidate_id = c.raw_data.get('CAND_ID') or c.raw_data.get('candidate_id')
+                                            
+                                            final_candidate_id = contrib_candidate_id or candidate_id
+                                            
+                                            # Get date
+                                            contrib_date = await self.get_contribution_date(
+                                                contribution_id=c.contribution_id,
+                                                contribution_obj=c,
+                                                committee_id=c.committee_id,
+                                                candidate_id=final_candidate_id
+                                            )
+                                            
+                                            date_str = None
+                                            if contrib_date:
+                                                if isinstance(contrib_date, datetime):
+                                                    date_str = contrib_date.strftime("%Y-%m-%d")
+                                                else:
+                                                    from app.utils.date_utils import serialize_date
+                                                    date_str = serialize_date(contrib_date)
+                                            
+                                            contributor_state = c.contributor_state
+                                            if not contributor_state and c.raw_data and isinstance(c.raw_data, dict):
+                                                contributor_state = c.raw_data.get('STATE') or c.raw_data.get('contributor_state') or c.raw_data.get('state')
+                                            
+                                            contributor_name_val = c.contributor_name
+                                            if not contributor_name_val and c.raw_data and isinstance(c.raw_data, dict):
+                                                contributor_name_val = c.raw_data.get('NAME') or c.raw_data.get('contributor_name') or c.raw_data.get('name')
+                                            
+                                            contrib_dict = {
+                                                "sub_id": c.contribution_id,
+                                                "contribution_id": c.contribution_id,
+                                                "candidate_id": final_candidate_id,
+                                                "committee_id": c.committee_id,
+                                                "contributor_name": contributor_name_val,
+                                                "contributor_city": c.contributor_city,
+                                                "contributor_state": contributor_state,
+                                                "contributor_zip": c.contributor_zip,
+                                                "contributor_employer": c.contributor_employer,
+                                                "contributor_occupation": c.contributor_occupation,
+                                                "contribution_amount": amount,
+                                                "contribution_receipt_date": date_str,
+                                                "contribution_date": date_str,
+                                                "contribution_type": c.contribution_type,
+                                                "receipt_type": None
+                                            }
+                                            
+                                            if c.raw_data and isinstance(c.raw_data, dict):
+                                                for key, value in c.raw_data.items():
+                                                    if key not in contrib_dict or not contrib_dict[key]:
+                                                        contrib_dict[key] = value
+                                            
+                                            # Only include if candidate_id matches or is missing (will be set to requested candidate_id)
+                                            contrib_candidate_id = contrib_dict.get('candidate_id')
+                                            if not contrib_candidate_id or contrib_candidate_id == candidate_id:
+                                                if not contrib_dict.get('candidate_id'):
+                                                    contrib_dict['candidate_id'] = candidate_id
+                                                local_data.append(contrib_dict)
+                                                existing_ids.add(contrib_id)
+                                                if len(local_data) >= limit:
+                                                    break
                     except Exception as e:
                         logger.debug(f"Error querying contributions by committees: {e}")
                 

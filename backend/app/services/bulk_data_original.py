@@ -969,33 +969,45 @@ class BulkDataService:
                                         'last_updated_from': 'bulk'
                                     })
                             
-                            # Bulk insert new records
-                            if new_records:
-                                await session.execute(
-                                    text("""
-                                        INSERT INTO contributions 
-                                        (contribution_id, candidate_id, committee_id, contributor_name, 
-                                         contributor_city, contributor_state, contributor_zip, 
-                                         contributor_employer, contributor_occupation, contribution_amount,
-                                         contribution_date, contribution_type, amendment_indicator,
-                                         report_type, transaction_id, entity_type, other_id,
-                                         file_number, memo_code, memo_text, raw_data, created_at,
-                                         data_source, last_updated_from)
-                                        VALUES 
-                                        (:contribution_id, :candidate_id, :committee_id, :contributor_name,
-                                         :contributor_city, :contributor_state, :contributor_zip,
-                                         :contributor_employer, :contributor_occupation, :contribution_amount,
-                                         :contribution_date, :contribution_type, :amendment_indicator,
-                                         :report_type, :transaction_id, :entity_type, :other_id,
-                                         :file_number, :memo_code, :memo_text, :raw_data, :created_at,
-                                         :data_source, :last_updated_from)
-                                    """),
-                                    new_records
-                                )
+                            # Use savepoint for error recovery - if this chunk fails, rollback just this chunk
+                            try:
+                                async with session.begin_nested():
+                                    # Bulk insert new records
+                                    if new_records:
+                                        await session.execute(
+                                            text("""
+                                                INSERT INTO contributions 
+                                                (contribution_id, candidate_id, committee_id, contributor_name, 
+                                                 contributor_city, contributor_state, contributor_zip, 
+                                                 contributor_employer, contributor_occupation, contribution_amount,
+                                                 contribution_date, contribution_type, amendment_indicator,
+                                                 report_type, transaction_id, entity_type, other_id,
+                                                 file_number, memo_code, memo_text, raw_data, created_at,
+                                                 data_source, last_updated_from)
+                                                VALUES 
+                                                (:contribution_id, :candidate_id, :committee_id, :contributor_name,
+                                                 :contributor_city, :contributor_state, :contributor_zip,
+                                                 :contributor_employer, :contributor_occupation, :contribution_amount,
+                                                 :contribution_date, :contribution_type, :amendment_indicator,
+                                                 :report_type, :transaction_id, :entity_type, :other_id,
+                                                 :file_number, :memo_code, :memo_text, :raw_data, :created_at,
+                                                 :data_source, :last_updated_from)
+                                            """),
+                                            new_records
+                                        )
+                                    
+                                    # Commit the savepoint (nested transaction)
+                                    # The outer transaction will be committed below
+                            except Exception as e:
+                                # Rollback to savepoint (automatic with begin_nested context)
+                                logger.warning(f"Failed to insert contribution chunk {chunk_count}: {e}. Skipping this chunk.")
+                                # Continue with next chunk instead of failing entire operation
+                                continue
                             
+                            # Commit outer transaction after successful chunk processing
                             await session.commit()
                             
-                            inserted = len(new_records)
+                            inserted = len(new_records) if new_records else 0
                             total_records += inserted + updated_count
                             
                             # Update progress every 5 chunks to reduce overhead
@@ -1094,9 +1106,28 @@ class BulkDataService:
                                     await session.rollback()
                                     skipped_duplicates += 1
                     
-                    # Clear memory explicitly
+                    # Clear memory explicitly after processing each chunk
+                    # This helps prevent memory buildup during large imports
                     del chunk, records
                     gc.collect()
+                    
+                    # Log memory usage periodically for monitoring
+                    if chunk_count % 10 == 0:
+                        import sys
+                        try:
+                            memory_mb = sys.getsizeof(records) / (1024 * 1024) if 'records' in locals() else 0
+                            logger.debug(
+                                f"Memory cleanup after chunk {chunk_count}: "
+                                f"~{memory_mb:.2f}MB freed",
+                                extra={
+                                    "chunk_count": chunk_count,
+                                    "cycle": cycle,
+                                    "memory_freed_mb": round(memory_mb, 2),
+                                    "operation": "bulk_import_contributions"
+                                }
+                            )
+                        except Exception:
+                            pass  # Don't fail on memory logging
                     
                 logger.info(
                     f"CSV import complete: {total_records} records imported, "
@@ -1104,12 +1135,20 @@ class BulkDataService:
                     f"{chunk_count} chunks processed for cycle {cycle}"
                 )
                 
+                # Checkpoint WAL after large import to prevent WAL file growth
+                if total_records > 10000:  # Only checkpoint after large imports
+                    try:
+                        from app.lifecycle.tasks import checkpoint_wal_after_import
+                        await checkpoint_wal_after_import()
+                    except Exception as e:
+                        logger.warning(f"Could not checkpoint WAL after import: {e}")
+                
                 # Log summary statistics for verification
                 if total_records > 0:
                     async with AsyncSessionLocal() as session:
                         # Count total contributions for this candidate/cycle in database
-                        from app.db.database import Contribution
-                        from sqlalchemy import select, func, and_
+                        # Note: select, func, and_ are already imported at module level
+                        from sqlalchemy import func
                         from datetime import datetime
                         
                         # Count all contributions for this cycle

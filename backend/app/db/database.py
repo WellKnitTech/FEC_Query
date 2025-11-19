@@ -1,6 +1,43 @@
+"""
+Database models and connection management
+
+This module defines SQLAlchemy models for all database tables and provides
+database connection management, initialization, and migration support.
+
+Models:
+- APICache: Cache for FEC API responses
+- Contribution: Individual contribution records
+- Candidate: Candidate information
+- Committee: Committee information
+- BulkDataMetadata: Metadata for bulk data imports
+- BulkImportJob: Tracks bulk import progress
+- OperatingExpenditure: Operating expenditure records
+- IndependentExpenditure: Independent expenditure records
+- ContributionLimit: Historical contribution limits
+- AvailableCycle: Available election cycles
+
+The module also provides:
+- Database engine and session management
+- Connection pooling configuration
+- WAL mode configuration for SQLite
+- Database initialization and migration execution
+
+Example:
+    ```python
+    from app.db.database import AsyncSessionLocal, Contribution
+    
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Contribution).where(
+                Contribution.candidate_id == "P00003392"
+            )
+        )
+        contributions = result.scalars().all()
+    ```
+"""
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, String, Float, DateTime, Integer, Text, JSON, Index, text, UniqueConstraint
+from sqlalchemy import Column, String, Float, DateTime, Integer, Text, JSON, Index, text, UniqueConstraint, Boolean
 from datetime import datetime
 import os
 from dotenv import load_dotenv
@@ -19,6 +56,10 @@ class APICache(Base):
     response_data = Column(JSON)
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime)
+    
+    __table_args__ = (
+        Index('idx_cache_key_expires', 'cache_key', 'expires_at'),
+    )
 
 
 class Contribution(Base):
@@ -73,12 +114,15 @@ class BulkDataMetadata(Base):
     download_date = Column(DateTime, default=datetime.utcnow)
     file_path = Column(String)
     file_size = Column(Integer, nullable=True)  # File size in bytes
+    file_hash = Column(String, nullable=True, index=True)  # MD5 hash of file content
+    imported = Column(Boolean, default=False, index=True)  # Whether file has been imported
     record_count = Column(Integer, default=0)
     last_updated = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     __table_args__ = (
         Index('idx_cycle_data_type', 'cycle', 'data_type'),
+        Index('idx_file_hash', 'file_hash'),
     )
 
 
@@ -450,28 +494,42 @@ class AvailableCycle(Base):
     )
 
 
-# Database setup
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./fec_data.db")
+# Database setup - use centralized config
+from app.config import config
+
+DATABASE_URL = config.DATABASE_URL
+
 if DATABASE_URL.startswith("sqlite"):
     # For SQLite, we need to use aiosqlite
     # Configure connection pool and timeout settings for better concurrency handling
     # Note: aiosqlite uses different connection args than sqlite3
-    # Optimized pool settings based on refactoring analysis
+    # SQLite works better with smaller pools due to file-based locking
+    # WAL mode allows concurrent readers, but writes still need coordination
     engine = create_async_engine(
         DATABASE_URL.replace("sqlite://", "sqlite+aiosqlite://"),
         echo=False,
         future=True,
         pool_pre_ping=True,  # Verify connections before using
-        pool_size=20,  # Increased to handle high concurrency with large database
-        max_overflow=30,  # Increased overflow for burst traffic
-        pool_timeout=120.0,  # Increased timeout for getting connection from pool (2 minutes)
+        pool_size=config.SQLITE_POOL_SIZE,  # Smaller pool for SQLite (10 instead of 20)
+        max_overflow=config.SQLITE_MAX_OVERFLOW,  # Reduced overflow for SQLite (10 instead of 30)
+        pool_timeout=120.0,  # Timeout for getting connection from pool (2 minutes)
         pool_recycle=3600,  # Recycle connections after 1 hour to prevent stale connections
         connect_args={
             "timeout": 120.0,  # 120 second timeout for database operations
         }
     )
 else:
-    engine = create_async_engine(DATABASE_URL, echo=False, future=True)
+    # PostgreSQL or other database - use larger pool settings
+    engine = create_async_engine(
+        DATABASE_URL,
+        echo=False,
+        future=True,
+        pool_pre_ping=True,
+        pool_size=config.POSTGRES_POOL_SIZE,
+        max_overflow=config.POSTGRES_MAX_OVERFLOW,
+        pool_timeout=120.0,
+        pool_recycle=3600
+    )
 
 AsyncSessionLocal = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
@@ -494,40 +552,33 @@ async def get_db():
 
 
 async def init_db():
-    """Initialize database tables"""
+    """Initialize database tables and run Alembic migrations"""
     import logging
     logger = logging.getLogger(__name__)
     logger.info("Starting database initialization...")
     
-    # Run migrations first
-    logger.info("Running migrations...")
-    migrations = [
-        "add_file_size_column.py",
-        "add_resume_columns.py",
-        "add_contribution_fields.py",  # Add missing FEC fields to contributions table
-        "add_operating_expenditure_fields.py"  # Add missing FEC fields to operating_expenditures table
-    ]
-    for migration_name in migrations:
-        try:
-            from pathlib import Path
-            migration_script = Path(__file__).parent.parent.parent / "migrations" / migration_name
-            if migration_script.exists():
-                import subprocess
-                import sys
-                result = subprocess.run(
-                    [sys.executable, str(migration_script)],
-                    capture_output=True,
-                    text=True,
-                    cwd=str(Path(__file__).parent.parent.parent)
-                )
-                if result.returncode == 0:
-                    logger.info(f"Migration {migration_name} completed successfully")
-                elif "already exists" in result.stdout or "already exists" in result.stderr:
-                    logger.debug(f"Migration {migration_name}: columns already exist")
-                else:
-                    logger.warning(f"Migration {migration_name} output: {result.stdout} {result.stderr}")
-        except Exception as e:
-            logger.warning(f"Could not run migration {migration_name} automatically: {e}")
+    # Run Alembic migrations
+    logger.info("Running Alembic migrations...")
+    try:
+        from alembic.config import Config
+        from alembic import command
+        from pathlib import Path
+        
+        # Get path to alembic.ini (should be in backend/ directory)
+        backend_dir = Path(__file__).parent.parent.parent
+        alembic_ini_path = backend_dir / "alembic.ini"
+        
+        if alembic_ini_path.exists():
+            alembic_cfg = Config(str(alembic_ini_path))
+            # Run migrations to head
+            command.upgrade(alembic_cfg, "head")
+            logger.info("Alembic migrations completed successfully")
+        else:
+            logger.warning(f"Alembic config not found at {alembic_ini_path}. Skipping migrations.")
+    except Exception as e:
+        logger.error(f"Error running Alembic migrations: {e}", exc_info=True)
+        # Don't fail initialization if migrations fail - database might already be up to date
+        logger.warning("Continuing with database initialization despite migration error")
     
     try:
         logger.info("Opening database connection...")

@@ -8,6 +8,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import ContributionLimit
+from app.utils.transaction_types import get_contributor_category_from_code
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +107,8 @@ class ContributionLimitsService:
         """
         Infer contributor category from available FEC data fields.
         
-        Uses FEC transaction type codes (TRAN_TP) and committee types (CMTE_TP) to determine
-        if the contributor is an individual, PAC, party committee, etc.
+        Uses centralized transaction type parser to determine if the contributor
+        is an individual, PAC, party committee, etc.
         
         Args:
             contribution_type_code: FEC transaction type code (TRAN_TP)
@@ -117,56 +118,12 @@ class ContributionLimitsService:
         Returns:
             Contributor category string
         """
-        # If we have a committee type, use it to determine category
-        if committee_type:
-            # FEC Committee Types (CMTE_TP):
-            # N, Q, O, V, W = PACs (multicandidate or non-multicandidate)
-            # X, Y = Party committees
-            # H, S, P = Candidate committees (House, Senate, President)
-            # I = Independent expenditure committees
-            
-            committee_type_upper = committee_type.upper()
-            
-            # Party committees
-            if committee_type_upper in ['X', 'Y']:
-                return ContributionLimitsService.CONTRIBUTOR_PARTY_COMMITTEE
-            
-            # Candidate committees
-            if committee_type_upper in ['H', 'S', 'P']:
-                return ContributionLimitsService.CONTRIBUTOR_CANDIDATE_COMMITTEE
-            
-            # PACs - most common types
-            if committee_type_upper in ['N', 'Q', 'O', 'V', 'W']:
-                # Default to multicandidate PAC (most common)
-                # Could be enhanced to check if PAC is multicandidate from committee data
-                return ContributionLimitsService.CONTRIBUTOR_MULTICANDIDATE_PAC
-        
-        # If we have a transaction type code, use it
-        if contribution_type_code:
-            code_str = str(contribution_type_code).strip()
-            
-            # FEC Transaction Type Codes (TRAN_TP):
-            # 10-19: Individual contributions
-            # 20-29: Party contributions
-            # 30-39: PAC contributions (multicandidate)
-            # 40-49: PAC contributions (non-multicandidate)
-            # Other codes for various transaction types
-            
-            if code_str.startswith('1'):  # 10-19: Individual
-                return ContributionLimitsService.CONTRIBUTOR_INDIVIDUAL
-            elif code_str.startswith('2'):  # 20-29: Party
-                return ContributionLimitsService.CONTRIBUTOR_PARTY_COMMITTEE
-            elif code_str.startswith('3'):  # 30-39: Multicandidate PAC
-                return ContributionLimitsService.CONTRIBUTOR_MULTICANDIDATE_PAC
-            elif code_str.startswith('4'):  # 40-49: Non-multicandidate PAC
-                return ContributionLimitsService.CONTRIBUTOR_NON_MULTICANDIDATE_PAC
-        
-        # If we have employer/occupation info, it's likely an individual
-        if has_employer_occupation:
-            return ContributionLimitsService.CONTRIBUTOR_INDIVIDUAL
-        
-        # Default to individual if we can't determine
-        return ContributionLimitsService.CONTRIBUTOR_INDIVIDUAL
+        # Use centralized parser for consistent behavior
+        return get_contributor_category_from_code(
+            contribution_type_code=contribution_type_code,
+            committee_type=committee_type,
+            has_employer_occupation=has_employer_occupation
+        )
     
     async def get_limit_for_contribution(
         self,

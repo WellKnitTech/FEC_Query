@@ -5,6 +5,7 @@ Handles parsing CSV/ZIP files and storing in appropriate database models
 import pandas as pd
 import logging
 import gc
+import os
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta
 from sqlalchemy import select, and_, update, func
@@ -18,6 +19,7 @@ from app.db.database import (
 from app.services.bulk_data_config import DataType, get_config
 from app.services.shared.exceptions import BulkDataError
 from app.services.shared.retry import retry_on_db_lock
+from app.utils.thread_pool import async_read_csv, async_to_numeric
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,15 @@ class GenericBulkDataParser:
     
     # SQLite has a limit of 999 variables per statement
     # With ~11 fields per record, we can insert ~90 records per statement
-    SQLITE_MAX_BATCH_SIZE = 90
+    # However, using executemany with parameterized queries is more efficient
+    # We can use larger batches by using executemany which handles parameters differently
+    # Default: 90 (safe), but can be increased via environment variable
+    from app.config import config
+    SQLITE_MAX_BATCH_SIZE = config.SQLITE_MAX_BATCH_SIZE
+    
+    # For bulk operations using executemany, we can use larger batches
+    # This is used when we have control over the insert statement format
+    SQLITE_BULK_BATCH_SIZE = config.SQLITE_BULK_BATCH_SIZE
     
     def __init__(self, bulk_data_service):
         self.bulk_data_service = bulk_data_service
@@ -71,6 +81,59 @@ class GenericBulkDataParser:
             batches.append(records[i:i + max_batch_size])
         
         return batches
+    
+    async def _execute_batch_with_savepoint(
+        self,
+        session,
+        batch_records: List[Dict],
+        insert_stmt_factory,
+        commit_frequency: int = 5
+    ) -> tuple[int, int]:
+        """
+        Execute batch insert with savepoint for error recovery
+        
+        Args:
+            session: Database session
+            batch_records: Records to insert
+            insert_stmt_factory: Function that creates insert statement from batch
+            commit_frequency: Commit every N batches (default: 5)
+        
+        Returns:
+            Tuple of (inserted_count, failed_count)
+        """
+        from sqlalchemy.exc import SQLAlchemyError
+        
+        inserted_count = 0
+        failed_count = 0
+        batch_num = 0
+        
+        # Split into SQLite-compatible batches
+        record_batches = self._split_records_for_sqlite(batch_records)
+        
+        for batch in record_batches:
+            batch_num += 1
+            try:
+                # Create savepoint for this batch
+                async with session.begin_nested():
+                    insert_stmt = insert_stmt_factory(batch)
+                    await session.execute(insert_stmt)
+                    inserted_count += len(batch)
+            except SQLAlchemyError as e:
+                # Rollback to savepoint (automatic with begin_nested context)
+                failed_count += len(batch)
+                logger.warning(f"Failed to insert batch {batch_num}: {e}. Continuing with next batch.")
+                # Continue with next batch instead of failing entire operation
+        
+        # Commit periodically (every commit_frequency batches or at the end)
+        if batch_num % commit_frequency == 0 or batch_num == len(record_batches):
+            try:
+                await session.commit()
+            except SQLAlchemyError as e:
+                logger.error(f"Failed to commit after batch {batch_num}: {e}")
+                await session.rollback()
+                raise
+        
+        return inserted_count, failed_count
     
     @staticmethod
     def is_parser_implemented(data_type: DataType) -> bool:
@@ -156,7 +219,7 @@ class GenericBulkDataParser:
         
         # Try to infer from CSV (if it has headers)
         try:
-            df = pd.read_csv(file_path, nrows=0, sep='|')
+            df = await async_read_csv(file_path, nrows=0, sep='|')
             if len(df.columns) > 0:
                 logger.info(f"Inferred {len(df.columns)} columns from CSV headers")
                 return df.columns.tolist()
@@ -185,7 +248,7 @@ class GenericBulkDataParser:
             chunk_count = 0
             
             # Read CSV in chunks
-            for chunk in pd.read_csv(
+            chunk_reader = await async_read_csv(
                 file_path,
                 sep='|',
                 header=0 if has_header else None,
@@ -194,7 +257,8 @@ class GenericBulkDataParser:
                 dtype=str,
                 low_memory=False,
                 on_bad_lines='skip'
-            ):
+            )
+            async for chunk in chunk_reader:
                 if job_id and job_id in self.bulk_data_service._cancelled_jobs:
                     logger.info(f"Import cancelled for job {job_id}")
                     return total_records
@@ -255,7 +319,7 @@ class GenericBulkDataParser:
             data_age_days = calculate_data_age(cycle)
             
             async with AsyncSessionLocal() as session:
-                for chunk in pd.read_csv(
+                chunk_reader = await async_read_csv(
                     file_path,
                     sep='|',
                     header=None,
@@ -264,7 +328,8 @@ class GenericBulkDataParser:
                     dtype=str,
                     low_memory=False,
                     on_bad_lines='skip'
-                ):
+                )
+                async for chunk in chunk_reader:
                     if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
                         logger.info(f"Import cancelled for job {job_id}")
                         return total_records
@@ -313,27 +378,54 @@ class GenericBulkDataParser:
                         record['raw_data'] = raw_data_records[i]
                     
                     if records:
-                        # Split records into smaller batches to avoid SQLite variable limit
+                        # Use larger batches for better performance when possible
+                        # SQLite's on_conflict_do_update requires splitting into smaller batches
+                        # due to the 999 variable limit, but we can optimize the batch size
                         record_batches = self._split_records_for_sqlite(records)
-                        for batch in record_batches:
-                            # Bulk upsert using single execute call
-                            insert_stmt = sqlite_insert(Candidate).values(batch)
-                            upsert_stmt = insert_stmt.on_conflict_do_update(
-                                index_elements=['candidate_id'],
-                                set_={
-                                    'name': insert_stmt.excluded.name,
-                                    'office': insert_stmt.excluded.office,
-                                    'party': insert_stmt.excluded.party,
-                                    'state': insert_stmt.excluded.state,
-                                    'district': insert_stmt.excluded.district,
-                                    'election_years': insert_stmt.excluded.election_years,
-                                    'raw_data': insert_stmt.excluded.raw_data,
-                                    'updated_at': func.datetime('now')
-                                }
-                            )
-                            await session.execute(upsert_stmt)
-                        await session.commit()
-                        total_records += len(records)
+                        batch_inserted = 0
+                        batch_failed = 0
+                        
+                        # Process batches in groups for better performance
+                        batch_group_size = 10  # Process 10 batches before committing
+                        for group_start in range(0, len(record_batches), batch_group_size):
+                            group_batches = record_batches[group_start:group_start + batch_group_size]
+                            
+                            for batch_idx, batch in enumerate(group_batches):
+                                try:
+                                    # Create savepoint for this batch for error recovery
+                                    async with session.begin_nested():
+                                        # Bulk upsert using single execute call
+                                        insert_stmt = sqlite_insert(Candidate).values(batch)
+                                        upsert_stmt = insert_stmt.on_conflict_do_update(
+                                            index_elements=['candidate_id'],
+                                            set_={
+                                                'name': insert_stmt.excluded.name,
+                                                'office': insert_stmt.excluded.office,
+                                                'party': insert_stmt.excluded.party,
+                                                'state': insert_stmt.excluded.state,
+                                                'district': insert_stmt.excluded.district,
+                                                'election_years': insert_stmt.excluded.election_years,
+                                                'raw_data': insert_stmt.excluded.raw_data,
+                                                'updated_at': func.datetime('now')
+                                            }
+                                        )
+                                        await session.execute(upsert_stmt)
+                                        batch_inserted += len(batch)
+                                except Exception as e:
+                                    # Rollback to savepoint (automatic with begin_nested context)
+                                    batch_failed += len(batch)
+                                    logger.warning(f"Failed to insert candidate batch {group_start + batch_idx + 1}: {e}. Continuing with next batch.")
+                                    # Continue with next batch instead of failing entire operation
+                        
+                        # Commit after processing all batches in this chunk (every chunk)
+                        try:
+                            await session.commit()
+                            total_records += batch_inserted
+                            skipped += batch_failed
+                        except Exception as e:
+                            logger.error(f"Failed to commit candidate chunk {chunk_count}: {e}")
+                            await session.rollback()
+                            raise
                         
                         # Log every 10 chunks
                         if chunk_count % 10 == 0:
@@ -386,7 +478,7 @@ class GenericBulkDataParser:
             data_age_days = calculate_data_age(cycle)
             
             async with AsyncSessionLocal() as session:
-                for chunk in pd.read_csv(
+                chunk_reader = await async_read_csv(
                     file_path,
                     sep='|',
                     header=None,
@@ -395,7 +487,8 @@ class GenericBulkDataParser:
                     dtype=str,
                     low_memory=False,
                     on_bad_lines='skip'
-                ):
+                )
+                async for chunk in chunk_reader:
                     if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
                         logger.info(f"Import cancelled for job {job_id}")
                         return total_records
@@ -516,7 +609,7 @@ class GenericBulkDataParser:
             
             async with AsyncSessionLocal() as session:
                 # Read the file in chunks
-                for chunk in pd.read_csv(
+                chunk_reader = await async_read_csv(
                     file_path,
                     sep='|',
                     header=None,
@@ -525,7 +618,8 @@ class GenericBulkDataParser:
                     dtype=str,
                     low_memory=False,
                     on_bad_lines='skip'
-                ):
+                )
+                async for chunk in chunk_reader:
                     if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
                         logger.info(f"Import cancelled for job {job_id}")
                         return total_records
@@ -660,14 +754,15 @@ class GenericBulkDataParser:
             
             async with AsyncSessionLocal() as session:
                 # CSV files typically have headers
-                for chunk in pd.read_csv(
+                chunk_reader = await async_read_csv(
                     file_path,
                     sep=',',  # CSV files are comma-separated
                     chunksize=batch_size,
                     dtype=str,
                     low_memory=False,
                     on_bad_lines='skip'
-                ):
+                )
+                async for chunk in chunk_reader:
                     if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
                         logger.info(f"Import cancelled for job {job_id}")
                         return total_records
@@ -867,7 +962,7 @@ class GenericBulkDataParser:
             data_age_days = calculate_data_age(cycle)
             
             async with AsyncSessionLocal() as session:
-                for chunk in pd.read_csv(
+                chunk_reader = await async_read_csv(
                     file_path,
                     sep='|',
                     header=None,
@@ -876,7 +971,8 @@ class GenericBulkDataParser:
                     dtype=str,
                     low_memory=False,
                     on_bad_lines='skip'
-                ):
+                )
+                async for chunk in chunk_reader:
                     if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
                         logger.info(f"Import cancelled for job {job_id}")
                         return total_records
@@ -904,7 +1000,7 @@ class GenericBulkDataParser:
                     
                     # Extract additional FEC fields
                     chunk['amendment_indicator'] = clean_str_field(chunk.get('AMNDT_IND', pd.Series([''] * len(chunk))))
-                    chunk['report_year'] = pd.to_numeric(
+                    chunk['report_year'] = await async_to_numeric(
                         chunk.get('RPT_YR', pd.Series([''] * len(chunk))).astype(str).str.strip(),
                         errors='coerce'
                     )
@@ -924,10 +1020,11 @@ class GenericBulkDataParser:
                     chunk['back_reference_transaction_id'] = clean_str_field(chunk.get('BACK_REF_TRAN_ID', pd.Series([''] * len(chunk))))
                     
                     # Vectorized amount parsing
-                    chunk['expenditure_amount'] = pd.to_numeric(
+                    chunk['expenditure_amount'] = await async_to_numeric(
                         chunk.get('TRANSACTION_AMT', pd.Series([''] * len(chunk))).astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip(),
                         errors='coerce'
-                    ).fillna(0.0)
+                    )
+                    chunk['expenditure_amount'] = chunk['expenditure_amount'].fillna(0.0)
                     
                     # Vectorized date parsing (reuse function from bulk_data.py pattern)
                     def parse_date_vectorized(date_series):
@@ -1373,7 +1470,7 @@ class GenericBulkDataParser:
             data_age_days = calculate_data_age(cycle)
             
             async with AsyncSessionLocal() as session:
-                for chunk in pd.read_csv(
+                chunk_reader = await async_read_csv(
                     file_path,
                     sep='|',
                     header=None,
@@ -1382,7 +1479,8 @@ class GenericBulkDataParser:
                     dtype=str,
                     low_memory=False,
                     on_bad_lines='skip'
-                ):
+                )
+                async for chunk in chunk_reader:
                     if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
                         logger.info(f"Import cancelled for job {job_id}")
                         return total_records
@@ -1549,7 +1647,7 @@ class GenericBulkDataParser:
             data_age_days = calculate_data_age(cycle)
             
             async with AsyncSessionLocal() as session:
-                for chunk in pd.read_csv(
+                chunk_reader = await async_read_csv(
                     file_path,
                     sep='|',
                     header=None,
@@ -1558,7 +1656,8 @@ class GenericBulkDataParser:
                     dtype=str,
                     low_memory=False,
                     on_bad_lines='skip'
-                ):
+                )
+                async for chunk in chunk_reader:
                     if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
                         logger.info(f"Import cancelled for job {job_id}")
                         return total_records
@@ -1620,7 +1719,7 @@ class GenericBulkDataParser:
             data_age_days = calculate_data_age(cycle)
             
             async with AsyncSessionLocal() as session:
-                for chunk in pd.read_csv(
+                chunk_reader = await async_read_csv(
                     file_path,
                     sep='|',
                     header=None,
@@ -1629,7 +1728,8 @@ class GenericBulkDataParser:
                     dtype=str,
                     low_memory=False,
                     on_bad_lines='skip'
-                ):
+                )
+                async for chunk in chunk_reader:
                     if job_id and hasattr(self.bulk_data_service, '_cancelled_jobs') and job_id in self.bulk_data_service._cancelled_jobs:
                         logger.info(f"Import cancelled for job {job_id}")
                         return total_records

@@ -216,6 +216,48 @@ The application includes several fraud detection algorithms:
 
 Each pattern is assigned a severity level (low, medium, high) and confidence score.
 
+## Database Migrations
+
+The application uses Alembic for database migrations. Migrations are automatically applied on application startup.
+
+### Running Migrations Manually
+
+**Check current migration version**:
+```bash
+cd backend
+alembic current
+```
+
+**Apply pending migrations**:
+```bash
+alembic upgrade head
+```
+
+**Create a new migration**:
+```bash
+# Auto-generate from model changes
+alembic revision --autogenerate -m "Description of changes"
+
+# Create empty migration for manual changes
+alembic revision -m "Description of changes"
+```
+
+**Rollback migrations**:
+```bash
+# Rollback one migration
+alembic downgrade -1
+
+# Rollback to specific revision
+alembic downgrade <revision>
+```
+
+**View migration history**:
+```bash
+alembic history
+```
+
+For more details, see `backend/ALEMBIC_SETUP.md`.
+
 ## Development
 
 ### Project Structure
@@ -225,10 +267,15 @@ FEC_Query/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py              # FastAPI application
+│   │   ├── config.py            # Centralized configuration
 │   │   ├── api/routes/          # API endpoints
 │   │   ├── services/            # Business logic
 │   │   ├── models/              # Data models
-│   │   └── db/                  # Database setup
+│   │   ├── db/                  # Database setup
+│   │   ├── utils/               # Utility functions
+│   │   └── lifecycle/           # Startup/shutdown tasks
+│   ├── alembic/                 # Alembic migrations
+│   ├── migrations/              # Legacy migrations (for reference)
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
@@ -239,26 +286,127 @@ FEC_Query/
 └── README.md
 ```
 
+### Development Workflow
+
+**1. Local Development Setup**:
+- Create virtual environment and install dependencies (see Installation)
+- Copy `env.example` to `.env` and configure
+- Run database migrations: `alembic upgrade head`
+- Start backend: `uvicorn app.main:app --reload`
+- Start frontend: `npm run dev`
+
+**2. Testing**:
+- Backend tests: `pytest` (from backend directory)
+- Frontend tests: `npm test` (from frontend directory)
+- Integration tests: See `TESTING_GUIDE.md`
+
+**3. Database Migrations**:
+- Create migration: `alembic revision --autogenerate -m "description"`
+- Review generated migration file
+- Apply: `alembic upgrade head`
+- Test rollback: `alembic downgrade -1`
+
+**4. Code Quality**:
+- Type hints: All service and route files should have type hints
+- Documentation: Module-level docstrings for all modules
+- Logging: Use structured logging with context
+- Error handling: Use specific exception types with structured responses
+
+### Performance Optimizations
+
+The application includes several performance optimizations:
+
+**Database**:
+- Connection pooling with optimized settings for SQLite/PostgreSQL
+- Composite indexes on frequently queried columns
+- WAL mode for better concurrency
+- Periodic WAL checkpointing to prevent file growth
+- Chunked processing for large result sets
+
+**Query Optimization**:
+- Query limits to prevent memory issues
+- Streaming for large datasets
+- Parallelized operations using `asyncio.gather()`
+- N+1 query pattern fixes with eager loading
+
+**Caching**:
+- API response caching with configurable TTLs
+- Cache hit/miss metrics
+- Automatic cache cleanup
+
+**Bulk Data Processing**:
+- Chunked processing with configurable batch sizes
+- Savepoint-based error recovery
+- Memory management with explicit cleanup
+- Resume capability for interrupted imports
+
 ## Configuration
+
+The application uses centralized configuration management via `app/config.py`. All configuration values can be set via environment variables with sensible defaults.
 
 ### Environment Variables
 
 **Backend (.env)**:
 - `FEC_API_KEY`: Your OpenFEC API key (required)
 - `FEC_API_BASE_URL`: API base URL (default: https://api.open.fec.gov/v1)
-- `DATABASE_URL`: Database connection string
-- `CORS_ORIGINS`: Allowed CORS origins (comma-separated)
+- `DATABASE_URL`: Database connection string (default: sqlite+aiosqlite:///./fec_data.db)
+- `CORS_ORIGINS`: Allowed CORS origins (comma-separated, default: http://localhost:3000,http://localhost:5173)
+- `LOG_LEVEL`: Logging level (DEBUG, INFO, WARNING, ERROR, default: INFO)
+- `LOG_JSON`: Use JSON logging format (true/false, default: false)
+- `UVICORN_WORKERS`: Number of Uvicorn workers (default: 1)
+- `THREAD_POOL_WORKERS`: Number of thread pool workers (default: 4)
+
+**Cache Configuration**:
 - `CACHE_TTL_HOURS`: Cache time-to-live in hours (default: 24)
 - `CACHE_TTL_CANDIDATES_HOURS`: Cache TTL for candidate data (default: 168 = 7 days)
 - `CACHE_TTL_COMMITTEES_HOURS`: Cache TTL for committee data (default: 168 = 7 days)
 - `CACHE_TTL_FINANCIALS_HOURS`: Cache TTL for financial data (default: 24 hours)
 - `CACHE_TTL_CONTRIBUTIONS_HOURS`: Cache TTL for contribution API responses (default: 24 hours)
 - `CACHE_TTL_EXPENDITURES_HOURS`: Cache TTL for expenditure data (default: 24 hours)
-- `CONTRIBUTION_LOOKBACK_DAYS`: Days to look back when fetching new contributions to catch late-filed contributions (default: 30)
+
+**Database Configuration**:
+- `SQLITE_POOL_SIZE`: SQLite connection pool size (default: 10)
+- `SQLITE_MAX_OVERFLOW`: SQLite max overflow connections (default: 10)
+- `POSTGRES_POOL_SIZE`: PostgreSQL connection pool size (default: 20)
+- `POSTGRES_MAX_OVERFLOW`: PostgreSQL max overflow connections (default: 30)
+- `SQLITE_MAX_BATCH_SIZE`: Maximum batch size for SQLite inserts (default: 90)
+- `SQLITE_BULK_BATCH_SIZE`: Batch size for bulk imports (default: 500)
+
+**Performance Configuration**:
+- `ANALYSIS_CHUNK_SIZE`: Chunk size for analysis queries (default: 10000)
+- `CONTRIBUTION_LOOKBACK_DAYS`: Days to look back when fetching new contributions (default: 30)
+- `WAL_CHECKPOINT_INTERVAL_SECONDS`: WAL checkpoint interval (default: 1800 = 30 minutes)
+- `INTEGRITY_CHECK_INTERVAL_HOURS`: Database integrity check interval (default: 24)
+
+**Bulk Data Configuration**:
 - `BULK_DATA_ENABLED`: Enable bulk CSV data usage (default: true)
 - `BULK_DATA_DIR`: Directory for storing CSV files (default: ./data/bulk)
 - `BULK_DATA_UPDATE_INTERVAL_HOURS`: Hours between update checks (default: 24)
 - `FEC_BULK_DATA_BASE_URL`: Base URL for FEC bulk downloads (default: https://www.fec.gov/files/bulk-downloads/)
+
+### Structured Logging
+
+The application supports structured logging with JSON output for production environments.
+
+**Enable JSON Logging**:
+```bash
+LOG_JSON=true
+```
+
+**Log Levels**:
+- `DEBUG`: Detailed debugging information
+- `INFO`: General informational messages (default)
+- `WARNING`: Warning messages
+- `ERROR`: Error messages
+
+Logs include structured fields such as:
+- `timestamp`: ISO format timestamp
+- `level`: Log level
+- `logger`: Logger name
+- `message`: Log message
+- `module`, `function`, `line`: Code location
+- `request_id`: Request identifier (when available)
+- Additional context fields as needed
 
 ## Bulk CSV Data
 
@@ -300,12 +448,35 @@ To reduce API calls and avoid rate limits, the application supports downloading 
 - Imported data is stored in the SQLite database in the `contributions` table
 - Metadata about downloads is tracked in the `bulk_data_metadata` table
 
+## Performance Features
+
+### Chunked Processing
+Large datasets are processed in chunks to prevent memory exhaustion. The default chunk size is 10,000 records, configurable via `ANALYSIS_CHUNK_SIZE`.
+
+### Connection Pooling
+Optimized connection pool settings for both SQLite and PostgreSQL:
+- SQLite: Smaller pools (10 connections) for better performance
+- PostgreSQL: Larger pools (20 connections) for higher concurrency
+
+### Query Optimization
+- Automatic query limits on analysis queries
+- Streaming for large result sets
+- Parallelized API and database queries
+- Composite indexes on frequently queried columns
+
+### Background Tasks
+- Periodic WAL checkpointing (every 30 minutes)
+- Daily database integrity checks
+- Automatic cache cleanup
+- Background contact information updates
+
 ## Limitations
 
 - API rate limits: The OpenFEC API has rate limits. The application includes caching and bulk CSV downloads to minimize API calls.
 - Data freshness: Cached data may be up to 24 hours old (configurable). Bulk CSV data is updated based on FEC release schedule.
 - Fraud detection: The algorithms are heuristic-based and may produce false positives. Always verify suspicious patterns manually.
 - Bulk CSV files: Can be very large (GBs). Ensure sufficient disk space and allow time for initial download/import.
+- SQLite limitations: SQLite has limited ALTER TABLE support. Complex schema changes may require table recreation.
 
 ## Contributing
 

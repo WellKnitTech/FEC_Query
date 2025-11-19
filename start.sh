@@ -71,8 +71,15 @@ fi
 source venv/bin/activate
 pip install -q -r requirements.txt
 
-echo "Backend starting on http://localhost:8000"
-uvicorn app.main:app --reload --port 8000 &
+# Get worker count from environment or default to 1 for development
+UVICORN_WORKERS=${UVICORN_WORKERS:-1}
+
+echo "Backend starting on http://localhost:8000 with ${UVICORN_WORKERS} worker(s)"
+if [ "$UVICORN_WORKERS" -gt 1 ]; then
+    uvicorn app.main:app --reload --port 8000 --workers $UVICORN_WORKERS &
+else
+    uvicorn app.main:app --reload --port 8000 &
+fi
 BACKEND_PID=$!
 cd ..
 

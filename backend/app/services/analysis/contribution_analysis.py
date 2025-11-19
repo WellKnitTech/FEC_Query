@@ -174,16 +174,24 @@ class ContributionAnalysisService:
                 ]
                 
                 # Contribution distribution (bins) - need to fetch amounts for binning
+                # Use streaming for large datasets to avoid memory issues
+                # Sample up to 10k records for distribution calculation (sufficient for accurate bins)
+                from app.services.shared.chunked_processor import ChunkedProcessor
+                
                 amount_query = select(Contribution.contribution_amount).where(
                     and_(
                         where_clause,
                         Contribution.contribution_amount.isnot(None),
                         Contribution.contribution_amount > 0
                     )
-                ).limit(10000)  # Limit for binning calculation
+                )
                 
-                amount_result = await session.execute(amount_query)
-                amounts = [float(row.contribution_amount) for row in amount_result if row.contribution_amount]
+                # Stream amounts in chunks to avoid loading all into memory
+                processor = ChunkedProcessor(chunk_size=10000)
+                amounts = []
+                async for contribution in processor.stream_contributions(session, amount_query, max_records=10000):
+                    if contribution.contribution_amount:
+                        amounts.append(float(contribution.contribution_amount))
                 
                 # Calculate distribution bins
                 contribution_distribution = calculate_distribution_bins(amounts) if amounts else {}
