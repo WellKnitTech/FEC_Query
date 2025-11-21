@@ -141,8 +141,40 @@ export const candidateApi = {
     contact_info?: ContactInformation;
     contact_info_updated_at?: string;
   }> => {
-    const response = await api.post(`/api/candidates/${candidateId}/refresh-contact-info`, undefined, createRequestConfig(signal));
-    return response.data;
+    const url = `/api/candidates/${candidateId}/refresh-contact-info`;
+    console.log(`Making POST request to: ${url}`);
+    console.log(`Full URL: ${API_BASE_URL}${url}`);
+    console.log(`Base URL: ${API_BASE_URL}`);
+    
+    try {
+      // Use empty object instead of undefined for POST body
+      // Increased timeout to 40 seconds to account for FEC API slowness
+      // Backend has 25s timeout, so this gives buffer for network overhead
+      const response = await api.post(url, {}, {
+        ...createRequestConfig(signal),
+        timeout: 40000, // 40 second timeout (backend has 25s, so this gives buffer)
+      });
+      console.log(`Response received:`, response.status, response.data);
+      return response.data;
+    } catch (error: any) {
+      console.error(`Request failed:`, error);
+      if (error.response) {
+        // Request made but server responded with error
+        console.error(`Error response:`, {
+          status: error.response.status,
+          data: error.response.data,
+          headers: error.response.headers
+        });
+      } else if (error.request) {
+        // Request made but no response received
+        console.error(`No response received. Request:`, error.request);
+        console.error(`This usually means the server is not reachable or the request timed out`);
+      } else {
+        // Error setting up request
+        console.error(`Error setting up request:`, error.message);
+      }
+      throw error;
+    }
   },
 
   getFinancials: async (candidateId: string, cycle?: number, signal?: AbortSignal): Promise<FinancialSummary[]> => {

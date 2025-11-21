@@ -55,13 +55,29 @@ function CandidateDetailContent() {
     
     setRefreshingContactInfo(true);
     try {
+      console.log(`Refreshing contact info for candidate ${candidateId}`);
       const result = await candidateApi.refreshContactInfo(candidateId);
+      console.log('Refresh result:', result);
       if (result.success) {
         // Refresh candidate data to get updated contact info
         await refreshCandidate();
+      } else {
+        console.warn('Contact info refresh returned success=false:', result);
       }
     } catch (err: any) {
-      // Error refreshing contact info
+      console.error('Error refreshing contact info:', err);
+      // Show error to user with more helpful message
+      let errorMessage = 'Unknown error';
+      if (err?.code === 'ECONNABORTED' || err?.message?.includes('timeout')) {
+        errorMessage = 'The request timed out. The FEC API may be slow or unreachable. Please try again in a few moments.';
+      } else if (err?.response?.status === 504) {
+        errorMessage = err?.response?.data?.detail || 'The server timed out while fetching contact information. Please try again later.';
+      } else if (err?.response?.data?.detail) {
+        errorMessage = err.response.data.detail;
+      } else if (err?.message) {
+        errorMessage = err.message;
+      }
+      alert(`Failed to refresh contact info: ${errorMessage}`);
     } finally {
       setRefreshingContactInfo(false);
     }

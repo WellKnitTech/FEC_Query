@@ -390,19 +390,20 @@ async def refresh_candidate_contact_info(
         logger.debug(f"Calling refresh_candidate_contact_info_if_needed for {candidate_id} with force_refresh=True")
         
         # Wrap in timeout to prevent hanging
+        # Increased timeout to 35 seconds to account for FEC API slowness
         try:
             refreshed = await asyncio.wait_for(
                 fec_client.refresh_candidate_contact_info_if_needed(
                     candidate_id,
                     force_refresh=True
                 ),
-                timeout=25.0  # 25 second timeout (less than 30s frontend timeout)
+                timeout=35.0  # 35 second timeout (less than 40s frontend timeout)
             )
         except asyncio.TimeoutError:
-            logger.error(f"Timeout refreshing contact info for candidate {candidate_id} (exceeded 25s)")
+            logger.error(f"Timeout refreshing contact info for candidate {candidate_id} (exceeded 35s)")
             raise HTTPException(
                 status_code=504,
-                detail="Contact info refresh timed out. The FEC API may be slow or unreachable."
+                detail="Contact info refresh timed out after 35 seconds. The FEC API may be slow or unreachable. Please try again later."
             )
         
         logger.info(f"Contact info refresh completed for candidate {candidate_id}, refreshed={refreshed}")
