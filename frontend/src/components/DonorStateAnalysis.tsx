@@ -77,7 +77,6 @@ export default function DonorStateAnalysis({
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load donor state analysis';
         if (!abortController.signal.aborted) {
           setError(errorMessage);
-          console.error('Error loading donor state analysis:', err);
         }
       } finally {
         if (!abortController.signal.aborted) {
@@ -118,7 +117,6 @@ export default function DonorStateAnalysis({
     } catch (err: any) {
       const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load out-of-state contributions';
       setContributionsError(errorMessage);
-      console.error('Error loading out-of-state contributions:', err);
     } finally {
       setLoadingContributions(false);
     }
@@ -139,7 +137,6 @@ export default function DonorStateAnalysis({
         });
       }
     } catch (err: any) {
-      console.error('Error exporting:', err);
       alert('Failed to export. Please try again.');
     } finally {
       setExporting(false);

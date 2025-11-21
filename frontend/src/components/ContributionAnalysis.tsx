@@ -78,7 +78,6 @@ export default function ContributionAnalysis({
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contribution analysis';
         if (!abortController.signal.aborted) {
           setError(errorMessage);
-          console.error('Error loading contribution analysis:', err);
         }
       } finally {
         if (!abortController.signal.aborted) {
@@ -109,7 +108,6 @@ export default function ContributionAnalysis({
     } catch (err: any) {
       const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contribution analysis';
       setError(errorMessage);
-      console.error('Error loading contribution analysis:', err);
     } finally {
       setLoading(false);
     }
@@ -150,7 +148,6 @@ export default function ContributionAnalysis({
     } catch (err: any) {
       const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to fetch contributions from API';
       setError(errorMessage);
-      console.error('Error fetching contributions from API:', err);
     } finally {
       setFetching(false);
     }

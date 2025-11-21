@@ -11,6 +11,8 @@ interface BulkDataOperationsProps {
   onClearContributions: () => void;
   onCleanupAndReimport: () => void;
   onImportAll: () => void;
+  onComputeAnalysis: () => void;
+  selectedCycle: number;
 }
 
 export default function BulkDataOperations({
@@ -24,6 +26,8 @@ export default function BulkDataOperations({
   onClearContributions,
   onCleanupAndReimport,
   onImportAll,
+  onComputeAnalysis,
+  selectedCycle,
 }: BulkDataOperationsProps) {
   const [showHelp, setShowHelp] = useState(false);
 
@@ -121,6 +125,23 @@ export default function BulkDataOperations({
           >
             Cleanup & Reimport
           </button>
+        </div>
+      </div>
+
+      {/* Analysis Operations */}
+      <div className="mb-6">
+        <h3 className="text-sm font-medium text-gray-700 mb-3">Analysis Operations</h3>
+        <div className="grid grid-cols-1 gap-3">
+          <button
+            onClick={onComputeAnalysis}
+            disabled={loading}
+            className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-teal-600 hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-teal-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Compute Analysis for Cycle {selectedCycle}
+          </button>
+          <p className="text-xs text-gray-500 mt-1">
+            Force computation of pre-computed analyses (employer, velocity, donor states) for existing data in cycle {selectedCycle}
+          </p>
         </div>
       </div>
 

@@ -59,7 +59,6 @@ export default function CommitteeDetail() {
           }
           if (!abortController.signal.aborted) {
             setError(err?.response?.data?.detail || err?.message || 'Failed to load committee data');
-            console.error(err);
           }
         } finally {
           if (!abortController.signal.aborted) {

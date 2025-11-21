@@ -41,7 +41,6 @@ export default function ExportButton({
       }
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Failed to export report');
-      console.error('Export error:', err);
     } finally {
       setLoading(false);
     }

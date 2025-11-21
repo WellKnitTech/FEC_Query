@@ -17,6 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import config
 from app.utils.structured_logging import setup_structured_logging
+import uuid
 
 # Configure structured logging
 # Use JSON format in production (when LOG_JSON=true), human-readable in development
@@ -24,7 +25,11 @@ use_json_logging = os.getenv("LOG_JSON", "false").lower() == "true"
 setup_structured_logging(
     level=config.LOG_LEVEL,
     use_json=use_json_logging,
-    include_console=True
+    include_console=True,
+    log_dir=config.LOG_DIR,
+    log_to_file=config.LOG_TO_FILE,
+    max_bytes=config.LOG_FILE_MAX_BYTES,
+    backup_count=config.LOG_FILE_BACKUP_COUNT
 )
 
 logger = logging.getLogger(__name__)

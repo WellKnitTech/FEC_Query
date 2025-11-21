@@ -3,8 +3,39 @@ Structured logging utilities for consistent log formatting across the applicatio
 """
 import logging
 import json
+import os
+from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, Optional
 from datetime import datetime
+
+
+class SafeFormatter(logging.Formatter):
+    """
+    Custom formatter that safely handles missing optional fields in log records
+    """
+    
+    def format(self, record: logging.LogRecord) -> str:
+        """
+        Format log record, providing default values for optional fields
+        
+        Args:
+            record: LogRecord to format
+            
+        Returns:
+            Formatted log string
+        """
+        # Ensure optional fields exist with default empty string values
+        # This prevents KeyError when these fields are referenced in the format string
+        # but don't exist in the log record (e.g., during startup before request context)
+        if not hasattr(record, "request_id"):
+            record.request_id = ""
+        if not hasattr(record, "error_code"):
+            record.error_code = ""
+        if not hasattr(record, "status_code"):
+            record.status_code = ""
+        
+        # Format the message using parent formatter
+        return super().format(record)
 
 
 class StructuredFormatter(logging.Formatter):
@@ -83,7 +114,11 @@ class StructuredFormatter(logging.Formatter):
 def setup_structured_logging(
     level: str = "INFO",
     use_json: bool = False,
-    include_console: bool = True
+    include_console: bool = True,
+    log_dir: Optional[str] = None,
+    log_to_file: bool = True,
+    max_bytes: int = 10485760,  # 10MB default
+    backup_count: int = 5
 ) -> None:
     """
     Set up structured logging for the application
@@ -92,6 +127,10 @@ def setup_structured_logging(
         level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         use_json: If True, use JSON formatting. If False, use human-readable format
         include_console: If True, output to console
+        log_dir: Directory for log files (default: ./logs)
+        log_to_file: If True, enable file logging with rotation
+        max_bytes: Maximum size of log file before rotation (default: 10MB)
+        backup_count: Number of backup log files to keep (default: 5)
     """
     root_logger = logging.getLogger()
     root_logger.setLevel(getattr(logging, level.upper(), logging.INFO))
@@ -100,24 +139,47 @@ def setup_structured_logging(
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
     
+    # Create formatter
+    if use_json:
+        formatter = StructuredFormatter()
+    else:
+        # Use human-readable formatter with structured fields
+        # SafeFormatter handles missing optional fields gracefully
+        formatter = SafeFormatter(
+            '%(asctime)s - %(name)s - %(levelname)s - '
+            '[%(filename)s:%(lineno)d] - %(message)s'
+            '%(request_id)s%(error_code)s%(status_code)s'
+        )
+    
     # Create console handler
     if include_console:
         console_handler = logging.StreamHandler()
         console_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
-        
-        if use_json:
-            # Use structured JSON formatter
-            formatter = StructuredFormatter()
-        else:
-            # Use human-readable formatter with structured fields
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - '
-                '[%(filename)s:%(lineno)d] - %(message)s'
-                '%(request_id)s%(error_code)s%(status_code)s'
-            )
-        
         console_handler.setFormatter(formatter)
         root_logger.addHandler(console_handler)
+    
+    # Create rotating file handler
+    if log_to_file:
+        if log_dir is None:
+            log_dir = "./logs"
+        
+        # Create log directory if it doesn't exist
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Determine log file name based on format
+        log_filename = "app.json.log" if use_json else "app.log"
+        log_filepath = os.path.join(log_dir, log_filename)
+        
+        # Create rotating file handler
+        file_handler = RotatingFileHandler(
+            log_filepath,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding='utf-8'
+        )
+        file_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
     
     # Set specific loggers to appropriate levels
     logging.getLogger("httpx").setLevel(logging.WARNING)

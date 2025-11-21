@@ -1,30 +1,57 @@
-import httpx
-import pandas as pd
+"""
+Bulk Data Service - Main service for FEC bulk data imports.
+
+This module provides the BulkDataService class which coordinates the bulk data import process.
+It delegates to specialized modules for different aspects of the import process:
+- bulk_data.downloader: File downloading
+- bulk_data.job_manager: Job tracking and status
+- bulk_data.storage: Metadata and status storage
+- bulk_data.cycle_manager: Cycle availability management
+- bulk_data_parsers: Data parsing and storage
+
+The service maintains backward compatibility with existing code while using a refactored
+modular architecture for better maintainability.
+"""
 import asyncio
-import os
-import logging
-import uuid
 import gc
-import zipfile
 import hashlib
-from typing import Optional, Dict, List, Any, Set
+import json
+import logging
+import os
+import uuid
+import zipfile
 from datetime import datetime
 from pathlib import Path
-from sqlalchemy import select, and_, or_, text
+from typing import Any, Dict, List, Optional, Set
+
+import httpx
+import pandas as pd
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from app.db.database import AsyncSessionLocal, Contribution, BulkDataMetadata, Committee, BulkImportJob, BulkDataImportStatus, AvailableCycle
-from app.services.fec_client import FECClient
+
+from app.db.database import (
+    AsyncSessionLocal,
+    AvailableCycle,
+    BulkDataImportStatus,
+    BulkDataMetadata,
+    BulkImportJob,
+    Committee,
+    Contribution,
+)
 from app.services.bulk_data_config import (
-    DataType, DataTypeConfig, FileFormat, get_config, get_high_priority_types
+    DataType,
+    DataTypeConfig,
+    FileFormat,
+    get_config,
+    get_high_priority_types,
 )
 from app.services.bulk_data_parsers import GenericBulkDataParser
-import json
 
 # Import refactored modules
 # Use relative imports to avoid circular dependency
+from .bulk_data.cycle_manager import CycleManager
 from .bulk_data.downloader import BulkDataDownloader
 from .bulk_data.job_manager import JobManager, _cancelled_jobs, _running_tasks
-from .bulk_data.cycle_manager import CycleManager
 from .bulk_data.storage import BulkDataStorage
 
 logger = logging.getLogger(__name__)
@@ -34,7 +61,18 @@ __all__ = ["BulkDataService", "_running_tasks", "_cancelled_jobs"]
 
 
 class BulkDataService:
-    """Service for downloading and managing FEC bulk CSV data"""
+    """
+    Service for downloading and managing FEC bulk data imports.
+    
+    This service coordinates the bulk data import process, delegating to specialized modules:
+    - BulkDataDownloader: Handles file downloads from FEC
+    - JobManager: Manages import job tracking and status
+    - BulkDataStorage: Manages metadata and status storage
+    - CycleManager: Manages cycle availability checking
+    - GenericBulkDataParser: Parses and stores data files
+    
+    The service maintains backward compatibility while using the refactored modular architecture.
+    """
     
     def __init__(self):
         self.bulk_data_dir = Path(os.getenv("BULK_DATA_DIR", "./data/bulk"))
@@ -120,135 +158,6 @@ class BulkDataService:
         # Run in thread pool to avoid blocking
         from app.utils.thread_pool import run_in_thread_pool
         return await run_in_thread_pool(_hash_file)
-    
-    async def _download_schedule_a_csv_original(self, cycle: int, job_id: Optional[str] = None) -> Optional[str]:
-        """Download Schedule A CSV (original implementation)"""
-        url = self.get_latest_csv_url(cycle)
-        zip_path = self.bulk_data_dir / f"indiv{cycle}.zip"
-        extracted_path = self.bulk_data_dir / f"schedule_a_{cycle}.txt"
-        
-        logger.info(f"Downloading Schedule A ZIP for cycle {cycle} from {url}")
-        
-        try:
-            # Stream the download directly with redirect following enabled
-            # httpx will automatically follow redirects with follow_redirects=True
-            async with self.client.stream('GET', url, follow_redirects=True) as response:
-                # Check for 404 - this can happen if the file doesn't exist on S3 after redirect
-                if response.status_code == 404:
-                    # Check if we were redirected
-                    final_url = str(response.url)
-                    if final_url != url:
-                        logger.warning(
-                            f"ZIP file not found for cycle {cycle} at redirected URL {final_url} "
-                            f"(original: {url}). The data may not be available yet for this cycle."
-                        )
-                    else:
-                        logger.warning(f"ZIP file not found for cycle {cycle} at {url}")
-                    
-                    if job_id:
-                        await self._update_job_progress(
-                            job_id,
-                            status='failed',
-                            error_message=f"File not found for cycle {cycle}. The data may not be available yet."
-                        )
-                    return None
-                
-                response.raise_for_status()
-                
-                total_size = int(response.headers.get("content-length", 0))
-                downloaded_size = 0
-                
-                # Stream download to ZIP file
-                with open(zip_path, 'wb') as f:
-                    async for chunk in response.aiter_bytes():
-                        if job_id and job_id in _cancelled_jobs:
-                            logger.info(f"Download cancelled for job {job_id}")
-                            return None
-                        
-                        f.write(chunk)
-                        downloaded_size += len(chunk)
-                        
-                        # Update progress every 10MB
-                        if downloaded_size % (10 * 1024 * 1024) == 0:
-                            downloaded_mb = downloaded_size / (1024 * 1024)
-                            if total_size > 0:
-                                progress_pct = (downloaded_size / total_size) * 100
-                                logger.info(f"Downloaded {downloaded_mb:.1f} MB ({progress_pct:.1f}%)")
-                                if job_id:
-                                    await self._update_download_progress(job_id, cycle, downloaded_mb, total_size / (1024 * 1024))
-                            else:
-                                logger.info(f"Downloaded {downloaded_mb:.1f} MB")
-                                if job_id:
-                                    await self._update_download_progress(job_id, cycle, downloaded_mb, None)
-                
-                final_size_mb = downloaded_size / (1024 * 1024)
-                logger.info(f"Downloaded {final_size_mb:.1f} MB ZIP to {zip_path}")
-                
-                # Extract itcont.txt from the ZIP file
-                if job_id:
-                    await self._update_job_progress(
-                        job_id,
-                        progress_data={"status": "extracting", "cycle": cycle}
-                    )
-                
-                logger.info(f"Extracting itcont.txt from {zip_path}")
-                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                    # The ZIP contains itcont.txt at the root
-                    zip_ref.extract('itcont.txt', path=self.bulk_data_dir)
-                    # Rename the extracted file to our standard naming
-                    extracted_file = self.bulk_data_dir / 'itcont.txt'
-                    if extracted_file.exists():
-                        extracted_file.rename(extracted_path)
-                        logger.info(f"Extracted and renamed to {extracted_path}")
-                    else:
-                        logger.error(f"itcont.txt not found in ZIP file {zip_path}")
-                        if job_id:
-                            await self._update_job_progress(
-                                job_id,
-                                status='failed',
-                                error_message=f"itcont.txt not found in ZIP file for cycle {cycle}"
-                            )
-                        return None
-                
-                # Optionally remove the ZIP file to save space (keep it for now in case we need to re-extract)
-                # os.remove(zip_path)
-                
-                return str(extracted_path)
-                
-        except httpx.HTTPStatusError as e:
-            # Check if it's a 404 after redirect
-            if e.response.status_code == 404:
-                final_url = str(e.response.url)
-                if final_url != url:
-                    logger.warning(
-                        f"ZIP file not found for cycle {cycle} at redirected URL {final_url}. "
-                        f"The data may not be available yet for this cycle."
-                    )
-                else:
-                    logger.warning(f"ZIP file not found for cycle {cycle} at {url}")
-                
-                if job_id:
-                    await self._update_job_progress(
-                        job_id,
-                        status='failed',
-                        error_message=f"File not found for cycle {cycle}. The data may not be available yet."
-                    )
-                return None
-            
-            logger.error(f"HTTP error downloading ZIP for cycle {cycle}: {e}")
-            if job_id:
-                await self._update_job_progress(job_id, status='failed', error_message=f"HTTP error: {str(e)}")
-            return None
-        except zipfile.BadZipFile as e:
-            logger.error(f"Invalid ZIP file for cycle {cycle}: {e}", exc_info=True)
-            if job_id:
-                await self._update_job_progress(job_id, status='failed', error_message=f"Invalid ZIP file: {str(e)}")
-            return None
-        except Exception as e:
-            logger.error(f"Error downloading or extracting ZIP for cycle {cycle}: {e}", exc_info=True)
-            if job_id:
-                await self._update_job_progress(job_id, status='failed', error_message=str(e))
-            return None
     
     async def download_bulk_data_file(
         self,
@@ -680,11 +589,22 @@ class BulkDataService:
         batch_size: int = 50000,
         resume: bool = False
     ) -> int:
-        """Parse CSV and store in Contribution table with optimized bulk inserts using vectorized operations
+        """
+        Parse and store Schedule A (individual contributions) CSV file.
+        
+        This method handles the parsing of individual contributions data:
+        - Reads CSV in chunks to manage memory
+        - Validates and cleans data fields
+        - Handles date parsing with multiple formats
+        - Validates committee IDs
+        - Stores records in batches with error recovery
+        - Supports resuming from a previous position
+        
+        Uses optimized bulk inserts with vectorized operations for performance.
         
         Args:
             file_path: Path to CSV file
-            cycle: Election cycle
+            cycle: Election cycle year
             job_id: Optional job ID for progress tracking
             batch_size: Number of records per chunk
             resume: If True, resume from last checkpoint (for job_id)
@@ -1462,32 +1382,6 @@ class BulkDataService:
         """Get available cycles from database"""
         return await self.storage.get_available_cycles_from_db()
     
-    async def _get_available_cycles_from_db_original(self) -> Optional[List[int]]:
-        """Get available cycles from database. Returns None if DB is empty or very old."""
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(AvailableCycle).order_by(AvailableCycle.cycle.desc())
-            )
-            cycles = result.scalars().all()
-            
-            if not cycles:
-                return None
-            
-            # Check if the data is too old (more than 2 years)
-            # Get the most recent last_updated timestamp
-            result = await session.execute(
-                select(AvailableCycle.last_updated).order_by(AvailableCycle.last_updated.desc()).limit(1)
-            )
-            most_recent_update = result.scalar_one_or_none()
-            
-            if most_recent_update:
-                age_years = (datetime.utcnow() - most_recent_update).days / 365.25
-                if age_years > 2:
-                    logger.info(f"Available cycles in DB are {age_years:.1f} years old, should refresh")
-                    return None
-            
-            return [c.cycle for c in cycles]
-    
     async def refresh_available_cycles_from_fec(self) -> List[int]:
         """Fetch available cycles from FEC API and store in database. Returns the list of cycles."""
         logger.info("Refreshing available cycles from FEC API and storing in database")
@@ -1604,9 +1498,23 @@ class BulkDataService:
         force_download: bool = False
     ) -> Dict[str, Any]:
         """
-        Download and import a specific data type for a cycle
+        Download and import a specific data type for a cycle.
         
-        Returns dict with success status, record count, and any errors
+        This is the main import method that orchestrates the full import process:
+        1. Updates data type status to 'in_progress'
+        2. Downloads the file (or skips if already imported by hash)
+        3. Parses and stores the data using the appropriate parser
+        4. Updates metadata and status
+        
+        Args:
+            data_type: The FEC data type to import
+            cycle: Election cycle year
+            job_id: Optional job ID for progress tracking
+            batch_size: Number of records to process per batch
+            force_download: If True, download even if file size matches
+        
+        Returns:
+            Dict with keys: success (bool), data_type, cycle, record_count, error (if failed)
         """
         logger.info(f"Starting download and import for {data_type.value}, cycle {cycle}")
         
@@ -1673,8 +1581,10 @@ class BulkDataService:
                                     job_id,
                                     status='completed',
                                     imported_records=metadata.record_count,
+                                    completed_at=datetime.utcnow(),
                                     progress_data={"status": "skipped", "reason": "already_imported"}
                                 )
+                                logger.info(f"Job {job_id} marked as completed (skipped - already imported)")
                             await self.update_data_type_status(data_type, cycle, 'imported', record_count=metadata.record_count)
                             return {
                                 "success": True,
@@ -1704,6 +1614,13 @@ class BulkDataService:
                     file_path, cycle, job_id=job_id, batch_size=batch_size, resume=resume
                 )
             else:
+                # Use parser for other data types
+                if not self.parser:
+                    raise RuntimeError("Parser not initialized. Cannot parse data type.")
+                
+                if not GenericBulkDataParser.is_parser_implemented(data_type):
+                    raise ValueError(f"Parser not implemented for data type: {data_type.value}")
+                
                 record_count = await self.parser.parse_and_store(
                     data_type, file_path, cycle, job_id=job_id, batch_size=batch_size
                 )
@@ -1768,14 +1685,76 @@ class BulkDataService:
             # Update status to imported
             await self.update_data_type_status(data_type, cycle, 'imported', record_count=record_count)
             
+            # Schedule analysis computation after successful import
+            try:
+                from app.services.fec_client import FECClient
+                from app.services.analysis.orchestrator import AnalysisOrchestratorService
+                
+                # Get affected candidates if this is a contribution-related import
+                affected_candidates = None
+                if data_type.value in ['individual_contributions', 'schedule_a']:
+                    try:
+                        from datetime import datetime
+                        # Cycle covers (cycle-1)-01-01 to cycle-12-31
+                        cycle_start = datetime(cycle - 1, 1, 1)
+                        cycle_end = datetime(cycle, 12, 31)
+                        
+                        async with AsyncSessionLocal() as session:
+                            result = await session.execute(
+                                select(Contribution.candidate_id)
+                                .where(
+                                    and_(
+                                        Contribution.candidate_id.isnot(None),
+                                        or_(
+                                            and_(
+                                                Contribution.contribution_date >= cycle_start,
+                                                Contribution.contribution_date <= cycle_end
+                                            ),
+                                            Contribution.contribution_date.is_(None)  # Include undated
+                                        )
+                                    )
+                                )
+                                .distinct()
+                                .limit(1000)  # Limit to avoid loading too many
+                            )
+                            candidate_ids = [row[0] for row in result if row[0]]
+                            if candidate_ids:
+                                affected_candidates = candidate_ids
+                    except Exception as e:
+                        logger.warning(f"Could not get affected candidates for analysis scheduling: {e}")
+                
+                # Schedule analysis computation in background
+                fec_client = FECClient()
+                orchestrator = AnalysisOrchestratorService(fec_client)
+                analysis_job_id = await orchestrator.schedule_analysis_after_import(
+                    cycle=cycle,
+                    data_type=data_type.value,
+                    affected_candidates=affected_candidates
+                )
+                
+                if analysis_job_id:
+                    logger.info(
+                        f"Scheduled analysis computation job {analysis_job_id} "
+                        f"for cycle {cycle} after import"
+                    )
+            except Exception as e:
+                # Don't fail the import if analysis scheduling fails
+                logger.warning(
+                    f"Failed to schedule analysis computation after import: {e}",
+                    exc_info=True
+                )
+            
+            # Always mark job as completed on success
             if job_id:
+                completed_at = datetime.utcnow()
                 await self._update_job_progress(
                     job_id,
                     status='completed',
                     imported_records=record_count,
-                    completed_at=datetime.utcnow(),
+                    completed_at=completed_at,
                     progress_data={"status": "completed", "cycle": cycle, "data_type": data_type.value}
                 )
+                logger.info(f"Job {job_id} marked as completed with {record_count} records imported")
             
             return {
                 "success": True,
@@ -1789,9 +1768,23 @@ class BulkDataService:
             error_msg = f"Error downloading/importing {data_type.value} for cycle {cycle}: {str(e)}"
             logger.error(error_msg, exc_info=True)
             # Update status to failed
-            await self.update_data_type_status(data_type, cycle, 'failed', error_message=error_msg)
+            try:
+                await self.update_data_type_status(data_type, cycle, 'failed', error_message=error_msg)
+            except Exception as status_error:
+                logger.error(f"Failed to update data type status: {status_error}", exc_info=True)
+            
+            # Always mark job as failed on exception
             if job_id:
-                await self._update_job_progress(job_id, status='failed', error_message=error_msg)
+                try:
+                    await self._update_job_progress(
+                        job_id,
+                        status='failed',
+                        error_message=error_msg
+                    )
+                    logger.info(f"Job {job_id} marked as failed: {error_msg}")
+                except Exception as job_error:
+                    logger.error(f"Failed to update job {job_id} status: {job_error}", exc_info=True)
+            
             return {
                 "success": False,
                 "data_type": data_type.value,
@@ -2082,35 +2075,15 @@ class BulkDataService:
     
     async def get_job(self, job_id: str) -> Optional[BulkImportJob]:
         """Get job by ID"""
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(BulkImportJob).where(BulkImportJob.id == job_id)
-            )
-            return result.scalar_one_or_none()
+        return await self.job_manager.get_job(job_id)
     
     async def get_data_type_status(self, cycle: int, data_type: DataType) -> Optional[BulkDataImportStatus]:
         """Get import status for a specific data type and cycle"""
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(BulkDataImportStatus).where(
-                    and_(
-                        BulkDataImportStatus.data_type == data_type.value,
-                        BulkDataImportStatus.cycle == cycle
-                    )
-                )
-            )
-            return result.scalar_one_or_none()
+        return await self.storage.get_data_type_status(cycle, data_type)
     
     async def get_all_data_type_statuses(self, cycle: int) -> Dict[str, BulkDataImportStatus]:
         """Get import status for all data types for a cycle"""
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(BulkDataImportStatus).where(
-                    BulkDataImportStatus.cycle == cycle
-                )
-            )
-            statuses = result.scalars().all()
-            return {status.data_type: status for status in statuses}
+        return await self.storage.get_all_data_type_statuses(cycle)
     
     async def update_data_type_status(
         self,
@@ -2156,28 +2129,6 @@ class BulkDataService:
         """Cancel a job"""
         return await self.job_manager.cancel_job(job_id)
     
-    async def _cancel_job_original(self, job_id: str) -> bool:
-        """Cancel a job (original implementation)"""
-        global _cancelled_jobs
-        _cancelled_jobs.add(job_id)
-        
-        try:
-            async with AsyncSessionLocal() as session:
-                result = await session.execute(
-                    select(BulkImportJob).where(BulkImportJob.id == job_id)
-                )
-                job = result.scalar_one_or_none()
-                
-                if job and job.status == 'running':
-                    job.status = 'cancelled'
-                    job.completed_at = datetime.utcnow()
-                    await session.commit()
-                    return True
-        except Exception as e:
-            logger.error(f"Error cancelling job: {e}")
-        
-        return False
-    
     async def import_multiple_data_types(
         self,
         cycle: int,
@@ -2220,5 +2171,12 @@ class BulkDataService:
     
     async def cleanup(self):
         """Clean up resources"""
-        await self.client.aclose()
+        # Close downloader HTTP client
+        await self.downloader.close()
+        # Also close the exposed client reference (same client, but ensure it's closed)
+        if hasattr(self, 'client') and self.client:
+            try:
+                await self.client.aclose()
+            except Exception as e:
+                logger.debug(f"Error closing client during cleanup: {e}")
 

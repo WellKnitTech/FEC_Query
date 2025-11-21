@@ -57,7 +57,7 @@ export function useJobTracking(
           stopTracking();
         }
       } catch (err) {
-        console.error(`Error polling job ${jobId}:`, err);
+        // Error polling job
       }
     };
 
@@ -136,7 +136,7 @@ export function useJobTracking(
           }
         })
         .catch((err) => {
-          console.error(`Error getting initial job status for ${jobId}:`, err);
+          // Error getting initial job status
         });
     }
   }, [jobId]); // Only depend on jobId, not isTracking or startTracking to avoid loops

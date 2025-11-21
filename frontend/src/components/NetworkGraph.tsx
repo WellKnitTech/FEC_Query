@@ -39,7 +39,6 @@ export default function NetworkGraph({ candidateId, maxDepth = 2, minAmount = 10
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load money flow graph';
         if (!abortController.signal.aborted) {
           setError(errorMessage);
-          console.error('Error loading money flow graph:', err);
         }
       } finally {
         if (!abortController.signal.aborted) {

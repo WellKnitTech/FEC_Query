@@ -71,7 +71,6 @@ export default function EmployerTreemap({
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load employer analysis';
         if (!abortController.signal.aborted) {
           setError(errorMessage);
-          console.error('Error loading employer analysis:', err);
         }
       } finally {
         if (!abortController.signal.aborted) {
@@ -101,7 +100,6 @@ export default function EmployerTreemap({
     } catch (err: any) {
       const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load employer analysis';
       setError(errorMessage);
-      console.error('Error loading employer analysis:', err);
     } finally {
       setLoading(false);
     }

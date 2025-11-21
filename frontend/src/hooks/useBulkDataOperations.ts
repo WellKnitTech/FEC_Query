@@ -22,6 +22,7 @@ interface UseBulkDataOperationsReturn {
   handleCleanupAndReimport: () => Promise<void>;
   handleImportAll: () => Promise<void>;
   handleRefreshCycles: () => Promise<void>;
+  handleComputeAnalysis: () => Promise<void>;
 }
 
 /**
@@ -69,6 +70,10 @@ export function useBulkDataOperations({
   };
 
   const handleDownload = useCallback(async () => {
+    if (!window.confirm(`Download and import bulk data for cycle ${selectedCycle}?`)) {
+      return;
+    }
+
     try {
       setLoading(true);
       setOperationType('download');
@@ -83,15 +88,15 @@ export function useBulkDataOperations({
       }
 
       onStatusRefresh?.();
+      onCycleStatusRefresh?.();
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to download bulk data';
       onError?.(errorMessage);
-      console.error(err);
     } finally {
       setLoading(false);
       setOperationType(null);
     }
-  }, [selectedCycle, forceDownload, onSuccess, onError, onJobStarted, onStatusRefresh]);
+  }, [selectedCycle, forceDownload, onSuccess, onError, onJobStarted, onStatusRefresh, onCycleStatusRefresh]);
 
   const handleImportSelected = useCallback(async () => {
     if (selectedDataTypes.size === 0) {
@@ -128,7 +133,6 @@ export function useBulkDataOperations({
       const errorMessage =
         extractErrorMessage(err) || 'Failed to import selected data types';
       onError?.(errorMessage);
-      console.error('Import error:', err);
     } finally {
       setLoading(false);
       setOperationType(null);
@@ -165,7 +169,6 @@ export function useBulkDataOperations({
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to import all data types';
       onError?.(errorMessage);
-      console.error(err);
     } finally {
       setLoading(false);
       setOperationType(null);
@@ -194,7 +197,6 @@ export function useBulkDataOperations({
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to clear contributions';
       onError?.(errorMessage);
-      console.error(err);
     } finally {
       setLoading(false);
       setOperationType(null);
@@ -228,7 +230,6 @@ export function useBulkDataOperations({
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to cleanup and reimport';
       onError?.(errorMessage);
-      console.error(err);
     } finally {
       setLoading(false);
       setOperationType(null);
@@ -263,7 +264,6 @@ export function useBulkDataOperations({
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to import all cycles';
       onError?.(errorMessage);
-      console.error(err);
     } finally {
       setLoading(false);
       setOperationType(null);
@@ -284,12 +284,35 @@ export function useBulkDataOperations({
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to refresh cycles';
       onError?.(errorMessage);
-      console.error(err);
     } finally {
       setLoading(false);
       setOperationType(null);
     }
   }, [onSuccess, onError, onStatusRefresh]);
+
+  const handleComputeAnalysis = useCallback(async () => {
+    if (!window.confirm(`Compute analysis for cycle ${selectedCycle}? This will pre-compute employer, velocity, and donor state analyses for all candidates in this cycle.`)) {
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setOperationType('compute-analysis');
+      onError?.(null as any);
+
+      const result = await bulkDataApi.computeAnalysis(selectedCycle);
+      const message = result.message || `Analysis computation started for cycle ${selectedCycle}`;
+      onSuccess?.(message);
+
+      onCycleStatusRefresh?.();
+    } catch (err: any) {
+      const errorMessage = extractErrorMessage(err) || 'Failed to compute analysis';
+      onError?.(errorMessage);
+    } finally {
+      setLoading(false);
+      setOperationType(null);
+    }
+  }, [selectedCycle, onSuccess, onError, onCycleStatusRefresh]);
 
   return {
     loading,
@@ -301,6 +324,7 @@ export function useBulkDataOperations({
     handleCleanupAndReimport,
     handleImportAll,
     handleRefreshCycles,
+    handleComputeAnalysis,
   };
 }
 

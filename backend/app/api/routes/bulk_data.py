@@ -117,17 +117,43 @@ async def import_multiple_data_types(
                 decrement_operation("bulk_imports")
         
         async def _import_multiple_internal():
-            await bulk_data_service._update_job_progress(job_id, status='running')
-            results = await bulk_data_service.import_multiple_data_types(cycle, validated_types, job_id=job_id, force_download=force_download)
-            
-            # Check if all succeeded
-            all_succeeded = all(r.get("success", False) for r in results.values())
-            if all_succeeded:
-                await bulk_data_service._update_job_progress(job_id, status='completed', completed_at=datetime.utcnow())
-            else:
-                failed = [dt for dt, r in results.items() if not r.get("success", False)]
-                error_msg = f"Some imports failed: {', '.join(failed)}"
-                await bulk_data_service._update_job_progress(job_id, status='failed', error_message=error_msg)
+            try:
+                await bulk_data_service._update_job_progress(job_id, status='running')
+                logger.info(f"Starting import of {len(validated_types)} data types for cycle {cycle}, job {job_id}")
+                
+                results = await bulk_data_service.import_multiple_data_types(
+                    cycle, validated_types, job_id=job_id, force_download=force_download
+                )
+                
+                # Check if all succeeded
+                all_succeeded = all(r.get("success", False) for r in results.values())
+                if all_succeeded:
+                    total_records = sum(r.get("record_count", 0) for r in results.values())
+                    logger.info(f"Import multiple job {job_id} completed successfully: {total_records} total records")
+                    await bulk_data_service._update_job_progress(
+                        job_id,
+                        status='completed',
+                        imported_records=total_records,
+                        completed_at=datetime.utcnow()
+                    )
+                else:
+                    failed = [dt for dt, r in results.items() if not r.get("success", False)]
+                    error_msg = f"Some imports failed: {', '.join(failed)}"
+                    logger.error(f"Import multiple job {job_id} failed: {error_msg}")
+                    await bulk_data_service._update_job_progress(
+                        job_id,
+                        status='failed',
+                        error_message=error_msg
+                    )
+            except Exception as e:
+                error_msg = f"Unexpected error in import multiple job {job_id}: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                await bulk_data_service._update_job_progress(
+                    job_id,
+                    status='failed',
+                    error_message=error_msg
+                )
+                raise
         
         # Increment operation counter before starting
         increment_operation("bulk_imports")
@@ -195,17 +221,41 @@ async def import_all_data_types(
                     _running_tasks.discard(task)
         
         async def _import_all_types_internal():
-            await bulk_data_service._update_job_progress(job_id, status='running')
-            results = await bulk_data_service.import_all_data_types_for_cycle(cycle, job_id=job_id)
-            
-            # Check if all succeeded
-            all_succeeded = all(r.get("success", False) for r in results.values())
-            if all_succeeded:
-                await bulk_data_service._update_job_progress(job_id, status='completed', completed_at=datetime.utcnow())
-            else:
-                failed = [dt for dt, r in results.items() if not r.get("success", False)]
-                error_msg = f"Some imports failed: {', '.join(failed)}"
-                await bulk_data_service._update_job_progress(job_id, status='failed', error_message=error_msg)
+            try:
+                await bulk_data_service._update_job_progress(job_id, status='running')
+                logger.info(f"Starting import of all data types for cycle {cycle}, job {job_id}")
+                
+                results = await bulk_data_service.import_all_data_types_for_cycle(cycle, job_id=job_id)
+                
+                # Check if all succeeded
+                all_succeeded = all(r.get("success", False) for r in results.values())
+                if all_succeeded:
+                    total_records = sum(r.get("record_count", 0) for r in results.values())
+                    logger.info(f"Import all types job {job_id} completed successfully: {total_records} total records")
+                    await bulk_data_service._update_job_progress(
+                        job_id,
+                        status='completed',
+                        imported_records=total_records,
+                        completed_at=datetime.utcnow()
+                    )
+                else:
+                    failed = [dt for dt, r in results.items() if not r.get("success", False)]
+                    error_msg = f"Some imports failed: {', '.join(failed)}"
+                    logger.error(f"Import all types job {job_id} failed: {error_msg}")
+                    await bulk_data_service._update_job_progress(
+                        job_id,
+                        status='failed',
+                        error_message=error_msg
+                    )
+            except Exception as e:
+                error_msg = f"Unexpected error in import all types job {job_id}: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                await bulk_data_service._update_job_progress(
+                    job_id,
+                    status='failed',
+                    error_message=error_msg
+                )
+                raise
         
         # Run in background
         task = asyncio.create_task(_import_all_types())
@@ -230,8 +280,7 @@ async def download_bulk_data(
     request: Request,
     cycle: int = Query(..., description="Election cycle to download (e.g., 2024)", ge=2000, le=2100),
     data_type: Optional[str] = Query(None, description="Data type to download (default: individual_contributions)", max_length=50),
-    force_download: bool = Query(False, description="Force download even if file size matches"),
-    background_tasks: BackgroundTasks = None
+    force_download: bool = Query(False, description="Force download even if file size matches")
 ):
     """Manually trigger download for a specific cycle and data type with job tracking"""
     try:
@@ -252,43 +301,57 @@ async def download_bulk_data(
         
         # Create job
         job_id = await bulk_data_service.create_job('single_cycle', cycle=cycle)
+        logger.info(f"Created download job {job_id} for {dt.value}, cycle {cycle}")
         
-        async def _download_with_job():
-            task = None
+        async def _download_and_import_task():
+            """Background task to download and import data"""
             try:
-                # Create asyncio task for better cancellation control
-                task = asyncio.create_task(_download_with_job_internal())
-                _running_tasks.add(task)
-                await task
+                logger.info(f"Starting download and import for job {job_id}, cycle {cycle}, data_type {dt.value}")
+                await bulk_data_service._update_job_progress(job_id, status='running')
+                
+                result = await bulk_data_service.download_and_import_data_type(
+                    dt, cycle, job_id=job_id, force_download=force_download
+                )
+                
+                if result.get("success"):
+                    logger.info(
+                        f"Download and import completed successfully for job {job_id}: "
+                        f"{result.get('record_count', 0)} records imported"
+                    )
+                    # Job status should already be updated by download_and_import_data_type
+                    # but ensure it's marked as completed
+                    await bulk_data_service._update_job_progress(
+                        job_id,
+                        status='completed',
+                        imported_records=result.get('record_count', 0),
+                        completed_at=datetime.utcnow()
+                    )
+                else:
+                    error_msg = result.get("error", "Unknown error")
+                    logger.error(f"Download and import failed for job {job_id}: {error_msg}")
+                    await bulk_data_service._update_job_progress(
+                        job_id,
+                        status='failed',
+                        error_message=error_msg
+                    )
             except asyncio.CancelledError:
                 logger.info(f"Download job {job_id} was cancelled")
                 await bulk_data_service._update_job_progress(job_id, status='cancelled')
+                raise
             except Exception as e:
                 logger.error(f"Error in download job {job_id}: {e}", exc_info=True)
-                await bulk_data_service._update_job_progress(job_id, status='failed', error_message=str(e))
-            finally:
-                if task:
-                    _running_tasks.discard(task)
-        
-        async def _download_with_job_internal():
-            await bulk_data_service._update_job_progress(job_id, status='running')
-            result = await bulk_data_service.download_and_import_data_type(dt, cycle, job_id=job_id, force_download=force_download)
-            if not result.get("success"):
                 await bulk_data_service._update_job_progress(
                     job_id,
                     status='failed',
-                    error_message=result.get("error", "Unknown error")
+                    error_message=f"Unexpected error: {str(e)}"
                 )
         
         # Always run in background for long operations
-        if background_tasks:
-            # Use asyncio task instead of BackgroundTasks for better cancellation
-            task = asyncio.create_task(_download_with_job())
-            _running_tasks.add(task)
-            # Don't await, let it run in background
-        else:
-            # Run synchronously but still track job
-            await _download_with_job()
+        # Use asyncio task for better cancellation control
+        task = asyncio.create_task(_download_and_import_task())
+        _running_tasks.add(task)
+        
+        logger.info(f"Download job {job_id} started in background for {dt.value}, cycle {cycle}")
         
         return {
             "message": f"Download started for {dt.value}, cycle {cycle}",
@@ -301,10 +364,89 @@ async def download_bulk_data(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error downloading bulk data for cycle {cycle}: {e}", exc_info=True)
+        logger.error(f"Error starting download for cycle {cycle}, data_type {data_type}: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to download bulk data: {str(e)}"
+            detail=f"Failed to start download: {str(e)}"
+        )
+
+
+@router.post("/compute-analysis")
+async def compute_analysis(
+    request: Request,
+    cycle: Optional[int] = Query(None, description="Election cycle to compute analysis for", ge=2000, le=2100),
+    candidate_id: Optional[str] = Query(None, description="Specific candidate ID to compute analysis for", max_length=20),
+    analysis_types: Optional[str] = Query(None, description="Comma-separated list of analysis types (employer,velocity,donor_states). Default: all"),
+    force_recompute: bool = Query(False, description="Force recomputation even if analysis exists")
+):
+    """Force computation of pre-computed analyses for existing data"""
+    try:
+        from app.services.fec_client import FECClient
+        from app.services.analysis.orchestrator import AnalysisOrchestratorService
+        from app.services.analysis.computation import AnalysisComputationService
+        
+        fec_client = FECClient()
+        orchestrator = AnalysisOrchestratorService(fec_client)
+        computation_service = AnalysisComputationService(fec_client)
+        
+        # Parse analysis types
+        analysis_types_list = None
+        if analysis_types:
+            analysis_types_list = [t.strip() for t in analysis_types.split(',')]
+            # Validate analysis types
+            valid_types = ['employer', 'velocity', 'donor_states']
+            invalid_types = [t for t in analysis_types_list if t not in valid_types]
+            if invalid_types:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid analysis types: {invalid_types}. Valid types: {valid_types}"
+                )
+        
+        if candidate_id:
+            # Compute for specific candidate
+            if not cycle:
+                raise HTTPException(
+                    status_code=400,
+                    detail="cycle is required when candidate_id is specified"
+                )
+            
+            results = await orchestrator.compute_analyses_for_candidate(
+                candidate_id=candidate_id,
+                cycles=[cycle],
+                analysis_types=analysis_types_list
+            )
+            
+            return {
+                "message": f"Analysis computation started for candidate {candidate_id}, cycle {cycle}",
+                "candidate_id": candidate_id,
+                "cycle": cycle,
+                "results": results
+            }
+        elif cycle:
+            # Compute for entire cycle
+            results = await orchestrator.compute_analyses_for_cycle(
+                cycle=cycle,
+                analysis_types=analysis_types_list
+            )
+            
+            return {
+                "message": f"Analysis computation started for cycle {cycle}",
+                "cycle": cycle,
+                "results": results
+            }
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Either cycle or candidate_id must be specified"
+            )
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error computing analysis: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to compute analysis: {str(e)}"
         )
 
 

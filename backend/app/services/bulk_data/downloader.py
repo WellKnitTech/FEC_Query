@@ -105,7 +105,16 @@ class BulkDataDownloader:
         job_id: Optional[str] = None,
         update_progress_func: Optional[callable] = None
     ) -> Optional[str]:
-        """Download Schedule A CSV for a specific cycle with progress tracking"""
+        """
+        Download Schedule A CSV for a specific cycle with progress tracking
+        
+        Args:
+            cycle: Election cycle year
+            job_id: Optional job ID for progress tracking
+            update_progress_func: Optional async function to call for progress updates.
+                Signature: (job_id, cycle, downloaded_mb, total_mb) for progress,
+                or (job_id, status='failed', error_message=...) for errors
+        """
         url = self.get_latest_csv_url(cycle)
         zip_path = self.bulk_data_dir / f"indiv{cycle}.zip"
         extracted_path = self.bulk_data_dir / f"schedule_a_{cycle}.txt"
@@ -116,12 +125,7 @@ class BulkDataDownloader:
             async with self.client.stream('GET', url, follow_redirects=True) as response:
                 if response.status_code == 404:
                     logger.warning(f"ZIP file not found for cycle {cycle} at {url}")
-                    if update_progress_func:
-                        await update_progress_func(
-                            job_id,
-                            status='failed',
-                            error_message=f"File not found for cycle {cycle}"
-                        )
+                    # Note: update_progress_func signature varies - caller handles error updates
                     return None
                 
                 response.raise_for_status()
@@ -143,12 +147,15 @@ class BulkDataDownloader:
                         if downloaded_size % (10 * 1024 * 1024) == 0:
                             downloaded_mb = downloaded_size / (1024 * 1024)
                             if update_progress_func:
-                                await update_progress_func(
-                                    job_id,
-                                    cycle,
-                                    downloaded_mb,
-                                    total_size / (1024 * 1024) if total_size > 0 else None
-                                )
+                                try:
+                                    await update_progress_func(
+                                        job_id,
+                                        cycle,
+                                        downloaded_mb,
+                                        total_size / (1024 * 1024) if total_size > 0 else None
+                                    )
+                                except Exception as e:
+                                    logger.debug(f"Error calling update_progress_func: {e}")
                 
                 # Extract itcont.txt from the ZIP file
                 logger.info(f"Extracting itcont.txt from {zip_path}")
@@ -160,33 +167,15 @@ class BulkDataDownloader:
                         logger.info(f"Extracted and renamed to {extracted_path}")
                     else:
                         logger.error(f"itcont.txt not found in ZIP file {zip_path}")
-                        if update_progress_func:
-                            await update_progress_func(
-                                job_id,
-                                status='failed',
-                                error_message=f"itcont.txt not found in ZIP file for cycle {cycle}"
-                            )
                         return None
                 
                 return str(extracted_path)
                 
         except httpx.HTTPStatusError as e:
             logger.error(f"HTTP error downloading cycle {cycle}: {e}")
-            if update_progress_func:
-                await update_progress_func(
-                    job_id,
-                    status='failed',
-                    error_message=f"HTTP error: {e.response.status_code}"
-                )
             return None
         except Exception as e:
             logger.error(f"Error downloading cycle {cycle}: {e}", exc_info=True)
-            if update_progress_func:
-                await update_progress_func(
-                    job_id,
-                    status='failed',
-                    error_message=str(e)
-                )
             return None
     
     async def close(self):

@@ -38,3 +38,23 @@ class BulkDataError(FECServiceError):
         self.cycle = cycle
         self.data_type = data_type
 
+
+class DonorSearchError(FECServiceError):
+    """Error in donor search operations"""
+    def __init__(self, message: str, search_term: Optional[str] = None):
+        super().__init__(message)
+        self.search_term = search_term
+
+
+class QueryTimeoutError(DonorSearchError):
+    """Query execution timed out"""
+    def __init__(self, message: str = "Query execution timed out", search_term: Optional[str] = None, timeout: Optional[float] = None):
+        super().__init__(message, search_term=search_term)
+        self.timeout = timeout
+
+
+class FTS5UnavailableError(DonorSearchError):
+    """FTS5 full-text search is not available"""
+    def __init__(self, message: str = "FTS5 full-text search is not available", search_term: Optional[str] = None):
+        super().__init__(message, search_term=search_term)
+

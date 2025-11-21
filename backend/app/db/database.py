@@ -494,6 +494,53 @@ class AvailableCycle(Base):
     )
 
 
+class PreComputedAnalysis(Base):
+    """Stored pre-computed analysis results"""
+    __tablename__ = "precomputed_analyses"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    analysis_type = Column(String, nullable=False, index=True)  # 'donor_states', 'employer', 'velocity'
+    candidate_id = Column(String, nullable=True, index=True)  # For candidate-specific analysis
+    committee_id = Column(String, nullable=True, index=True)  # For committee-specific analysis
+    cycle = Column(Integer, nullable=True, index=True)  # For cycle-specific analysis
+    result_data = Column(JSON, nullable=False)  # Stores the analysis result
+    computed_at = Column(DateTime, default=datetime.utcnow, index=True)
+    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    data_version = Column(Integer, default=1)  # Tracks data changes for incremental updates
+    
+    __table_args__ = (
+        Index('idx_analysis_type_candidate_cycle', 'analysis_type', 'candidate_id', 'cycle'),
+        Index('idx_analysis_type_cycle', 'analysis_type', 'cycle'),
+        Index('idx_analysis_type_candidate', 'analysis_type', 'candidate_id'),
+        Index('idx_analysis_type_committee', 'analysis_type', 'committee_id'),
+    )
+
+
+class AnalysisComputationJob(Base):
+    """Track analysis computation job progress"""
+    __tablename__ = "analysis_computation_jobs"
+    
+    id = Column(String, primary_key=True, index=True)  # UUID
+    job_type = Column(String, index=True)  # 'cycle', 'candidate', 'committee', 'batch'
+    status = Column(String, index=True)  # 'pending', 'running', 'completed', 'failed', 'cancelled'
+    analysis_type = Column(String, nullable=True, index=True)  # 'donor_states', 'employer', 'velocity', or None for all
+    candidate_id = Column(String, nullable=True, index=True)
+    committee_id = Column(String, nullable=True, index=True)
+    cycle = Column(Integer, nullable=True, index=True)
+    total_items = Column(Integer, default=0)  # Total items to process (candidates, cycles, etc.)
+    completed_items = Column(Integer, default=0)
+    current_item = Column(String, nullable=True)  # Current item being processed
+    error_message = Column(Text, nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow, index=True)
+    completed_at = Column(DateTime, nullable=True)
+    progress_data = Column(JSON)  # Detailed progress info
+    
+    __table_args__ = (
+        Index('idx_status_started', 'status', 'started_at'),
+        Index('idx_job_type_status', 'job_type', 'status'),
+    )
+
+
 # Database setup - use centralized config
 from app.config import config
 

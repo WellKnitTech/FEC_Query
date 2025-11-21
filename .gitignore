@@ -47,6 +47,8 @@ Thumbs.db
 
 # Logs
 *.log
+logs/
+backend/logs/
 
 # Bulk data files (too large for git - do not commit)
 backend/data/bulk/*.txt

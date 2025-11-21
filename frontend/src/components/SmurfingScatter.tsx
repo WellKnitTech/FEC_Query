@@ -57,7 +57,6 @@ export default function SmurfingScatter({
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contributions';
         if (!abortController.signal.aborted) {
           setError(errorMessage);
-          console.error('Error loading contributions:', err);
         }
       } finally {
         if (!abortController.signal.aborted) {

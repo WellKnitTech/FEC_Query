@@ -64,6 +64,8 @@ class ContributionAnalysis(BaseModel):
     contribution_distribution: Dict[str, int]
     data_completeness: Optional[float] = None  # Percentage of total contributions in local DB (0-100)
     total_from_api: Optional[float] = None  # Total contributions from FEC API for comparison
+    warning_message: Optional[str] = None  # Warning when financial totals show contributions but records are missing
+    using_financial_totals_fallback: bool = False  # True when using financial totals as estimate
 
 
 class Expenditure(BaseModel):

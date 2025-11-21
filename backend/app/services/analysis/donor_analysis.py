@@ -33,6 +33,26 @@ class DonorAnalysisService:
         cycle: Optional[int] = None
     ) -> DonorStateAnalysis:
         """Analyze individual donors by state to identify out-of-state funding"""
+        # Check for pre-computed result first
+        if config.ENABLE_PRECOMPUTED_ANALYSIS and not min_date and not max_date:
+            try:
+                from app.services.analysis.computation import AnalysisComputationService
+                computation_service = AnalysisComputationService(self.fec_client)
+                
+                precomputed = await computation_service.get_precomputed_analysis(
+                    analysis_type='donor_states',
+                    candidate_id=candidate_id,
+                    cycle=cycle
+                )
+                
+                if precomputed:
+                    logger.debug("Using pre-computed donor states analysis")
+                    # Convert dict back to Pydantic model
+                    return DonorStateAnalysis(**precomputed['result_data'])
+            except Exception as e:
+                logger.debug(f"Could not retrieve pre-computed donor states analysis: {e}")
+                # Fall through to compute
+        
         # Get candidate info to get their state
         candidate = await self.fec_client.get_candidate(candidate_id)
         candidate_state = candidate.get('state') if candidate else None
@@ -56,9 +76,10 @@ class DonorAnalysisService:
             
             async with AsyncSessionLocal() as session:
                 # Build base query without limit for chunked processing
-                base_query = select(Contribution).where(
-                    Contribution.candidate_id == candidate_id
-                )
+                # Use helper function to include contributions via committees
+                from app.services.shared.query_builders import build_candidate_condition
+                candidate_condition = await build_candidate_condition(candidate_id, fec_client=self.fec_client)
+                base_query = select(Contribution).where(candidate_condition)
                 
                 # Filter by dates if provided
                 # Note: For cycle-based queries, we'll filter in memory after retrieval
@@ -361,7 +382,7 @@ class DonorAnalysisService:
                 out_of_state_amount_percentage > 50.0
             )
         
-        return DonorStateAnalysis(
+        result = DonorStateAnalysis(
             donors_by_state={k: int(v) for k, v in state_donor_counts.items()},
             donor_percentages_by_state={k: float(v) for k, v in donor_percentages.items()},
             amounts_by_state={k: float(v) for k, v in state_amounts.items()},
@@ -375,6 +396,22 @@ class DonorAnalysisService:
             total_contributions=float(total_contributions),
             is_highly_out_of_state=is_highly_out_of_state
         )
+        
+        # Store result for future use if pre-computation is enabled
+        if config.ENABLE_PRECOMPUTED_ANALYSIS and not min_date and not max_date:
+            try:
+                from app.services.analysis.computation import AnalysisComputationService
+                computation_service = AnalysisComputationService(self.fec_client)
+                await computation_service._store_analysis(
+                    analysis_type='donor_states',
+                    candidate_id=candidate_id,
+                    cycle=cycle,
+                    result_data=result.model_dump() if hasattr(result, 'model_dump') else result.dict()
+                )
+            except Exception as e:
+                logger.debug(f"Could not store donor states analysis result: {e}")
+        
+        return result
     
     async def get_out_of_state_contributions(
         self,
@@ -393,9 +430,10 @@ class DonorAnalysisService:
         
         try:
             async with AsyncSessionLocal() as session:
-                query = select(Contribution).where(
-                    Contribution.candidate_id == candidate_id
-                )
+                # Use helper function to include contributions via committees
+                from app.services.shared.query_builders import build_candidate_condition
+                candidate_condition = await build_candidate_condition(candidate_id, fec_client=self.fec_client)
+                query = select(Contribution).where(candidate_condition)
                 
                 query = query.where(
                     and_(

@@ -75,7 +75,6 @@ export default function CumulativeChart({
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load cumulative totals';
         if (!abortController.signal.aborted) {
           setError(errorMessage);
-          console.error('Error loading cumulative totals:', err);
         }
       } finally {
         if (!abortController.signal.aborted) {
@@ -106,7 +105,6 @@ export default function CumulativeChart({
     } catch (err: any) {
       const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load cumulative totals';
       setError(errorMessage);
-      console.error('Error loading cumulative totals:', err);
     } finally {
       setLoading(false);
     }
