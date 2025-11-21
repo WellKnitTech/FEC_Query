@@ -1,16 +1,27 @@
+import { Suspense, lazy } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
-import Dashboard from './pages/Dashboard';
-import CandidateDetail from './pages/CandidateDetail';
-import DonorAnalysis from './pages/DonorAnalysis';
-import RaceAnalysis from './pages/RaceAnalysis';
-import BulkDataManagement from './pages/BulkDataManagement';
-import IndependentExpenditures from './pages/IndependentExpenditures';
-import SavedSearches from './pages/SavedSearches';
-import TrendAnalysis from './pages/TrendAnalysis';
-import CommitteeDetail from './pages/CommitteeDetail';
-import Committees from './pages/Committees';
-import Settings from './pages/Settings';
 import './App.css';
+
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const CandidateDetail = lazy(() => import('./pages/CandidateDetail'));
+const DonorAnalysis = lazy(() => import('./pages/DonorAnalysis'));
+const RaceAnalysis = lazy(() => import('./pages/RaceAnalysis'));
+const BulkDataManagement = lazy(() => import('./pages/BulkDataManagement'));
+const IndependentExpenditures = lazy(() => import('./pages/IndependentExpenditures'));
+const SavedSearches = lazy(() => import('./pages/SavedSearches'));
+const TrendAnalysis = lazy(() => import('./pages/TrendAnalysis'));
+const CommitteeDetail = lazy(() => import('./pages/CommitteeDetail'));
+const Committees = lazy(() => import('./pages/Committees'));
+const Settings = lazy(() => import('./pages/Settings'));
+
+function PageSkeleton({ title }: { title: string }) {
+  return (
+    <div className="p-6">
+      <div className="h-6 w-48 bg-gray-200 rounded animate-pulse" aria-hidden="true" />
+      <p className="mt-4 text-gray-500">Loading {title}...</p>
+    </div>
+  );
+}
 
 function App() {
   return (
@@ -89,17 +100,94 @@ function App() {
           </div>
         </nav>
         <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/candidate/:candidateId" element={<CandidateDetail />} />
-          <Route path="/race" element={<RaceAnalysis />} />
-          <Route path="/donor-analysis" element={<DonorAnalysis />} />
-          <Route path="/bulk-data" element={<BulkDataManagement />} />
-          <Route path="/independent-expenditures" element={<IndependentExpenditures />} />
-          <Route path="/trends" element={<TrendAnalysis />} />
-          <Route path="/saved-searches" element={<SavedSearches />} />
-          <Route path="/committee/:committeeId" element={<CommitteeDetail />} />
-          <Route path="/committees" element={<Committees />} />
-          <Route path="/settings" element={<Settings />} />
+          <Route
+            path="/"
+            element={
+              <Suspense fallback={<PageSkeleton title="Dashboard" />}>
+                <Dashboard />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/candidate/:candidateId"
+            element={
+              <Suspense fallback={<PageSkeleton title="Candidate Details" />}>
+                <CandidateDetail />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/race"
+            element={
+              <Suspense fallback={<PageSkeleton title="Race Analysis" />}>
+                <RaceAnalysis />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/donor-analysis"
+            element={
+              <Suspense fallback={<PageSkeleton title="Donor Analysis" />}>
+                <DonorAnalysis />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/bulk-data"
+            element={
+              <Suspense fallback={<PageSkeleton title="Bulk Data" />}>
+                <BulkDataManagement />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/independent-expenditures"
+            element={
+              <Suspense fallback={<PageSkeleton title="Independent Expenditures" />}>
+                <IndependentExpenditures />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/trends"
+            element={
+              <Suspense fallback={<PageSkeleton title="Trend Analysis" />}>
+                <TrendAnalysis />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/saved-searches"
+            element={
+              <Suspense fallback={<PageSkeleton title="Saved Searches" />}>
+                <SavedSearches />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/committee/:committeeId"
+            element={
+              <Suspense fallback={<PageSkeleton title="Committee Details" />}>
+                <CommitteeDetail />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/committees"
+            element={
+              <Suspense fallback={<PageSkeleton title="Committees" />}>
+                <Committees />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <Suspense fallback={<PageSkeleton title="Settings" />}>
+                <Settings />
+              </Suspense>
+            }
+          />
         </Routes>
       </div>
     </Router>
