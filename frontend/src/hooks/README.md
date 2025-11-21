@@ -27,5 +27,6 @@ const { data, loading, error, refresh } = useCachedQuery<Candidate>({
 - Use a **stable `queryKey`** that uniquely describes the request inputs.
 - Wrap API calls in `useCallback` so `fetcher` identities stay stable across renders.
 - Pass `enabled: false` when the inputs required to make a request are missing.
-- Reuse the returned `refresh` method to force a new request when a manual reload is needed.
+- Reuse the returned `refresh` method to force a new request when a manual reload is needed (in-flight requests are canceled so
+  the latest refresh wins).
 - Rely on the hook to handle aborts and set-state guards instead of adding custom `AbortController` logic.

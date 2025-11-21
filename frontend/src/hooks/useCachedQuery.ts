@@ -110,11 +110,16 @@ export function useCachedQuery<T>({
           setLoading(false);
           return;
         }
-      } else {
-        setLoading(true);
       }
 
+      // If a force refresh was requested, abort any in-flight request so new results win
+      if (forceRefresh && cachedEntry?.controller && !cachedEntry.controller.signal.aborted) {
+        cachedEntry.controller.abort();
+      }
+
+      // If there is an existing request for this key, subscribe to it instead of issuing a new one
       if (!forceRefresh && cachedEntry?.promise) {
+        setLoading(true);
         const detach = attachSubscriber(key);
         attachedReleaseRef.current = detach;
         try {
@@ -131,6 +136,7 @@ export function useCachedQuery<T>({
         return;
       }
 
+      setLoading(true);
       const controller = new AbortController();
       const fetchPromise = (async () => {
         try {
