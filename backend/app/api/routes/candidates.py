@@ -6,9 +6,9 @@ from app.models.schemas import CandidateSummary, FinancialSummary, BatchFinancia
 from app.services.analysis import AnalysisService
 from app.api.dependencies import get_fec_client, get_analysis_service
 from app.utils.date_utils import serialize_datetime
-import logging
+from app.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -383,30 +383,56 @@ async def refresh_candidate_contact_info(
     fec_client: FECClient = Depends(get_fec_client)
 ):
     """Manually refresh contact information for a candidate from the FEC API"""
+    logger.info(f"Received request to refresh contact info for candidate {candidate_id}")
     try:
-        # Force refresh by bypassing the cache and missing-only check
-        refreshed = await fec_client.refresh_candidate_contact_info_if_needed(
-            candidate_id,
-            force_refresh=True
-        )
+        # Add timeout protection
+        import asyncio
+        logger.debug(f"Calling refresh_candidate_contact_info_if_needed for {candidate_id} with force_refresh=True")
         
-        if refreshed:
-            # Get updated candidate data
-            candidate = await fec_client.get_candidate(candidate_id)
-            if candidate:
-                # Extract contact information
-                contact_info = extract_candidate_contact_info(candidate)
-                
+        # Wrap in timeout to prevent hanging
+        try:
+            refreshed = await asyncio.wait_for(
+                fec_client.refresh_candidate_contact_info_if_needed(
+                    candidate_id,
+                    force_refresh=True
+                ),
+                timeout=25.0  # 25 second timeout (less than 30s frontend timeout)
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout refreshing contact info for candidate {candidate_id} (exceeded 25s)")
+            raise HTTPException(
+                status_code=504,
+                detail="Contact info refresh timed out. The FEC API may be slow or unreachable."
+            )
+        
+        logger.info(f"Contact info refresh completed for candidate {candidate_id}, refreshed={refreshed}")
+        
+        # Always get the current candidate data to return current contact info
+        candidate = await fec_client.get_candidate(candidate_id)
+        if candidate:
+            # Extract contact information
+            contact_info = extract_candidate_contact_info(candidate)
+            
+            if refreshed:
                 return {
                     "success": True,
                     "message": "Contact information refreshed successfully",
                     "contact_info": contact_info,
                     "contact_info_updated_at": serialize_datetime(candidate.get("contact_info_updated_at"))
                 }
+            else:
+                return {
+                    "success": True,
+                    "message": "Contact information is up to date (no refresh needed)",
+                    "contact_info": contact_info,
+                    "contact_info_updated_at": serialize_datetime(candidate.get("contact_info_updated_at"))
+                }
         
+        # Fallback if candidate not found
+        logger.warning(f"Candidate {candidate_id} not found after refresh attempt")
         return {
-            "success": True,
-            "message": "Contact information is up to date",
+            "success": False,
+            "message": "Candidate not found",
             "contact_info": None,
             "contact_info_updated_at": None
         }

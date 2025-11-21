@@ -1,4 +1,3 @@
-import logging
 from fastapi import Depends, HTTPException
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,22 +12,31 @@ from app.services.trends import TrendAnalysisService
 from app.services.bulk_data import BulkDataService
 from app.services.donor_search import DonorSearchService
 from app.services.container import get_service_container
+from app.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def get_fec_client() -> FECClient:
     """Get FEC client instance"""
+    logger.debug("get_fec_client called - getting API key...")
     try:
         container = get_service_container()
+        logger.debug("Service container obtained, fetching API key...")
         api_key = await get_fec_api_key()
-        return container.get_fec_client(api_key=api_key)
+        logger.debug("API key obtained, creating FEC client...")
+        client = container.get_fec_client(api_key=api_key)
+        logger.debug("FEC client created successfully")
+        return client
     except ValueError as e:
         logger.error(f"FEC API key not configured: {e}")
         raise HTTPException(
             status_code=500,
             detail="FEC API key not configured. Please set FEC_API_KEY in your .env file."
         )
+    except Exception as e:
+        logger.error(f"Error creating FEC client: {e}", exc_info=True)
+        raise
 
 
 async def get_analysis_service(

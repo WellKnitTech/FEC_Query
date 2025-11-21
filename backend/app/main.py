@@ -10,29 +10,17 @@ from app.db.database import init_db
 from app.services.bulk_data import _running_tasks
 from app.lifecycle import setup_startup_tasks, setup_shutdown_handlers
 import os
-import logging
 import asyncio
 from dotenv import load_dotenv
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import config
-from app.utils.structured_logging import setup_structured_logging
+from app.utils.logging import get_logger
+import logging
 import uuid
 
-# Configure structured logging
-# Use JSON format in production (when LOG_JSON=true), human-readable in development
-use_json_logging = os.getenv("LOG_JSON", "false").lower() == "true"
-setup_structured_logging(
-    level=config.LOG_LEVEL,
-    use_json=use_json_logging,
-    include_console=True,
-    log_dir=config.LOG_DIR,
-    log_to_file=config.LOG_TO_FILE,
-    max_bytes=config.LOG_FILE_MAX_BYTES,
-    backup_count=config.LOG_FILE_BACKUP_COUNT
-)
-
-logger = logging.getLogger(__name__)
+# Get logger using unified logging utility
+logger = get_logger(__name__)
 
 # Apply filter to suppress CancelledError in SQLAlchemy pool during shutdown
 # This filter is applied to the root logger to catch all SQLAlchemy pool errors
@@ -65,9 +53,6 @@ logging.getLogger("app").setLevel(logging.DEBUG if config.LOG_LEVEL == "DEBUG" e
 logging.getLogger("app.services.bulk_data").setLevel(logging.INFO)
 logging.getLogger("app.services.bulk_data_parsers").setLevel(logging.INFO)
 logging.getLogger("app.services.bulk_updater").setLevel(logging.INFO)
-
-# Create logger for this module
-logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="FEC Campaign Finance Analysis API",
@@ -113,6 +98,27 @@ except Exception as e:
             return decorator
     app.state.limiter = DummyLimiter()
 
+# Request logging middleware
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Log incoming request
+        try:
+            logger.info(f"Incoming {request.method} request to {request.url.path}")
+            if request.url.query:
+                logger.debug(f"Query params: {request.url.query}")
+        except Exception as e:
+            # Even if logging fails, continue
+            logger.warning(f"Error logging request: {e}")
+        
+        try:
+            logger.debug(f"Calling next middleware/handler for {request.method} {request.url.path}")
+            response = await call_next(request)
+            logger.debug(f"Response {response.status_code} for {request.method} {request.url.path}")
+            return response
+        except Exception as e:
+            logger.error(f"Error handling {request.method} {request.url.path}: {e}", exc_info=True)
+            raise
+
 # Security headers middleware
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -138,6 +144,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             logger.debug(f"Could not log security event: {e}")
         
         return response
+
+# Add request logging middleware (before security headers)
+app.add_middleware(RequestLoggingMiddleware)
 
 # Add security headers middleware
 app.add_middleware(SecurityHeadersMiddleware)
@@ -409,4 +418,23 @@ async def health_database():
     health_info = await pool_manager.health_check()
     
     return health_info
+
+
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint (only available when METRICS_ENABLED=true)"""
+    from app.utils.metrics import get_metrics, get_metrics_content_type
+    from app.config import config
+    from fastapi.responses import Response
+    
+    if not config.METRICS_ENABLED:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Metrics endpoint is disabled")
+    
+    return Response(
+        content=get_metrics(),
+        media_type=get_metrics_content_type()
+    )
 
