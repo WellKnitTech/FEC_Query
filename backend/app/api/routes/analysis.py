@@ -6,9 +6,9 @@ from app.models.schemas import (
 )
 from app.services.analysis import AnalysisService
 from app.api.dependencies import get_fec_client, get_analysis_service
-import logging
+from app.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 

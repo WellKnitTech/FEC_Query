@@ -3,9 +3,9 @@ from typing import Optional, List
 from pydantic import BaseModel
 from app.services.trends import TrendAnalysisService
 from app.api.dependencies import get_trend_service
-import logging
+from app.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 

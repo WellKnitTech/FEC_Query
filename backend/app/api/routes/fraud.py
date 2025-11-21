@@ -3,9 +3,9 @@ from typing import Optional
 from app.models.schemas import FraudAnalysis
 from app.services.fraud_detection import FraudDetectionService
 from app.api.dependencies import get_fraud_service
-import logging
+from app.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 

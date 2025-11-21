@@ -120,6 +120,9 @@ class Config:
     DEFAULT_MAX_RETRIES: int = int(os.getenv("DEFAULT_MAX_RETRIES", "3"))
     DEFAULT_RETRY_DELAY: float = float(os.getenv("DEFAULT_RETRY_DELAY", "0.1"))
     
+    # Metrics Configuration
+    METRICS_ENABLED: bool = os.getenv("METRICS_ENABLED", "false").lower() in ("true", "1", "yes")
+    
     @classmethod
     def validate(cls) -> List[str]:
         """

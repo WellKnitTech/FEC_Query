@@ -4,9 +4,9 @@ from app.services.fec_client import FECClient
 from app.services.committees import CommitteeService
 from app.models.schemas import CommitteeSummary, CommitteeFinancials, CommitteeTransfer, ContactInformation
 from app.api.dependencies import get_fec_client, get_committee_service
-import logging
+from app.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 

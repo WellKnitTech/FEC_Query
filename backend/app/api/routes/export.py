@@ -6,15 +6,15 @@ from app.services.fec_client import FECClient
 from app.services.report_generator import ReportGenerator
 from app.services.analysis import AnalysisService
 from app.api.dependencies import get_fec_client, get_analysis_service
-import logging
 import io
 import csv
+from app.utils.logging import get_logger
 from io import StringIO, BytesIO
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 

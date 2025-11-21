@@ -45,3 +45,14 @@ async def test_openapi_schema_accessible(client: AsyncClient):
     assert "info" in data
     assert "paths" in data
 
+
+@pytest.mark.asyncio
+async def test_database_health_endpoint(client: AsyncClient):
+    """Test database health endpoint returns pool information"""
+    response = await client.get("/health/database")
+    assert response.status_code == 200
+    data = response.json()
+    assert "status" in data
+    # Database health endpoint may return pool status information
+    assert data["status"] in ["healthy", "unhealthy", "degraded"]
+

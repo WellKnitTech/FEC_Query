@@ -142,24 +142,30 @@ cleanup() {
     echo "Shutting down servers..."
     
     # Kill tail processes if they exist
-    pkill -f "tail -f.*backend.log" 2>/dev/null
-    pkill -f "tail -f.*frontend.log" 2>/dev/null
+    if [ ! -z "$TAIL_BACKEND_PID" ]; then
+        kill $TAIL_BACKEND_PID 2>/dev/null || true
+    fi
+    if [ ! -z "$TAIL_FRONTEND_PID" ]; then
+        kill $TAIL_FRONTEND_PID 2>/dev/null || true
+    fi
+    pkill -f "tail -f.*backend.log" 2>/dev/null || true
+    pkill -f "tail -f.*frontend.log" 2>/dev/null || true
     
     # Kill backend process and all its children (uvicorn spawns workers)
     if [ ! -z "$BACKEND_PID" ]; then
-        pkill -P $BACKEND_PID 2>/dev/null
-        kill $BACKEND_PID 2>/dev/null
+        pkill -P $BACKEND_PID 2>/dev/null || true
+        kill $BACKEND_PID 2>/dev/null || true
     fi
     
     # Kill frontend process and all its children
     if [ ! -z "$FRONTEND_PID" ]; then
-        pkill -P $FRONTEND_PID 2>/dev/null
-        kill $FRONTEND_PID 2>/dev/null
+        pkill -P $FRONTEND_PID 2>/dev/null || true
+        kill $FRONTEND_PID 2>/dev/null || true
     fi
     
     # Also kill any remaining uvicorn or vite processes
-    pkill -f "uvicorn app.main:app" 2>/dev/null
-    pkill -f "vite" 2>/dev/null
+    pkill -f "uvicorn app.main:app" 2>/dev/null || true
+    pkill -f "vite" 2>/dev/null || true
     
     echo "Servers stopped."
     exit 0
@@ -183,16 +189,23 @@ if [ "$SHOW_LOGS" = true ]; then
     echo ""
     
     # Wait a moment for log files to be created
-    sleep 1
+    sleep 2
+    
+    # Check if log files exist, create empty ones if they don't
+    touch "$BACKEND_LOG" 2>/dev/null || true
+    touch "$FRONTEND_LOG" 2>/dev/null || true
     
     # Tail both log files with labels
     # Use a function to add prefixes to each line
-    tail -f "$BACKEND_LOG" 2>/dev/null | sed 's/^/[BACKEND] /' &
+    # Use --retry to keep trying if file doesn't exist yet
+    tail -f --retry "$BACKEND_LOG" 2>/dev/null | sed 's/^/[BACKEND] /' &
     TAIL_BACKEND_PID=$!
-    tail -f "$FRONTEND_LOG" 2>/dev/null | sed 's/^/[FRONTEND] /' &
+    tail -f --retry "$FRONTEND_LOG" 2>/dev/null | sed 's/^/[FRONTEND] /' &
     TAIL_FRONTEND_PID=$!
     
-    # Wait for either tail process to exit (or user interrupt)
+    # Wait for user interrupt (Ctrl+C)
+    # The tail processes will continue running until interrupted
+    # Wait for tail processes (they should run until killed)
     wait $TAIL_BACKEND_PID $TAIL_FRONTEND_PID 2>/dev/null || true
 else
     echo "💡 Tip: Run './start.sh --logs' or './start.sh -l' to see logs in real-time"

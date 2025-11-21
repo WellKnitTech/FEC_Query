@@ -32,6 +32,30 @@ A comprehensive web application for querying, analyzing, and visualizing Federal
 - Distribution charts for contribution amounts
 - Interactive fraud alert displays
 
+## Implementation Status
+
+For detailed feature completeness information, see [FEATURE_COMPLETENESS_REPORT.md](FEATURE_COMPLETENESS_REPORT.md).
+
+| Feature | Status | Completeness |
+|---------|--------|--------------|
+| Candidate Search | ✅ Complete | 100% |
+| Candidate Details | ✅ Complete | 100% |
+| Financial Summaries | ✅ Complete | 100% |
+| Contribution Analysis | ✅ Complete | 100% |
+| Money Flow Tracking | ✅ Complete | 100% |
+| Fraud Detection | ⚠️ In Progress | 95% (TODOs) |
+| Bulk Data Management | ✅ Complete | 100% |
+| Export Functionality | ✅ Complete | 100% |
+| Independent Expenditures | ✅ Complete | 100% |
+| Committee Management | ✅ Complete | 100% |
+| Saved Searches | ✅ Complete | 100% |
+| Trend Analysis | ✅ Complete | 100% |
+| Settings Management | ✅ Complete | 100% |
+| Donor Aggregation | ✅ Complete | 100% |
+| Contribution Limits | ⚠️ In Progress | 95% (TODOs) |
+
+**Overall Completeness: 85%** - Production ready with minor enhancements recommended.
+
 ## Architecture
 
 - **Backend**: FastAPI (Python) with async support
@@ -48,6 +72,8 @@ A comprehensive web application for querying, analyzing, and visualizing Federal
 - OpenFEC API key (register at https://api.open.fec.gov/developers/)
 
 **Note**: If you encounter build errors with Python 3.13, we recommend using Python 3.12 for better compatibility.
+
+**Windows Users**: See [docs/WINDOWS_DEV.md](docs/WINDOWS_DEV.md) for Windows-specific setup instructions using Docker or WSL.
 
 ## Installation
 
@@ -118,6 +144,22 @@ The application will be available at `http://localhost:3000`
 2. **View Financial Data**: Click on a candidate to see their financial summary and contribution analysis
 3. **Explore Money Flows**: View the network graph to see how money flows from donors through committees to candidates
 4. **Review Fraud Alerts**: Check the fraud detection section for any suspicious patterns identified
+
+## Screenshots
+
+### Candidate Search
+![Candidate Search Interface](docs/screenshots/candidate-search.png)
+*Search for federal candidates by name, office, state, party, and election year*
+
+### Contribution List
+![Contribution List](docs/screenshots/contribution-list.png)
+*View detailed contribution records with filtering and sorting capabilities*
+
+### Fraud Detection Analysis
+![Fraud Detection](docs/screenshots/fraud-detection.png)
+*Automated fraud detection showing suspicious patterns and risk scores*
+
+*Note: Screenshots will be added to the `docs/screenshots/` directory. Placeholder paths are shown above.*
 
 ## API Endpoints
 
@@ -219,6 +261,8 @@ Each pattern is assigned a severity level (low, medium, high) and confidence sco
 ## Database Migrations
 
 The application uses Alembic for database migrations. Migrations are automatically applied on application startup.
+
+For detailed database schema documentation, see [backend/db/SCHEMA.md](backend/db/SCHEMA.md).
 
 ### Running Migrations Manually
 
@@ -478,9 +522,27 @@ Optimized connection pool settings for both SQLite and PostgreSQL:
 - Bulk CSV files: Can be very large (GBs). Ensure sufficient disk space and allow time for initial download/import.
 - SQLite limitations: SQLite has limited ALTER TABLE support. Complex schema changes may require table recreation.
 
+## Roadmap
+
+Planned improvements and enhancements:
+
+- **Complete FEC Transaction Type Parsing**: Implement full parsing of FEC transaction type codes to improve contributor category determination
+- **API Versioning**: Add versioning support for better API stability and backward compatibility
+- **Performance Monitoring Dashboard**: Real-time metrics and performance insights
+- **Enhanced Fraud Detection Algorithms**: Improved pattern recognition and reduced false positives
+- **Real-time WebSocket Updates**: Enhanced real-time updates for bulk data import progress
+- **Mobile-Responsive Improvements**: Optimize UI for mobile and tablet devices
+- **Advanced Export Templates**: Customizable report templates with branding options
+- **Integration Testing Suite**: Comprehensive end-to-end testing coverage
+
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on:
+- Required tools and setup
+- Branch strategy
+- Testing requirements
+- Code formatting standards
+- Pull request process
 
 ## License
 

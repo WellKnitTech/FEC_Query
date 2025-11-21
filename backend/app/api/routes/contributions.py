@@ -26,9 +26,9 @@ from app.api.dependencies import get_fec_client, get_analysis_service, get_donor
 from app.services.donor_search import DonorSearchService
 from app.services.shared.exceptions import DonorSearchError, QueryTimeoutError
 from app.utils.field_mapping import map_contribution_fields, map_contribution_for_aggregation
-import logging
+from app.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 

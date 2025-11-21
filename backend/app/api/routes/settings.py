@@ -4,9 +4,9 @@ from typing import Optional
 from app.db.database import AsyncSessionLocal, ApiKeySetting
 from sqlalchemy import select
 from datetime import datetime
-import logging
+from app.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 
