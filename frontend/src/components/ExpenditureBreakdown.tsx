@@ -75,7 +75,6 @@ export default function ExpenditureBreakdownComponent({
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load expenditure breakdown';
         if (!abortController.signal.aborted) {
           setError(errorMessage);
-          console.error('Error loading expenditure breakdown:', err);
         }
       } finally {
         if (!abortController.signal.aborted) {
@@ -105,7 +104,6 @@ export default function ExpenditureBreakdownComponent({
     } catch (err: any) {
       const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load expenditure breakdown';
       setError(errorMessage);
-      console.error('Error loading expenditure breakdown:', err);
     } finally {
       setLoading(false);
     }

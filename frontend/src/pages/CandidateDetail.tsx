@@ -61,7 +61,7 @@ function CandidateDetailContent() {
         await refreshCandidate();
       }
     } catch (err: any) {
-      console.error('Error refreshing contact info:', err);
+      // Error refreshing contact info
     } finally {
       setRefreshingContactInfo(false);
     }

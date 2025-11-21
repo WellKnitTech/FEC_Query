@@ -57,7 +57,6 @@ export default function IndependentExpenditures() {
         return;
       }
       setError(err?.response?.data?.detail || err?.message || 'Failed to load independent expenditures');
-      console.error(err);
     } finally {
       setLoading(false);
     }
@@ -100,7 +99,6 @@ export default function IndependentExpenditures() {
         }
         if (!abortController.signal.aborted) {
           setError(err?.response?.data?.detail || err?.message || 'Failed to load independent expenditures');
-          console.error(err);
         }
       } finally {
         if (!abortController.signal.aborted) {

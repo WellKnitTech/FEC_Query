@@ -30,7 +30,7 @@ export function parseDate(dateStr: string | null | undefined): Date | null {
       return date;
     }
   } catch (e) {
-    console.warn('Error parsing date:', dateStr, e);
+    // Error parsing date - return null
   }
 
   return null;
@@ -61,7 +61,6 @@ export function formatDate(dateStr: string | null | undefined, fallback: string 
       day: 'numeric'
     });
   } catch (e) {
-    console.warn('Error formatting date:', dateStr, e);
     return fallback;
   }
 }
@@ -94,7 +93,6 @@ export function formatDateTime(dateStr: string | null | undefined, fallback: str
       hour12: true
     });
   } catch (e) {
-    console.warn('Error formatting datetime:', dateStr, e);
     return fallback;
   }
 }
@@ -121,7 +119,6 @@ export function formatDateForInput(dateStr: string | null | undefined): string {
     const day = String(date.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
   } catch (e) {
-    console.warn('Error formatting date for input:', dateStr, e);
     return '';
   }
 }

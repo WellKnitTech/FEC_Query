@@ -48,7 +48,6 @@ export default function CandidateSearch() {
         errorMessage = err.message;
       }
       setError(errorMessage);
-      console.error('Search error:', err);
     } finally {
       setLoading(false);
     }

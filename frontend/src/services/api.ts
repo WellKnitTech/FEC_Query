@@ -772,12 +772,11 @@ export const bulkDataApi = {
           const data = JSON.parse(event.data);
           onMessage(data);
         } catch (e) {
-          console.error('Error parsing WebSocket message:', e);
+          // Error parsing WebSocket message
         }
       };
       
       ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
         if (onError) onError(error);
       };
       
@@ -787,7 +786,6 @@ export const bulkDataApi = {
       
       return ws;
     } catch (error) {
-      console.error('Failed to create WebSocket:', error);
       if (onError) onError(error as Event);
       return null;
     }

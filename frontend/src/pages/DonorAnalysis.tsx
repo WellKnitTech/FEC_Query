@@ -187,7 +187,7 @@ export default function DonorAnalysis() {
           max_amount: filters.filters.maxAmount,
         });
       } catch (err: any) {
-        console.error('Export error:', err);
+        // Export error
       }
     },
     [donorAnalysis.selectedDonor, searchTerm, filters.filters]

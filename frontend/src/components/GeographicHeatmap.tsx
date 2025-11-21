@@ -39,11 +39,6 @@ export default function GeographicHeatmap({
       } catch (err: any) {
         const errorMessage = err?.response?.data?.detail || err?.message || 'Unknown error';
         const statusCode = err?.response?.status;
-        console.error('[GeographicHeatmap] Error loading geographic data:', {
-          status: statusCode,
-          message: errorMessage,
-          error: err,
-        });
         setError(`Failed to load geographic data${statusCode ? ` (${statusCode})` : ''}: ${errorMessage}`);
       } finally {
         setLoading(false);

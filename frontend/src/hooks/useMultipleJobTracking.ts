@@ -75,7 +75,7 @@ export function useMultipleJobTracking(
           }
         }
       } catch (err) {
-        console.error(`Error polling job ${jobId}:`, err);
+        // Error polling job
       }
     };
 
@@ -172,7 +172,6 @@ export function useMultipleJobTracking(
         }
       })
       .catch((err) => {
-        console.error(`Error getting initial job status for ${jobId}:`, err);
         // Still try to start tracking even if initial fetch fails
         // Try WebSocket first
         const ws = bulkDataApi.createWebSocket(
@@ -257,7 +256,6 @@ export function useMultipleJobTracking(
       await bulkDataApi.cancelJob(jobId);
       // Job status will be updated via WebSocket/polling
     } catch (err) {
-      console.error(`Error cancelling job ${jobId}:`, err);
       throw err;
     }
   }, []);

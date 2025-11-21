@@ -83,7 +83,6 @@ export default function RaceAnalysis() {
         setFinancials(cachedData.financials);
       }
     } catch (err) {
-      console.error('Error loading cached race data:', err);
       // If cache is corrupted, clear it
       sessionStorage.removeItem(CACHE_KEY);
     }
@@ -105,7 +104,7 @@ export default function RaceAnalysis() {
       };
       sessionStorage.setItem(CACHE_KEY, JSON.stringify(cacheData));
     } catch (err) {
-      console.error('Error saving race data to cache:', err);
+      // Error saving race data to cache
     }
   };
 
@@ -141,7 +140,6 @@ export default function RaceAnalysis() {
             const candidateFinancials = await candidateApi.getFinancials(candidate.candidate_id);
             return { candidateId: candidate.candidate_id, financials: candidateFinancials };
           } catch (err) {
-            console.error(`Failed to fetch financials for ${candidate.candidate_id}:`, err);
             return { candidateId: candidate.candidate_id, financials: [] };
           }
         });
@@ -161,7 +159,6 @@ export default function RaceAnalysis() {
         return;
       }
       setError(err?.response?.data?.detail || err?.message || 'Failed to load race candidates');
-      console.error(err);
     } finally {
       setLoading(false);
     }

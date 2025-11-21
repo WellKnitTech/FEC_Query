@@ -75,7 +75,6 @@ export default function ContributionVelocityComponent({
         const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contribution velocity';
         if (!abortController.signal.aborted) {
           setError(errorMessage);
-          console.error('Error loading contribution velocity:', err);
         }
       } finally {
         if (!abortController.signal.aborted) {
@@ -105,7 +104,6 @@ export default function ContributionVelocityComponent({
     } catch (err: any) {
       const errorMessage = err?.response?.data?.detail || err?.message || 'Failed to load contribution velocity';
       setError(errorMessage);
-      console.error('Error loading contribution velocity:', err);
     } finally {
       setLoading(false);
     }

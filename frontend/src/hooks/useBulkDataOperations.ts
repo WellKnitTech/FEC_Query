@@ -92,7 +92,6 @@ export function useBulkDataOperations({
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to download bulk data';
       onError?.(errorMessage);
-      console.error('Download error:', err);
     } finally {
       setLoading(false);
       setOperationType(null);
@@ -134,7 +133,6 @@ export function useBulkDataOperations({
       const errorMessage =
         extractErrorMessage(err) || 'Failed to import selected data types';
       onError?.(errorMessage);
-      console.error('Import error:', err);
     } finally {
       setLoading(false);
       setOperationType(null);
@@ -171,7 +169,6 @@ export function useBulkDataOperations({
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to import all data types';
       onError?.(errorMessage);
-      console.error(err);
     } finally {
       setLoading(false);
       setOperationType(null);
@@ -200,7 +197,6 @@ export function useBulkDataOperations({
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to clear contributions';
       onError?.(errorMessage);
-      console.error(err);
     } finally {
       setLoading(false);
       setOperationType(null);
@@ -234,7 +230,6 @@ export function useBulkDataOperations({
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to cleanup and reimport';
       onError?.(errorMessage);
-      console.error(err);
     } finally {
       setLoading(false);
       setOperationType(null);
@@ -269,7 +264,6 @@ export function useBulkDataOperations({
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to import all cycles';
       onError?.(errorMessage);
-      console.error(err);
     } finally {
       setLoading(false);
       setOperationType(null);
@@ -290,7 +284,6 @@ export function useBulkDataOperations({
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to refresh cycles';
       onError?.(errorMessage);
-      console.error(err);
     } finally {
       setLoading(false);
       setOperationType(null);
@@ -315,7 +308,6 @@ export function useBulkDataOperations({
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to compute analysis';
       onError?.(errorMessage);
-      console.error('Analysis computation error:', err);
     } finally {
       setLoading(false);
       setOperationType(null);

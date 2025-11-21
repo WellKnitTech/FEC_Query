@@ -46,7 +46,6 @@ export default function BulkDataManagement() {
       }
     } catch (err: any) {
       setError(err.message || 'Failed to load bulk data status');
-      console.error(err);
     }
   }, []);
 
@@ -57,12 +56,10 @@ export default function BulkDataManagement() {
       if (status && status.data_types && Array.isArray(status.data_types)) {
         setCycleStatus(status);
       } else {
-        console.error('Invalid cycle status response structure:', status);
         setCycleStatus(null);
         setError('Invalid response from server. Please try again.');
       }
     } catch (err: any) {
-      console.error('Failed to load cycle status:', err);
       setCycleStatus(null);
       // Don't set error here as it might be a temporary issue
     }
@@ -88,7 +85,6 @@ export default function BulkDataManagement() {
       // Load all jobs into state - this will also start tracking active ones
       loadJobs(result.jobs);
     } catch (err) {
-      console.error('Failed to load recent jobs:', err);
       // Don't show error to user - this is just for display
     }
   }, [loadJobs]);
@@ -176,7 +172,6 @@ export default function BulkDataManagement() {
       await handleCancelJobInternal(jobId);
     } catch (err: any) {
       setError(err.message || 'Failed to cancel job');
-      console.error(err);
     }
   };
 

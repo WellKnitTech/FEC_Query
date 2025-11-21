@@ -29,7 +29,6 @@ export default function ContributionDiagnostics({
         setDiagnostics(data);
       } catch (err: any) {
         const errorMessage = err?.response?.data?.detail || err?.message || 'Unknown error';
-        console.error('[ContributionDiagnostics] Error loading diagnostics:', err);
         setError(errorMessage);
       } finally {
         setLoading(false);

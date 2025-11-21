@@ -17,6 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import config
 from app.utils.structured_logging import setup_structured_logging
+import uuid
 
 # Configure structured logging
 # Use JSON format in production (when LOG_JSON=true), human-readable in development
