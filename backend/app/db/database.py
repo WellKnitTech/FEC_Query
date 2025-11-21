@@ -547,13 +547,18 @@ from app.config import config
 DATABASE_URL = config.DATABASE_URL
 
 if DATABASE_URL.startswith("sqlite"):
+    sqlite_url = (
+        DATABASE_URL
+        if DATABASE_URL.startswith("sqlite+aiosqlite")
+        else DATABASE_URL.replace("sqlite://", "sqlite+aiosqlite://")
+    )
     # For SQLite, we need to use aiosqlite
     # Configure connection pool and timeout settings for better concurrency handling
     # Note: aiosqlite uses different connection args than sqlite3
     # SQLite works better with smaller pools due to file-based locking
     # WAL mode allows concurrent readers, but writes still need coordination
     engine = create_async_engine(
-        DATABASE_URL.replace("sqlite://", "sqlite+aiosqlite://"),
+        sqlite_url,
         echo=False,
         future=True,
         pool_pre_ping=True,  # Verify connections before using
