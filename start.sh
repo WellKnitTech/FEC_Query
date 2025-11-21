@@ -2,7 +2,16 @@
 
 # FEC Query Application Startup Script
 
+# Parse command line arguments
+SHOW_LOGS=false
+if [[ "$1" == "--logs" ]] || [[ "$1" == "-l" ]]; then
+    SHOW_LOGS=true
+fi
+
 echo "Starting FEC Campaign Finance Analysis Tool..."
+if [ "$SHOW_LOGS" = true ]; then
+    echo "📋 Logging mode: Logs will be displayed in this terminal"
+fi
 echo ""
 
 # Kill any existing processes on ports 8000 and 3000
@@ -60,6 +69,16 @@ if [ ! -f "backend/.env" ]; then
     fi
 fi
 
+# Create logs directory if showing logs
+if [ "$SHOW_LOGS" = true ]; then
+    mkdir -p logs
+    BACKEND_LOG="logs/backend.log"
+    FRONTEND_LOG="logs/frontend.log"
+    # Clear old logs
+    > "$BACKEND_LOG"
+    > "$FRONTEND_LOG"
+fi
+
 # Start backend
 echo "Starting backend server..."
 cd backend
@@ -75,12 +94,25 @@ pip install -q -r requirements.txt
 UVICORN_WORKERS=${UVICORN_WORKERS:-1}
 
 echo "Backend starting on http://localhost:8000 with ${UVICORN_WORKERS} worker(s)"
-if [ "$UVICORN_WORKERS" -gt 1 ]; then
-    uvicorn app.main:app --reload --port 8000 --workers $UVICORN_WORKERS &
+if [ "$SHOW_LOGS" = true ]; then
+    # Run with access logs enabled, output to log file
+    if [ "$UVICORN_WORKERS" -gt 1 ]; then
+        echo "  Running with ${UVICORN_WORKERS} worker(s) - logs: ../$BACKEND_LOG"
+        uvicorn app.main:app --reload --port 8000 --workers $UVICORN_WORKERS --access-log --log-level debug > "../$BACKEND_LOG" 2>&1 &
+    else
+        echo "  Logs: ../$BACKEND_LOG"
+        uvicorn app.main:app --reload --port 8000 --access-log --log-level debug > "../$BACKEND_LOG" 2>&1 &
+    fi
+    BACKEND_PID=$!
 else
-    uvicorn app.main:app --reload --port 8000 &
+    # Run in background without logs
+    if [ "$UVICORN_WORKERS" -gt 1 ]; then
+        uvicorn app.main:app --reload --port 8000 --workers $UVICORN_WORKERS > /dev/null 2>&1 &
+    else
+        uvicorn app.main:app --reload --port 8000 > /dev/null 2>&1 &
+    fi
+    BACKEND_PID=$!
 fi
-BACKEND_PID=$!
 cd ..
 
 # Wait a moment for backend to start
@@ -95,22 +127,23 @@ if [ ! -d "node_modules" ]; then
 fi
 
 echo "Frontend starting on http://localhost:3000"
-npm run dev &
+if [ "$SHOW_LOGS" = true ]; then
+    echo "  Logs: ../$FRONTEND_LOG"
+    npm run dev > "../$FRONTEND_LOG" 2>&1 &
+else
+    npm run dev > /dev/null 2>&1 &
+fi
 FRONTEND_PID=$!
 cd ..
-
-echo ""
-echo "✅ Application started!"
-echo "   Backend:  http://localhost:8000"
-echo "   Frontend: http://localhost:3000"
-echo "   API Docs: http://localhost:8000/docs"
-echo ""
-echo "Press Ctrl+C to stop both servers"
 
 # Function to cleanup processes
 cleanup() {
     echo ""
     echo "Shutting down servers..."
+    
+    # Kill tail processes if they exist
+    pkill -f "tail -f.*backend.log" 2>/dev/null
+    pkill -f "tail -f.*frontend.log" 2>/dev/null
     
     # Kill backend process and all its children (uvicorn spawns workers)
     if [ ! -z "$BACKEND_PID" ]; then
@@ -135,6 +168,38 @@ cleanup() {
 # Set up signal handlers
 trap cleanup INT TERM
 
-# Wait for user interrupt
-wait
+echo ""
+echo "✅ Application started!"
+echo "   Backend:  http://localhost:8000"
+echo "   Frontend: http://localhost:3000"
+echo "   API Docs: http://localhost:8000/docs"
+echo ""
+
+if [ "$SHOW_LOGS" = true ]; then
+    echo "📋 Showing logs below (backend and frontend output will appear here)"
+    echo "   Press Ctrl+C to stop both servers"
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    
+    # Wait a moment for log files to be created
+    sleep 1
+    
+    # Tail both log files with labels
+    # Use a function to add prefixes to each line
+    tail -f "$BACKEND_LOG" 2>/dev/null | sed 's/^/[BACKEND] /' &
+    TAIL_BACKEND_PID=$!
+    tail -f "$FRONTEND_LOG" 2>/dev/null | sed 's/^/[FRONTEND] /' &
+    TAIL_FRONTEND_PID=$!
+    
+    # Wait for either tail process to exit (or user interrupt)
+    wait $TAIL_BACKEND_PID $TAIL_FRONTEND_PID 2>/dev/null || true
+else
+    echo "💡 Tip: Run './start.sh --logs' or './start.sh -l' to see logs in real-time"
+    echo ""
+    echo "Press Ctrl+C to stop both servers"
+    
+    # Wait for user interrupt
+    wait
+fi
 

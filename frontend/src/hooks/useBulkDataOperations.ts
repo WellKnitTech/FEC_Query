@@ -22,6 +22,7 @@ interface UseBulkDataOperationsReturn {
   handleCleanupAndReimport: () => Promise<void>;
   handleImportAll: () => Promise<void>;
   handleRefreshCycles: () => Promise<void>;
+  handleComputeAnalysis: () => Promise<void>;
 }
 
 /**
@@ -69,6 +70,10 @@ export function useBulkDataOperations({
   };
 
   const handleDownload = useCallback(async () => {
+    if (!window.confirm(`Download and import bulk data for cycle ${selectedCycle}?`)) {
+      return;
+    }
+
     try {
       setLoading(true);
       setOperationType('download');
@@ -83,15 +88,16 @@ export function useBulkDataOperations({
       }
 
       onStatusRefresh?.();
+      onCycleStatusRefresh?.();
     } catch (err: any) {
       const errorMessage = extractErrorMessage(err) || 'Failed to download bulk data';
       onError?.(errorMessage);
-      console.error(err);
+      console.error('Download error:', err);
     } finally {
       setLoading(false);
       setOperationType(null);
     }
-  }, [selectedCycle, forceDownload, onSuccess, onError, onJobStarted, onStatusRefresh]);
+  }, [selectedCycle, forceDownload, onSuccess, onError, onJobStarted, onStatusRefresh, onCycleStatusRefresh]);
 
   const handleImportSelected = useCallback(async () => {
     if (selectedDataTypes.size === 0) {
@@ -291,6 +297,31 @@ export function useBulkDataOperations({
     }
   }, [onSuccess, onError, onStatusRefresh]);
 
+  const handleComputeAnalysis = useCallback(async () => {
+    if (!window.confirm(`Compute analysis for cycle ${selectedCycle}? This will pre-compute employer, velocity, and donor state analyses for all candidates in this cycle.`)) {
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setOperationType('compute-analysis');
+      onError?.(null as any);
+
+      const result = await bulkDataApi.computeAnalysis(selectedCycle);
+      const message = result.message || `Analysis computation started for cycle ${selectedCycle}`;
+      onSuccess?.(message);
+
+      onCycleStatusRefresh?.();
+    } catch (err: any) {
+      const errorMessage = extractErrorMessage(err) || 'Failed to compute analysis';
+      onError?.(errorMessage);
+      console.error('Analysis computation error:', err);
+    } finally {
+      setLoading(false);
+      setOperationType(null);
+    }
+  }, [selectedCycle, onSuccess, onError, onCycleStatusRefresh]);
+
   return {
     loading,
     operationType,
@@ -301,6 +332,7 @@ export function useBulkDataOperations({
     handleCleanupAndReimport,
     handleImportAll,
     handleRefreshCycles,
+    handleComputeAnalysis,
   };
 }
 

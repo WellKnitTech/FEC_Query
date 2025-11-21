@@ -103,6 +103,7 @@ export default function BulkDataManagement() {
     handleCleanupAndReimport,
     handleImportAll,
     handleRefreshCycles,
+    handleComputeAnalysis,
   } = useBulkDataOperations({
     selectedCycle,
     selectedDataTypes,
@@ -326,6 +327,8 @@ export default function BulkDataManagement() {
           onClearContributions={handleClearContributions}
           onCleanupAndReimport={handleCleanupAndReimport}
           onImportAll={handleImportAll}
+          onComputeAnalysis={handleComputeAnalysis}
+          selectedCycle={selectedCycle}
         />
       </div>
     </div>

@@ -102,7 +102,17 @@ async def setup_shutdown_handlers():
     # Step 3: Cancel all running tasks gracefully
     cancelled_count = await cancel_background_tasks()
     
-    # Step 4: Close database connections gracefully
+    # Step 4: Clean up bulk data service resources
+    try:
+        from app.services.container import get_service_container
+        container = get_service_container()
+        if container._bulk_data_service:
+            await container._bulk_data_service.cleanup()
+            logger.info("Bulk data service cleaned up")
+    except Exception as e:
+        logger.warning(f"Error cleaning up bulk data service: {e}")
+    
+    # Step 5: Close database connections gracefully
     await close_database_connections()
     
     logger.info(f"Shutdown complete. Cancelled {cancelled_count} tasks.")

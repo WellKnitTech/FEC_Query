@@ -31,7 +31,9 @@ from app.db.database import (
     AvailableCycle,
     CandidateSummary,
     FinancialTotal,
-    ApiKeySetting
+    ApiKeySetting,
+    PreComputedAnalysis,
+    AnalysisComputationJob
 )
 
 # Import config to get DATABASE_URL

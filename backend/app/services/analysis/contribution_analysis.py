@@ -15,6 +15,7 @@ from app.services.shared.query_builders import ContributionQueryBuilder
 from app.services.shared.cycle_utils import convert_cycle_to_date_range, should_convert_cycle
 from app.services.shared.aggregation_helpers import calculate_distribution_bins
 from app.utils.thread_pool import async_to_numeric, async_dataframe_operation, async_aggregation
+from app.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -67,21 +68,50 @@ class ContributionAnalysisService:
                 # Build query using ContributionQueryBuilder
                 query_builder = ContributionQueryBuilder()
                 query_builder.with_candidate(candidate_id).with_committee(committee_id).with_dates(min_date, max_date, cycle)
-                where_clause = query_builder.build_where_clause()
+                where_clause = await query_builder.build_where_clause()
                 
                 # Check if we have any contributions for this candidate (for debugging)
                 if candidate_id:
-                    total_check_query = select(func.count(Contribution.id)).where(
+                    from app.services.shared.query_builders import build_candidate_condition
+                    candidate_condition = await build_candidate_condition(candidate_id, fec_client=self.fec_client)
+                    
+                    # Check contributions with direct candidate_id
+                    direct_query = select(func.count(Contribution.id)).where(
                         Contribution.candidate_id == candidate_id
                     )
+                    direct_result = await session.execute(direct_query)
+                    direct_count = direct_result.scalar() or 0
+                    
+                    # Check contributions via committees
+                    from app.db.database import Committee
+                    committee_result = await session.execute(
+                        select(Committee.committee_id)
+                        .where(Committee.candidate_ids.contains([candidate_id]))
+                    )
+                    committee_ids = [row[0] for row in committee_result]
+                    committee_count = 0
+                    if committee_ids:
+                        committee_query = select(func.count(Contribution.id)).where(
+                            Contribution.committee_id.in_(committee_ids)
+                        )
+                        committee_result = await session.execute(committee_query)
+                        committee_count = committee_result.scalar() or 0
+                    
+                    # Total with combined condition
+                    total_check_query = select(func.count(Contribution.id)).where(candidate_condition)
                     total_check_result = await session.execute(total_check_query)
                     total_count = total_check_result.scalar() or 0
-                    logger.debug(f"analyze_contributions: Found {total_count} total contributions for candidate {candidate_id}")
+                    
+                    logger.info(
+                        f"analyze_contributions for {candidate_id}: "
+                        f"direct={direct_count}, via_committees={committee_count} (from {len(committee_ids)} committees), "
+                        f"total={total_count}"
+                    )
                     
                     # Check contributions with dates
                     dated_check_query = select(func.count(Contribution.id)).where(
                         and_(
-                            Contribution.candidate_id == candidate_id,
+                            candidate_condition,
                             Contribution.contribution_date.isnot(None)
                         )
                     )
@@ -199,6 +229,9 @@ class ContributionAnalysisService:
                 # Get FEC API totals for comparison and data completeness calculation
                 data_completeness = None
                 total_from_api = None
+                warning_message = None
+                using_financial_totals_fallback = False
+                
                 if candidate_id:
                     try:
                         api_totals = await self.fec_client.get_candidate_totals(candidate_id, cycle=cycle)
@@ -218,9 +251,43 @@ class ContributionAnalysisService:
                             if matching_total:
                                 # Use individual_contributions for comparison (most accurate for Schedule A data)
                                 total_from_api = float(matching_total.get('individual_contributions', 0) or matching_total.get('contributions', 0) or 0)
-                                if total_from_api > 0:
+                                
+                                # Check for discrepancy: financial totals show contributions but database has none
+                                if total_from_api > 0 and total_contributions == 0:
+                                    warning_message = (
+                                        f"Financial totals show ${total_from_api:,.2f} in individual contributions, "
+                                        f"but detailed records are not yet available in the database. "
+                                        f"This is normal - individual contribution records are published with a delay "
+                                        f"after campaign finance filings. The financial totals are accurate, but detailed "
+                                        f"donor information will appear once the FEC processes and publishes the records."
+                                    )
+                                    logger.info(f"Warning: Financial totals show ${total_from_api:,.2f} but database has $0.00 for candidate {candidate_id}")
+                                    
+                                    # Optionally use financial totals as a fallback estimate
+                                    # This provides users with approximate data while waiting for detailed records
+                                    using_financial_totals_fallback = True
+                                    total_contributions = total_from_api
+                                    # Estimate contributors based on average contribution size
+                                    # Use a conservative estimate of $200 average contribution
+                                    estimated_avg = 200.0
+                                    total_contributors = max(1, int(total_from_api / estimated_avg))
+                                    average_contribution = estimated_avg
+                                    data_completeness = 0.0  # 0% because we're using estimates
+                                    logger.info(f"Using financial totals as fallback estimate for candidate {candidate_id}")
+                                
+                                elif total_from_api > 0:
+                                    # Calculate data completeness percentage
                                     data_completeness = min(100.0, (total_contributions / total_from_api) * 100.0)
                                     logger.debug(f"Data completeness: {data_completeness:.1f}% (Local: ${total_contributions:,.2f}, API: ${total_from_api:,.2f})")
+                                    
+                                    # Warn if completeness is very low
+                                    if data_completeness < 10.0 and total_from_api > 1000:
+                                        warning_message = (
+                                            f"This analysis is based on {data_completeness:.1f}% of total contributions. "
+                                            f"Financial totals show ${total_from_api:,.2f}, but only ${total_contributions:,.2f} "
+                                            f"is available in the local database. Consider importing additional bulk data "
+                                            f"or waiting for the FEC to publish detailed records."
+                                        )
                                 else:
                                     logger.debug(f"API total is 0, cannot calculate data completeness")
                     except Exception as e:
@@ -235,7 +302,9 @@ class ContributionAnalysisService:
                     top_donors=top_donors,
                     contribution_distribution=contribution_distribution,
                     data_completeness=data_completeness,
-                    total_from_api=total_from_api
+                    total_from_api=total_from_api,
+                    warning_message=warning_message,
+                    using_financial_totals_fallback=using_financial_totals_fallback
                 )
         except Exception as e:
             logger.warning(f"Error in optimized analyze_contributions, falling back to pandas method: {e}", exc_info=True)
@@ -250,14 +319,41 @@ class ContributionAnalysisService:
             )
             
             if not contributions:
+                # Check financial totals for fallback
+                warning_message = None
+                using_financial_totals_fallback = False
+                total_contributions = 0.0
+                total_from_api = None
+                
+                if candidate_id:
+                    try:
+                        api_totals = await self.fec_client.get_candidate_totals(candidate_id, cycle=cycle)
+                        if api_totals and len(api_totals) > 0:
+                            matching_total = api_totals[0]
+                            total_from_api = float(matching_total.get('individual_contributions', 0) or matching_total.get('contributions', 0) or 0)
+                            if total_from_api > 0:
+                                warning_message = (
+                                    f"Financial totals show ${total_from_api:,.2f} in individual contributions, "
+                                    f"but detailed records are not yet available. This is normal - individual "
+                                    f"contribution records are published with a delay after campaign finance filings."
+                                )
+                                using_financial_totals_fallback = True
+                                total_contributions = total_from_api
+                    except Exception:
+                        pass
+                
                 return ContributionAnalysis(
-                    total_contributions=0.0,
+                    total_contributions=total_contributions,
                     total_contributors=0,
                     average_contribution=0.0,
                     contributions_by_date={},
                     contributions_by_state={},
                     top_donors=[],
-                    contribution_distribution={}
+                    contribution_distribution={},
+                    data_completeness=0.0 if total_from_api and total_from_api > 0 else None,
+                    total_from_api=total_from_api,
+                    warning_message=warning_message,
+                    using_financial_totals_fallback=using_financial_totals_fallback
                 )
             
             df = pd.DataFrame(contributions)
@@ -322,6 +418,9 @@ class ContributionAnalysisService:
             # Get FEC API totals for comparison and data completeness calculation
             data_completeness = None
             total_from_api = None
+            warning_message = None
+            using_financial_totals_fallback = False
+            
             if candidate_id:
                 try:
                     api_totals = await self.fec_client.get_candidate_totals(candidate_id, cycle=cycle)
@@ -344,6 +443,15 @@ class ContributionAnalysisService:
                             if total_from_api > 0:
                                 data_completeness = min(100.0, (total_contributions / total_from_api) * 100.0)
                                 logger.debug(f"Data completeness (fallback): {data_completeness:.1f}% (Local: ${total_contributions:,.2f}, API: ${total_from_api:,.2f})")
+                                
+                                # Warn if completeness is very low
+                                if data_completeness < 10.0 and total_from_api > 1000:
+                                    warning_message = (
+                                        f"This analysis is based on {data_completeness:.1f}% of total contributions. "
+                                        f"Financial totals show ${total_from_api:,.2f}, but only ${total_contributions:,.2f} "
+                                        f"is available in the local database. Consider importing additional bulk data "
+                                        f"or waiting for the FEC to publish detailed records."
+                                    )
                 except Exception as e:
                     logger.warning(f"Error getting FEC API totals for data completeness (fallback): {e}")
             
@@ -356,7 +464,9 @@ class ContributionAnalysisService:
                 top_donors=top_donors,
                 contribution_distribution=contribution_distribution,
                 data_completeness=data_completeness,
-                total_from_api=total_from_api
+                total_from_api=total_from_api,
+                warning_message=warning_message,
+                using_financial_totals_fallback=using_financial_totals_fallback
             )
     
     async def analyze_by_employer(
@@ -368,6 +478,27 @@ class ContributionAnalysisService:
         cycle: Optional[int] = None
     ) -> EmployerAnalysis:
         """Analyze contributions by employer with name normalization using efficient SQL queries"""
+        # Check for pre-computed result first
+        if config.ENABLE_PRECOMPUTED_ANALYSIS and not min_date and not max_date:
+            try:
+                from app.services.analysis.computation import AnalysisComputationService
+                computation_service = AnalysisComputationService(self.fec_client)
+                
+                precomputed = await computation_service.get_precomputed_analysis(
+                    analysis_type='employer',
+                    candidate_id=candidate_id,
+                    cycle=cycle,
+                    committee_id=committee_id
+                )
+                
+                if precomputed:
+                    logger.debug("Using pre-computed employer analysis")
+                    # Convert dict back to Pydantic model
+                    return EmployerAnalysis(**precomputed['result_data'])
+            except Exception as e:
+                logger.debug(f"Could not retrieve pre-computed employer analysis: {e}")
+                # Fall through to compute
+        
         try:
             # Convert cycle to date range if provided
             if should_convert_cycle(cycle, min_date, max_date):
@@ -377,7 +508,9 @@ class ContributionAnalysisService:
                 # Build base query conditions
                 conditions = []
                 if candidate_id:
-                    conditions.append(Contribution.candidate_id == candidate_id)
+                    from app.services.shared.query_builders import build_candidate_condition
+                    candidate_condition = await build_candidate_condition(candidate_id, fec_client=self.fec_client)
+                    conditions.append(candidate_condition)
                 if committee_id:
                     conditions.append(Contribution.committee_id == committee_id)
                 if min_date:
@@ -468,12 +601,29 @@ class ContributionAnalysisService:
                     for _, row in employer_grouped.head(50).iterrows()
                 ]
                 
-                return EmployerAnalysis(
+                result = EmployerAnalysis(
                     total_by_employer=total_by_employer,
                     top_employers=top_employers,
                     employer_count=int(employer_grouped['normalized_employer'].nunique()),
                     total_contributions=total_contributions
                 )
+                
+                # Store result for future use if pre-computation is enabled
+                if config.ENABLE_PRECOMPUTED_ANALYSIS and not min_date and not max_date:
+                    try:
+                        from app.services.analysis.computation import AnalysisComputationService
+                        computation_service = AnalysisComputationService(self.fec_client)
+                        await computation_service._store_analysis(
+                            analysis_type='employer',
+                            candidate_id=candidate_id,
+                            cycle=cycle,
+                            committee_id=committee_id,
+                            result_data=result.model_dump() if hasattr(result, 'model_dump') else result.dict()
+                        )
+                    except Exception as e:
+                        logger.debug(f"Could not store employer analysis result: {e}")
+                
+                return result
         except Exception as e:
             logger.warning(f"Error in optimized analyze_by_employer, falling back to pandas method: {e}", exc_info=True)
             # Fallback to original pandas-based method
@@ -561,6 +711,27 @@ class ContributionAnalysisService:
         cycle: Optional[int] = None
     ) -> ContributionVelocity:
         """Calculate contribution velocity (contributions per day/week) using efficient SQL queries"""
+        # Check for pre-computed result first
+        if config.ENABLE_PRECOMPUTED_ANALYSIS and not min_date and not max_date:
+            try:
+                from app.services.analysis.computation import AnalysisComputationService
+                computation_service = AnalysisComputationService(self.fec_client)
+                
+                precomputed = await computation_service.get_precomputed_analysis(
+                    analysis_type='velocity',
+                    candidate_id=candidate_id,
+                    cycle=cycle,
+                    committee_id=committee_id
+                )
+                
+                if precomputed:
+                    logger.debug("Using pre-computed velocity analysis")
+                    # Convert dict back to Pydantic model
+                    return ContributionVelocity(**precomputed['result_data'])
+            except Exception as e:
+                logger.debug(f"Could not retrieve pre-computed velocity analysis: {e}")
+                # Fall through to compute
+        
         try:
             # Convert cycle to date range if provided
             if should_convert_cycle(cycle, min_date, max_date):
@@ -570,7 +741,7 @@ class ContributionAnalysisService:
                 # Build query using ContributionQueryBuilder
                 query_builder = ContributionQueryBuilder()
                 query_builder.with_candidate(candidate_id).with_committee(committee_id).with_dates(min_date, max_date, cycle)
-                where_clause = query_builder.build_where_clause()
+                where_clause = await query_builder.build_where_clause()
                 
                 # Get velocity by date using SQL aggregation
                 # Note: For velocity, we only use contributions with dates (can't calculate velocity without dates)
@@ -636,12 +807,29 @@ class ContributionAnalysisService:
                 # Average daily velocity
                 average_daily_velocity = float(df['amount'].mean()) if len(df) > 0 else 0.0
                 
-                return ContributionVelocity(
+                result = ContributionVelocity(
                     velocity_by_date=velocity_by_date,
                     velocity_by_week=velocity_by_week,
                     peak_days=peak_days,
                     average_daily_velocity=average_daily_velocity
                 )
+                
+                # Store result for future use if pre-computation is enabled
+                if config.ENABLE_PRECOMPUTED_ANALYSIS and not min_date and not max_date:
+                    try:
+                        from app.services.analysis.computation import AnalysisComputationService
+                        computation_service = AnalysisComputationService(self.fec_client)
+                        await computation_service._store_analysis(
+                            analysis_type='velocity',
+                            candidate_id=candidate_id,
+                            cycle=cycle,
+                            committee_id=committee_id,
+                            result_data=result.model_dump() if hasattr(result, 'model_dump') else result.dict()
+                        )
+                    except Exception as e:
+                        logger.debug(f"Could not store velocity analysis result: {e}")
+                
+                return result
         except Exception as e:
             logger.warning(f"Error in optimized analyze_velocity, falling back to pandas method: {e}", exc_info=True)
             # Fallback to original pandas-based method
@@ -748,7 +936,7 @@ class ContributionAnalysisService:
                 # Build query using ContributionQueryBuilder
                 query_builder = ContributionQueryBuilder()
                 query_builder.with_candidate(candidate_id).with_committee(committee_id).with_dates(min_date, max_date, cycle)
-                where_clause = query_builder.build_where_clause()
+                where_clause = await query_builder.build_where_clause()
                 
                 # Query for contributions with dates (for the timeline)
                 query = select(

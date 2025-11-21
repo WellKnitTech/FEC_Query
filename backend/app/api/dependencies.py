@@ -11,6 +11,7 @@ from app.services.committees import CommitteeService
 from app.services.independent_expenditures import IndependentExpenditureService
 from app.services.trends import TrendAnalysisService
 from app.services.bulk_data import BulkDataService
+from app.services.donor_search import DonorSearchService
 from app.services.container import get_service_container
 
 logger = logging.getLogger(__name__)
@@ -75,4 +76,9 @@ def get_bulk_data_service() -> BulkDataService:
     """Get bulk data service instance"""
     container = get_service_container()
     return container.get_bulk_data_service()
+
+
+async def get_donor_search_service() -> DonorSearchService:
+    """Get donor search service instance"""
+    return DonorSearchService()
 

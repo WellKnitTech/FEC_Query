@@ -68,6 +68,12 @@ class Config:
     DEBUG: bool = os.getenv("DEBUG", "False").lower() in ("true", "1", "yes")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
     
+    # Logging Configuration
+    LOG_DIR: str = os.getenv("LOG_DIR", "./logs")
+    LOG_TO_FILE: bool = os.getenv("LOG_TO_FILE", "true").lower() in ("true", "1", "yes")
+    LOG_FILE_MAX_BYTES: int = int(os.getenv("LOG_FILE_MAX_BYTES", "10485760"))  # 10MB default
+    LOG_FILE_BACKUP_COUNT: int = int(os.getenv("LOG_FILE_BACKUP_COUNT", "5"))  # Keep 5 backup files
+    
     # CORS Configuration
     CORS_ORIGINS: List[str] = [
         origin.strip() 
@@ -96,6 +102,11 @@ class Config:
     CONTRIBUTION_LOOKBACK_DAYS: int = int(os.getenv("CONTRIBUTION_LOOKBACK_DAYS", "30"))
     DEFAULT_CHUNK_SIZE: int = int(os.getenv("DEFAULT_CHUNK_SIZE", "5000"))
     ANALYSIS_CHUNK_SIZE: int = int(os.getenv("ANALYSIS_CHUNK_SIZE", "5000"))
+    
+    # Pre-computed Analysis Configuration
+    ENABLE_PRECOMPUTED_ANALYSIS: bool = os.getenv("ENABLE_PRECOMPUTED_ANALYSIS", "true").lower() in ("true", "1", "yes")
+    ANALYSIS_COMPUTATION_BATCH_SIZE: int = int(os.getenv("ANALYSIS_COMPUTATION_BATCH_SIZE", "10"))
+    ANALYSIS_STALE_THRESHOLD_HOURS: int = int(os.getenv("ANALYSIS_STALE_THRESHOLD_HOURS", "24"))
     
     # Background Task Configuration
     WAL_CHECKPOINT_INTERVAL_SECONDS: int = int(os.getenv("WAL_CHECKPOINT_INTERVAL_SECONDS", "1800"))  # 30 minutes

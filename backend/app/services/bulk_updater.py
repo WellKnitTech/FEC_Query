@@ -25,37 +25,67 @@ class BulkUpdaterService:
         """Download and import CSV for a specific cycle with progress tracking"""
         async with self._semaphore:  # Limit concurrent cycles
             try:
-                logger.info(f"Starting download and import for cycle {cycle}")
+                logger.info(f"Starting download and import for cycle {cycle}" + (f" (job {job_id})" if job_id else ""))
                 
                 if job_id:
-                    await self.bulk_data_service._update_job_progress(
-                        job_id,
-                        status='running',
-                        current_cycle=cycle,
-                        progress_data={"status": "downloading", "cycle": cycle}
-                    )
+                    try:
+                        await self.bulk_data_service._update_job_progress(
+                            job_id,
+                            status='running',
+                            current_cycle=cycle,
+                            progress_data={"status": "downloading", "cycle": cycle}
+                        )
+                    except Exception as progress_error:
+                        logger.warning(f"Failed to update job progress: {progress_error}")
                 
                 # Download CSV
                 file_path = await self.bulk_data_service.download_schedule_a_csv(cycle, job_id=job_id)
                 if not file_path:
+                    error_msg = f"Failed to download CSV file for cycle {cycle}. The file may not be available yet for this cycle."
+                    logger.error(error_msg)
+                    if job_id:
+                        try:
+                            await self.bulk_data_service._update_job_progress(
+                                job_id,
+                                status='failed',
+                                error_message=error_msg
+                            )
+                        except Exception as progress_error:
+                            logger.warning(f"Failed to update job progress: {progress_error}", exc_info=True)
                     return {
                         "success": False,
                         "cycle": cycle,
-                        "error": "Failed to download CSV file"
+                        "error": error_msg
                     }
                 
                 if job_id:
-                    await self.bulk_data_service._update_job_progress(
-                        job_id,
-                        progress_data={"status": "parsing", "cycle": cycle}
-                    )
+                    try:
+                        await self.bulk_data_service._update_job_progress(
+                            job_id,
+                            progress_data={"status": "parsing", "cycle": cycle}
+                        )
+                    except Exception as progress_error:
+                        logger.warning(f"Failed to update job progress: {progress_error}")
                 
                 # Parse and store
                 record_count = await self.bulk_data_service.parse_and_store_csv(
                     file_path, cycle, job_id=job_id
                 )
                 
-                logger.info(f"Successfully imported {record_count} records for cycle {cycle}")
+                logger.info(f"Successfully imported {record_count} records for cycle {cycle}" + (f" (job {job_id})" if job_id else ""))
+                
+                # Mark job as completed if we have a job_id
+                if job_id:
+                    try:
+                        await self.bulk_data_service._update_job_progress(
+                            job_id,
+                            status='completed',
+                            imported_records=record_count,
+                            completed_at=datetime.utcnow(),
+                            progress_data={"status": "completed", "cycle": cycle}
+                        )
+                    except Exception as progress_error:
+                        logger.warning(f"Failed to update job progress: {progress_error}")
                 
                 return {
                     "success": True,
@@ -65,17 +95,21 @@ class BulkUpdaterService:
                 }
                 
             except Exception as e:
-                logger.error(f"Error downloading/importing cycle {cycle}: {e}", exc_info=True)
+                error_msg = f"Error downloading/importing cycle {cycle}: {str(e)}"
+                logger.error(error_msg, exc_info=True)
                 if job_id:
-                    await self.bulk_data_service._update_job_progress(
-                        job_id,
-                        status='failed',
-                        error_message=f"Error processing cycle {cycle}: {str(e)}"
-                    )
+                    try:
+                        await self.bulk_data_service._update_job_progress(
+                            job_id,
+                            status='failed',
+                            error_message=error_msg
+                        )
+                    except Exception as progress_error:
+                        logger.error(f"Failed to update job progress after error: {progress_error}", exc_info=True)
                 return {
                     "success": False,
                     "cycle": cycle,
-                    "error": str(e)
+                    "error": error_msg
                 }
     
     async def check_and_update_cycles(self, cycles: Optional[List[int]] = None, job_id: Optional[str] = None) -> List[Dict]:

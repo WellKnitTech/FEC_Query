@@ -659,6 +659,24 @@ export const bulkDataApi = {
     return response.data;
   },
 
+  computeAnalysis: async (
+    cycle?: number,
+    candidateId?: string,
+    analysisTypes?: string[],
+    forceRecompute: boolean = false
+  ): Promise<{ message: string; cycle?: number; candidate_id?: string; results: any }> => {
+    const params: any = {};
+    if (cycle) params.cycle = cycle;
+    if (candidateId) params.candidate_id = candidateId;
+    if (analysisTypes && analysisTypes.length > 0) {
+      params.analysis_types = analysisTypes.join(',');
+    }
+    if (forceRecompute) params.force_recompute = forceRecompute;
+    
+    const response = await api.post('/api/bulk-data/compute-analysis', null, { params });
+    return response.data;
+  },
+
   clearContributions: async (cycle?: number): Promise<{ message: string; deleted_count: number; cycle?: number }> => {
     const response = await api.delete('/api/bulk-data/contributions', {
       params: cycle ? { cycle } : {},
