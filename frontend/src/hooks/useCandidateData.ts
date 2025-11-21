@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useCallback } from 'react';
 import { candidateApi, Candidate } from '../services/api';
+import { useCachedQuery } from './useCachedQuery';
 
 interface UseCandidateDataResult {
   candidate: Candidate | null;
@@ -9,49 +10,14 @@ interface UseCandidateDataResult {
 }
 
 export function useCandidateData(candidateId: string | undefined): UseCandidateDataResult {
-  const [candidate, setCandidate] = useState<Candidate | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const fetchCandidate = useCallback((signal: AbortSignal) => candidateApi.getById(candidateId!, signal), [candidateId]);
 
-  const fetchCandidate = async (signal?: AbortSignal) => {
-    if (!candidateId) {
-      setLoading(false);
-      return;
-    }
+  const { data, loading, error, refresh } = useCachedQuery<Candidate>({
+    queryKey: candidateId ? `candidate:${candidateId}` : 'candidate:none',
+    fetcher: fetchCandidate,
+    enabled: Boolean(candidateId),
+  });
 
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await candidateApi.getById(candidateId, signal);
-      if (!signal?.aborted) {
-        setCandidate(data);
-      }
-    } catch (err: any) {
-      if (err.name === 'AbortError' || signal?.aborted) {
-        return;
-      }
-      if (!signal?.aborted) {
-        setError(err?.response?.data?.detail || err?.message || 'Failed to load candidate data');
-      }
-    } finally {
-      if (!signal?.aborted) {
-        setLoading(false);
-      }
-    }
-  };
-
-  useEffect(() => {
-    const abortController = new AbortController();
-    fetchCandidate(abortController.signal);
-    return () => {
-      abortController.abort();
-    };
-  }, [candidateId]);
-
-  const refresh = async () => {
-    await fetchCandidate();
-  };
-
-  return { candidate, loading, error, refresh };
+  return { candidate: data, loading, error, refresh };
 }
 
