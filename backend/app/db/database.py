@@ -37,7 +37,7 @@ Example:
 """
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, String, Float, DateTime, Integer, Text, JSON, Index, text, UniqueConstraint, Boolean
+from sqlalchemy import Column, String, Float, DateTime, Integer, Text, JSON, Index, text, UniqueConstraint, Boolean, event
 from datetime import datetime
 import os
 from dotenv import load_dotenv
@@ -559,12 +559,26 @@ if DATABASE_URL.startswith("sqlite"):
         pool_pre_ping=True,  # Verify connections before using
         pool_size=config.SQLITE_POOL_SIZE,  # Smaller pool for SQLite (10 instead of 20)
         max_overflow=config.SQLITE_MAX_OVERFLOW,  # Reduced overflow for SQLite (10 instead of 30)
-        pool_timeout=120.0,  # Timeout for getting connection from pool (2 minutes)
+        pool_timeout=30.0,  # Reduced timeout for getting connection from pool (30 seconds)
         pool_recycle=3600,  # Recycle connections after 1 hour to prevent stale connections
         connect_args={
-            "timeout": 120.0,  # 120 second timeout for database operations
+            "timeout": 30.0,  # 30 second timeout for database operations (reduced from 120)
         }
     )
+    
+    # Set busy_timeout on every new connection using async event listener
+    @event.listens_for(engine.sync_engine, "connect")
+    def set_sqlite_pragmas(dbapi_conn, connection_record):
+        """Set SQLite PRAGMAs on every new connection to prevent hanging on locks"""
+        try:
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA busy_timeout=30000")  # 30 second timeout in milliseconds
+            cursor.execute("PRAGMA journal_mode=WAL")  # Ensure WAL mode
+            cursor.close()
+        except Exception as e:
+            # Log but don't fail - connection might already be configured
+            import logging
+            logging.getLogger(__name__).debug(f"Could not set SQLite PRAGMAs: {e}")
 else:
     # PostgreSQL or other database - use larger pool settings
     engine = create_async_engine(
