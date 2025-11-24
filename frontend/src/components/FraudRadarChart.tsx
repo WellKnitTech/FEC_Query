@@ -24,11 +24,12 @@ interface FraudRadarChartProps {
   candidateId: string;
   minDate?: string;
   maxDate?: string;
+  refreshToken?: number;
 }
 
-export default function FraudRadarChart({ candidateId, minDate, maxDate }: FraudRadarChartProps) {
+export default function FraudRadarChart({ candidateId, minDate, maxDate, refreshToken = 0 }: FraudRadarChartProps) {
   // Use shared hook - default to aggregation=false for radar chart (uses standard analysis)
-  const { analysis, loading, error } = useFraudAnalysis(candidateId, minDate, maxDate, false);
+  const { analysis, loading, error } = useFraudAnalysis(candidateId, minDate, maxDate, false, refreshToken);
 
   if (loading) {
     return (

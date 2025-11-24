@@ -1,4 +1,5 @@
 import { useState, useMemo, lazy, Suspense } from 'react';
+import { Link } from 'react-router-dom';
 import { useParams } from 'react-router-dom';
 import { candidateApi } from '../services/api';
 import { formatDateTime, cycleToDateRange, formatCycleRange, formatDate } from '../utils/dateUtils';
@@ -6,6 +7,7 @@ import { useCandidateData } from '../hooks/useCandidateData';
 import { useFinancialData } from '../hooks/useFinancialData';
 import { useCycleSelector } from '../hooks/useCycleSelector';
 import { CandidateContextProvider } from '../contexts/CandidateContext';
+import { cacheManager, CacheNamespaces } from '../utils/cacheManager';
 import FinancialSummary from '../components/FinancialSummary';
 import DonorStateAnalysis from '../components/DonorStateAnalysis';
 import ContributionAnalysis from '../components/ContributionAnalysis';
@@ -30,10 +32,11 @@ function CandidateDetailContent() {
   const [refreshingContactInfo, setRefreshingContactInfo] = useState(false);
 
   // Fetch financials to determine available cycles (fetch all, no cycle filter)
-  const { financials, latestFinancial, selectedFinancial, availableCycles } = useFinancialData(
+  const { financials, latestFinancial, selectedFinancial, availableCycles, refresh: refreshFinancials } = useFinancialData(
     candidateId,
     undefined // Fetch all financials to determine available cycles
   );
+  const [analyticsRefreshToken, setAnalyticsRefreshToken] = useState(0);
 
   // Manage cycle selection - start with latest cycle if available
   const { selectedCycle, setCycle, hasMultipleCycles } = useCycleSelector({
@@ -61,6 +64,13 @@ function CandidateDetailContent() {
       if (result.success) {
         // Refresh candidate data to get updated contact info
         await refreshCandidate();
+
+        // Invalidate related caches and refresh analytics
+        cacheManager.clearByPrefix(CacheNamespaces.financials, `${candidateId}-`);
+        cacheManager.clearByPrefix(CacheNamespaces.contributions, `${candidateId || ''}-`);
+        cacheManager.clearByPrefix(CacheNamespaces.fraudAnalysis, `${candidateId}-`);
+        await refreshFinancials();
+        setAnalyticsRefreshToken((value) => value + 1);
       } else {
         console.warn('Contact info refresh returned success=false:', result);
       }
@@ -128,11 +138,17 @@ function CandidateDetailContent() {
       {/* Contact Information Section - Always show if candidate exists */}
       <div className="bg-white rounded-lg shadow p-6 mb-6">
         <div className="flex justify-between items-start mb-4">
-          <h2 className="text-xl font-semibold text-gray-900">Contact Information</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-xl font-semibold text-gray-900">Contact Information</h2>
+            <span className="text-xs text-gray-500" title="Refresh pulls the latest FEC filings and resets related analytics so your follow-up charts stay in sync.">
+              Investigation tip
+            </span>
+          </div>
           <button
             onClick={handleRefreshContactInfo}
             disabled={refreshingContactInfo}
             className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-sm font-medium"
+            title="Re-fetch contact details and re-run financial and risk checks for this candidate"
           >
             {refreshingContactInfo ? 'Refreshing...' : 'Refresh Contact Info'}
           </button>
@@ -250,21 +266,49 @@ function CandidateDetailContent() {
         )}
 
         <div className="space-y-6">
+          <div className="bg-white rounded-lg shadow p-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Investigation guide</h3>
+                <p className="text-sm text-gray-600">Move from basic identity checks to committee flows and outside spend without losing context.</p>
+              </div>
+              <div className="flex flex-wrap gap-2" title="Follow these quick links to open the next view with this candidate still top-of-mind.">
+                <Link className="px-3 py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700" to="/committees">
+                  Go to committees
+                </Link>
+                <Link className="px-3 py-2 bg-indigo-600 text-white rounded-md text-sm hover:bg-indigo-700" to="/independent-expenditures">
+                  Independent spend
+                </Link>
+                <Link className="px-3 py-2 bg-emerald-600 text-white rounded-md text-sm hover:bg-emerald-700" to="/donor-analysis">
+                  Donor sweeps
+                </Link>
+              </div>
+            </div>
+          </div>
           {/* Critical components - load immediately with error boundaries */}
           <ErrorBoundary>
-            <FinancialSummary 
-              candidateId={candidateId!} 
-              cycle={selectedCycle} 
+            <FinancialSummary
+              candidateId={candidateId!}
+              cycle={selectedCycle}
               onCycleChange={(newCycle) => {
                 setCycle(newCycle);
               }} 
             />
           </ErrorBoundary>
           <ErrorBoundary>
-            <DonorStateAnalysis candidateId={candidateId} candidate={candidate} cycle={selectedCycle} />
+            <DonorStateAnalysis
+              candidateId={candidateId}
+              candidate={candidate}
+              cycle={selectedCycle}
+              refreshToken={analyticsRefreshToken}
+            />
           </ErrorBoundary>
           <ErrorBoundary>
-            <ContributionAnalysis candidateId={candidateId} cycle={selectedCycle} />
+            <ContributionAnalysis
+              candidateId={candidateId}
+              cycle={selectedCycle}
+              refreshToken={analyticsRefreshToken}
+            />
           </ErrorBoundary>
           
           {/* Deferred visualizations - lazy loaded with suspense and error boundaries */}
@@ -301,28 +345,31 @@ function CandidateDetailContent() {
               </ErrorBoundary>
               <ErrorBoundary>
                 <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
-                  <FraudRadarChart 
-                    candidateId={candidateId!} 
+                  <FraudRadarChart
+                    candidateId={candidateId!}
                     minDate={cycleDateRange.minDate}
                     maxDate={cycleDateRange.maxDate}
+                    refreshToken={analyticsRefreshToken}
                   />
                 </Suspense>
               </ErrorBoundary>
               <ErrorBoundary>
                 <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
-                  <SmurfingScatter 
-                    candidateId={candidateId} 
+                  <SmurfingScatter
+                    candidateId={candidateId}
                     minDate={cycleDateRange.minDate}
                     maxDate={cycleDateRange.maxDate}
+                    refreshToken={analyticsRefreshToken}
                   />
                 </Suspense>
               </ErrorBoundary>
               <ErrorBoundary>
                 <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
-                  <FraudAlerts 
-                    candidateId={candidateId!} 
+                  <FraudAlerts
+                    candidateId={candidateId!}
                     minDate={cycleDateRange.minDate}
                     maxDate={cycleDateRange.maxDate}
+                    refreshToken={analyticsRefreshToken}
                   />
                 </Suspense>
               </ErrorBoundary>

@@ -18,6 +18,7 @@ interface SmurfingScatterProps {
   committeeId?: string;
   minDate?: string;
   maxDate?: string;
+  refreshToken?: number;
 }
 
 export default function SmurfingScatter({
@@ -25,6 +26,7 @@ export default function SmurfingScatter({
   committeeId,
   minDate,
   maxDate,
+  refreshToken = 0,
 }: SmurfingScatterProps) {
   const [contributions, setContributions] = useState<Contribution[]>([]);
   const [loading, setLoading] = useState(true);
@@ -70,7 +72,7 @@ export default function SmurfingScatter({
     return () => {
       abortController.abort();
     };
-  }, [candidateId, committeeId, minDate, maxDate]);
+  }, [candidateId, committeeId, minDate, maxDate, refreshToken]);
 
   if (loading) {
     return (
