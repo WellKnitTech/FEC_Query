@@ -34,6 +34,7 @@ interface ContributionAnalysisProps {
   minDate?: string;
   maxDate?: string;
   cycle?: number;
+  refreshToken?: number;
 }
 
 export default function ContributionAnalysis({
@@ -42,6 +43,7 @@ export default function ContributionAnalysis({
   minDate,
   maxDate,
   cycle,
+  refreshToken = 0,
 }: ContributionAnalysisProps) {
   const [analysis, setAnalysis] = useState<ContributionAnalysisType | null>(null);
   const [loading, setLoading] = useState(true);
@@ -91,7 +93,7 @@ export default function ContributionAnalysis({
     return () => {
       abortController.abort();
     };
-  }, [candidateId, committeeId, minDate, maxDate, cycle]);
+  }, [candidateId, committeeId, minDate, maxDate, cycle, refreshToken]);
 
   const refresh = async () => {
     setLoading(true);

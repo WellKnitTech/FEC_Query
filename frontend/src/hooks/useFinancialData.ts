@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { candidateApi, FinancialSummary } from '../services/api';
+import { cacheManager, CacheNamespaces } from '../utils/cacheManager';
 
 interface UseFinancialDataResult {
   financials: FinancialSummary[];
@@ -10,9 +11,6 @@ interface UseFinancialDataResult {
   availableCycles: number[];
   refresh: () => Promise<void>;
 }
-
-// Cache for financial data by candidate and cycle
-const financialCache = new Map<string, Map<number | undefined, FinancialSummary[]>>();
 
 export function useFinancialData(
   candidateId: string | undefined,
@@ -34,15 +32,12 @@ export function useFinancialData(
 
     // Check cache first (unless forcing refresh)
     if (!forceRefresh) {
-      const candidateCache = financialCache.get(candidateId);
-      if (candidateCache) {
-        const cachedData = candidateCache.get(cycle);
-        if (cachedData && cachedData.length > 0) {
-          setFinancials(cachedData);
-          setLoading(false);
-          setError(null);
-          return;
-        }
+      const cachedData = cacheManager.get<FinancialSummary[]>(CacheNamespaces.financials, cacheKey);
+      if (cachedData && cachedData.length > 0) {
+        setFinancials(cachedData);
+        setLoading(false);
+        setError(null);
+        return;
       }
     }
 
@@ -52,19 +47,15 @@ export function useFinancialData(
       const data = await candidateApi.getFinancials(candidateId, cycle, signal);
       if (!signal?.aborted && cacheKeyRef.current === cacheKey) {
         setFinancials(data);
-        
+
         // Update cache
-        if (!financialCache.has(candidateId)) {
-          financialCache.set(candidateId, new Map());
-        }
-        const candidateCache = financialCache.get(candidateId)!;
-        candidateCache.set(cycle, data);
-        
+        cacheManager.set(CacheNamespaces.financials, cacheKey, data);
+
         // Also cache individual cycles if we fetched all
         if (cycle === undefined && data.length > 0) {
           data.forEach((financial) => {
             if (financial.cycle !== undefined) {
-              candidateCache.set(financial.cycle, [financial]);
+              cacheManager.set(CacheNamespaces.financials, `${candidateId}-${financial.cycle}`, [financial]);
             }
           });
         }

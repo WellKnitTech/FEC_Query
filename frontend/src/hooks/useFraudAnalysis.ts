@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { fraudApi, FraudAnalysis } from '../services/api';
+import { cacheManager, CacheNamespaces } from '../utils/cacheManager';
 
 interface UseFraudAnalysisResult {
   analysis: FraudAnalysis | null;
@@ -8,14 +9,12 @@ interface UseFraudAnalysisResult {
   refresh: () => Promise<void>;
 }
 
-// Cache for fraud analysis data by candidate and date range
-const fraudAnalysisCache = new Map<string, FraudAnalysis>();
-
 export function useFraudAnalysis(
   candidateId: string | undefined,
   minDate?: string,
   maxDate?: string,
-  useAggregation: boolean = true
+  useAggregation: boolean = true,
+  refreshToken: number = 0
 ): UseFraudAnalysisResult {
   const [analysis, setAnalysis] = useState<FraudAnalysis | null>(null);
   const [loading, setLoading] = useState(true);
@@ -33,7 +32,7 @@ export function useFraudAnalysis(
 
     // Check cache first (unless forcing refresh)
     if (!forceRefresh) {
-      const cached = fraudAnalysisCache.get(cacheKey);
+      const cached = cacheManager.get<FraudAnalysis>(CacheNamespaces.fraudAnalysis, cacheKey);
       if (cached) {
         setAnalysis(cached);
         setLoading(false);
@@ -53,7 +52,7 @@ export function useFraudAnalysis(
         setAnalysis(data);
         
         // Update cache
-        fraudAnalysisCache.set(cacheKey, data);
+        cacheManager.set(CacheNamespaces.fraudAnalysis, cacheKey, data);
       }
     } catch (err: any) {
       if (err.name === 'AbortError' || signal?.aborted) {
@@ -75,7 +74,7 @@ export function useFraudAnalysis(
     return () => {
       abortController.abort();
     };
-  }, [candidateId, minDate, maxDate, useAggregation]);
+  }, [candidateId, minDate, maxDate, useAggregation, refreshToken]);
 
   const refresh = async () => {
     await fetchAnalysis(undefined, true);

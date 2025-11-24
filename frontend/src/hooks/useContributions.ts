@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { contributionApi, Contribution } from '../services/api';
+import { cacheManager, CacheNamespaces } from '../utils/cacheManager';
 
 interface UseContributionsResult {
   contributions: Contribution[];
@@ -7,9 +8,6 @@ interface UseContributionsResult {
   error: string | null;
   refresh: () => Promise<void>;
 }
-
-// Cache for contribution data by candidate/committee and filters
-const contributionsCache = new Map<string, Contribution[]>();
 
 export function useContributions(
   candidateId?: string,
@@ -35,7 +33,7 @@ export function useContributions(
 
     // Check cache first (unless forcing refresh)
     if (!forceRefresh) {
-      const cached = contributionsCache.get(cacheKey);
+      const cached = cacheManager.get<Contribution[]>(CacheNamespaces.contributions, cacheKey);
       if (cached && cached.length > 0) {
         setContributions(cached);
         setLoading(false);
@@ -59,7 +57,7 @@ export function useContributions(
         setContributions(data);
         
         // Update cache
-        contributionsCache.set(cacheKey, data);
+        cacheManager.set(CacheNamespaces.contributions, cacheKey, data);
       }
     } catch (err: any) {
       if (err.name === 'AbortError' || signal?.aborted) {

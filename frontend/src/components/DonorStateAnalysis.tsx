@@ -25,6 +25,7 @@ interface DonorStateAnalysisProps {
   candidateId?: string;
   candidate?: Candidate;
   cycle?: number;
+  refreshToken?: number;
 }
 
 
@@ -32,6 +33,7 @@ export default function DonorStateAnalysis({
   candidateId,
   candidate,
   cycle,
+  refreshToken = 0,
 }: DonorStateAnalysisProps) {
   const [analysis, setAnalysis] = useState<DonorStateAnalysisType | null>(null);
   const [loading, setLoading] = useState(true);
@@ -90,7 +92,7 @@ export default function DonorStateAnalysis({
     return () => {
       abortController.abort();
     };
-  }, [candidateId, candidate?.office, cycle]);
+  }, [candidateId, candidate?.office, cycle, refreshToken]);
 
   const loadOutOfStateContributions = async (aggregate: boolean = false) => {
     if (!candidateId) return;
