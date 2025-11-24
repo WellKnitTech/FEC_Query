@@ -8,9 +8,17 @@ interface UseCandidateDataResult {
   refresh: () => Promise<void>;
 }
 
+// Shared cache for candidate data to enable instant header/contact rendering
+const candidateCache = new Map<string, Candidate>();
+
 export function useCandidateData(candidateId: string | undefined): UseCandidateDataResult {
-  const [candidate, setCandidate] = useState<Candidate | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [candidate, setCandidate] = useState<Candidate | null>(() => {
+    if (candidateId) {
+      return candidateCache.get(candidateId) ?? null;
+    }
+    return null;
+  });
+  const [loading, setLoading] = useState(!candidate);
   const [error, setError] = useState<string | null>(null);
 
   const fetchCandidate = async (signal?: AbortSignal) => {
@@ -24,6 +32,7 @@ export function useCandidateData(candidateId: string | undefined): UseCandidateD
     try {
       const data = await candidateApi.getById(candidateId, signal);
       if (!signal?.aborted) {
+        candidateCache.set(candidateId, data);
         setCandidate(data);
       }
     } catch (err: any) {

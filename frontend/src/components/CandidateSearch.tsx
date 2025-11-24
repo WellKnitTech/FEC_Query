@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { candidateApi, Candidate } from '../services/api';
 import { useNavigate } from 'react-router-dom';
 
@@ -8,6 +8,9 @@ export default function CandidateSearch() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
+  const searchAbortController = useRef<AbortController | null>(null);
+  const prefetchAbortController = useRef<AbortController | null>(null);
+  const debounceTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Helper function to extract last name for sorting
   const getLastName = (name: string): string => {
@@ -26,21 +29,56 @@ export default function CandidateSearch() {
     });
   };
 
-  const handleSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!query.trim()) return;
+  const prefetchCandidateDetail = async (candidateId: string) => {
+    if (!candidateId) return;
+    if (prefetchAbortController.current) {
+      prefetchAbortController.current.abort();
+    }
+
+    const controller = new AbortController();
+    prefetchAbortController.current = controller;
+
+    try {
+      await candidateApi.getById(candidateId, controller.signal);
+    } catch (err: any) {
+      if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') {
+        return;
+      }
+      // Prefetch failures should not block the main search flow
+      console.error('Failed to prefetch candidate details', err);
+    }
+  };
+
+  const performSearch = async (searchTerm: string) => {
+    if (!searchTerm.trim()) {
+      setResults([]);
+      setError(null);
+      return;
+    }
+
+    if (searchAbortController.current) {
+      searchAbortController.current.abort();
+    }
+
+    const controller = new AbortController();
+    searchAbortController.current = controller;
 
     setLoading(true);
     setError(null);
     try {
-      const candidates = await candidateApi.search({ name: query, limit: 20 });
+      const candidates = await candidateApi.search({ name: searchTerm, limit: 20 }, controller.signal);
       // Sort candidates by last name
       const sortedCandidates = sortCandidatesByLastName(candidates);
       setResults(sortedCandidates);
       if (sortedCandidates.length === 0) {
         setError('No candidates found. Try a different search term.');
+      } else {
+        prefetchCandidateDetail(sortedCandidates[0].candidate_id);
       }
     } catch (err: any) {
+      if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') {
+        return;
+      }
       let errorMessage = 'Failed to search candidates. Please try again.';
       if (err?.response?.data?.detail) {
         errorMessage = err.response.data.detail;
@@ -52,6 +90,41 @@ export default function CandidateSearch() {
       setLoading(false);
     }
   };
+
+  const handleSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await performSearch(query);
+  };
+
+  useEffect(() => {
+    if (debounceTimeout.current) {
+      clearTimeout(debounceTimeout.current);
+    }
+
+    debounceTimeout.current = setTimeout(() => {
+      performSearch(query);
+    }, 400);
+
+    return () => {
+      if (debounceTimeout.current) {
+        clearTimeout(debounceTimeout.current);
+      }
+    };
+  }, [query]);
+
+  useEffect(() => {
+    return () => {
+      if (searchAbortController.current) {
+        searchAbortController.current.abort();
+      }
+      if (prefetchAbortController.current) {
+        prefetchAbortController.current.abort();
+      }
+      if (debounceTimeout.current) {
+        clearTimeout(debounceTimeout.current);
+      }
+    };
+  }, []);
 
   const handleCandidateClick = (candidateId: string) => {
     navigate(`/candidate/${candidateId}`);

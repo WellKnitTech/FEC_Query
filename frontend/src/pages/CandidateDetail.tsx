@@ -26,6 +26,32 @@ const CumulativeChart = lazy(() => import('../components/CumulativeChart'));
 const FraudRadarChart = lazy(() => import('../components/FraudRadarChart'));
 const SmurfingScatter = lazy(() => import('../components/SmurfingScatter'));
 
+const cardFallback = (heightClass: string, hasTitle = true) => (
+  <div className="bg-white rounded-lg shadow p-6">
+    <div className="animate-pulse space-y-4">
+      {hasTitle && <div className="h-5 w-1/3 bg-gray-200 rounded" />}
+      <div className={`${heightClass} bg-gray-100 rounded`} />
+    </div>
+  </div>
+);
+
+const contactInfoFallback = (
+  <div className="bg-white rounded-lg shadow p-6">
+    <div className="animate-pulse space-y-3">
+      <div className="h-5 w-40 bg-gray-200 rounded" />
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {[...Array(4)].map((_, index) => (
+          <div key={index} className="space-y-2">
+            <div className="h-4 w-24 bg-gray-200 rounded" />
+            <div className="h-4 w-32 bg-gray-100 rounded" />
+          </div>
+        ))}
+      </div>
+      <div className="h-4 w-28 bg-gray-100 rounded" />
+    </div>
+  </div>
+);
+
 function CandidateDetailContent() {
   const { candidateId } = useParams<{ candidateId: string }>();
   const { candidate, loading, error, refresh: refreshCandidate } = useCandidateData(candidateId);
@@ -94,7 +120,7 @@ function CandidateDetailContent() {
   };
 
 
-  if (loading) {
+  if (loading && !candidate) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <LoadingState message="Loading candidate information..." />
@@ -102,7 +128,7 @@ function CandidateDetailContent() {
     );
   }
 
-  if (error || !candidate) {
+  if ((error && !candidate) || !candidate) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <ErrorState
@@ -202,17 +228,79 @@ function CandidateDetailContent() {
                 </p>
               </div>
             )}
+      <Suspense fallback={contactInfoFallback}>
+        <div className="bg-white rounded-lg shadow p-6 mb-6">
+          <div className="flex justify-between items-start mb-4">
+            <h2 className="text-xl font-semibold text-gray-900">Contact Information</h2>
+            <button
+              onClick={handleRefreshContactInfo}
+              disabled={refreshingContactInfo}
+              className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-sm font-medium"
+            >
+              {refreshingContactInfo ? 'Refreshing...' : 'Refresh Contact Info'}
+            </button>
           </div>
-        )}
-        
-        {!candidate.contact_info && (
-          <p className="text-gray-500 mb-4">No contact information available. Click "Refresh Contact Info" to fetch from the FEC API.</p>
-        )}
-        
-        <div className="text-sm text-gray-500 border-t pt-4">
-          Last updated: {formatDateTime(candidate.contact_info_updated_at)}
+
+          {candidate.contact_info && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              {candidate.contact_info.street_address && (
+                <div>
+                  <span className="text-sm font-medium text-gray-500">Address:</span>
+                  <p className="text-gray-900">
+                    {candidate.contact_info.street_address}
+                    {candidate.contact_info.city && `, ${candidate.contact_info.city}`}
+                    {candidate.contact_info.state && `, ${candidate.contact_info.state}`}
+                    {candidate.contact_info.zip && ` ${candidate.contact_info.zip}`}
+                  </p>
+                </div>
+              )}
+              {candidate.contact_info.email && (
+                <div>
+                  <span className="text-sm font-medium text-gray-500">Email:</span>
+                  <p className="text-gray-900">
+                    <a href={`mailto:${candidate.contact_info.email}`} className="text-blue-600 hover:underline">
+                      {candidate.contact_info.email}
+                    </a>
+                  </p>
+                </div>
+              )}
+              {candidate.contact_info.phone && (
+                <div>
+                  <span className="text-sm font-medium text-gray-500">Phone:</span>
+                  <p className="text-gray-900">
+                    <a href={`tel:${candidate.contact_info.phone}`} className="text-blue-600 hover:underline">
+                      {candidate.contact_info.phone}
+                    </a>
+                  </p>
+                </div>
+              )}
+              {candidate.contact_info.website && (
+                <div>
+                  <span className="text-sm font-medium text-gray-500">Website:</span>
+                  <p className="text-gray-900">
+                    <a
+                      href={candidate.contact_info.website}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-600 hover:underline"
+                    >
+                      {candidate.contact_info.website}
+                    </a>
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {!candidate.contact_info && (
+            <p className="text-gray-500 mb-4">No contact information available. Click "Refresh Contact Info" to fetch from the FEC API.</p>
+          )}
+
+          <div className="text-sm text-gray-500 border-t pt-4">
+            Last updated: {formatDateTime(candidate.contact_info_updated_at)}
+          </div>
         </div>
-      </div>
+      </Suspense>
 
       <CandidateContextProvider
         candidateId={candidateId}
@@ -309,35 +397,54 @@ function CandidateDetailContent() {
               cycle={selectedCycle}
               refreshToken={analyticsRefreshToken}
             />
+            <Suspense fallback={cardFallback('h-40')}>
+              <FinancialSummary
+                candidateId={candidateId!}
+                cycle={selectedCycle}
+                onCycleChange={(newCycle) => {
+                  setCycle(newCycle);
+                }}
+              />
+            </Suspense>
           </ErrorBoundary>
-          
+          <ErrorBoundary>
+            <Suspense fallback={cardFallback('h-64')}>
+              <DonorStateAnalysis candidateId={candidateId} candidate={candidate} cycle={selectedCycle} />
+            </Suspense>
+          </ErrorBoundary>
+          <ErrorBoundary>
+            <Suspense fallback={cardFallback('h-64')}>
+              <ContributionAnalysis candidateId={candidateId} cycle={selectedCycle} />
+            </Suspense>
+          </ErrorBoundary>
+
           {/* Deferred visualizations - lazy loaded with suspense and error boundaries */}
           {selectedCycle && (
             <>
               <ErrorBoundary>
-                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                <Suspense fallback={cardFallback('h-64')}>
                   <CumulativeChart candidateId={candidateId} cycle={selectedCycle} />
                 </Suspense>
               </ErrorBoundary>
               <ErrorBoundary>
-                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                <Suspense fallback={cardFallback('h-64')}>
                   <ContributionVelocity candidateId={candidateId} cycle={selectedCycle} />
                 </Suspense>
               </ErrorBoundary>
               <ErrorBoundary>
-                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                <Suspense fallback={cardFallback('h-72')}>
                   <EmployerTreemap candidateId={candidateId} cycle={selectedCycle} />
                 </Suspense>
               </ErrorBoundary>
               <ErrorBoundary>
-                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                <Suspense fallback={cardFallback('h-72')}>
                   <ExpenditureBreakdown candidateId={candidateId} cycle={selectedCycle} />
                 </Suspense>
               </ErrorBoundary>
               <ErrorBoundary>
-                <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-96 bg-gray-200 rounded"></div></div></div>}>
-                  <NetworkGraph 
-                    candidateId={candidateId!} 
+                <Suspense fallback={cardFallback('h-96')}>
+                  <NetworkGraph
+                    candidateId={candidateId!}
                     minDate={cycleDateRange.minDate}
                     maxDate={cycleDateRange.maxDate}
                   />
@@ -345,6 +452,7 @@ function CandidateDetailContent() {
               </ErrorBoundary>
               <ErrorBoundary>
                 <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                <Suspense fallback={cardFallback('h-64')}>
                   <FraudRadarChart
                     candidateId={candidateId!}
                     minDate={cycleDateRange.minDate}
@@ -355,6 +463,7 @@ function CandidateDetailContent() {
               </ErrorBoundary>
               <ErrorBoundary>
                 <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                <Suspense fallback={cardFallback('h-64')}>
                   <SmurfingScatter
                     candidateId={candidateId}
                     minDate={cycleDateRange.minDate}
@@ -365,6 +474,7 @@ function CandidateDetailContent() {
               </ErrorBoundary>
               <ErrorBoundary>
                 <Suspense fallback={<div className="bg-white rounded-lg shadow p-6"><div className="animate-pulse"><div className="h-64 bg-gray-200 rounded"></div></div></div>}>
+                <Suspense fallback={cardFallback('h-64')}>
                   <FraudAlerts
                     candidateId={candidateId!}
                     minDate={cycleDateRange.minDate}
