@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
+import { useCallback } from 'react';
 import { contributionApi, Contribution } from '../services/api';
+import { useCachedQuery } from './useCachedQuery';
 import { cacheManager, CacheNamespaces } from '../utils/cacheManager';
 
 interface UseContributionsResult {
@@ -17,6 +18,22 @@ export function useContributions(
   cycle?: number,
   limit: number = 10000
 ): UseContributionsResult {
+  const fetchContributions = useCallback(
+    (signal: AbortSignal) => contributionApi.get({
+      candidate_id: candidateId,
+      committee_id: committeeId,
+      min_date: minDate,
+      max_date: maxDate,
+      limit: limit,
+    }, signal),
+    [candidateId, committeeId, minDate, maxDate, limit]
+  );
+
+  const { data, loading, error, refresh } = useCachedQuery<Contribution[]>({
+    queryKey: `${candidateId || ''}-${committeeId || ''}-${minDate || 'all'}-${maxDate || 'all'}-${cycle || 'all'}-${limit}`,
+    fetcher: fetchContributions,
+    enabled: Boolean(candidateId || committeeId),
+  });
   const [contributions, setContributions] = useState<Contribution[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -86,7 +103,7 @@ export function useContributions(
   };
 
   return {
-    contributions,
+    contributions: data ?? [],
     loading,
     error,
     refresh,

@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useMemo } from 'react';
 import { candidateApi, FinancialSummary } from '../services/api';
+import { useCachedQuery } from './useCachedQuery';
 import { cacheManager, CacheNamespaces } from '../utils/cacheManager';
 
 interface UseFinancialDataResult {
@@ -16,6 +17,16 @@ export function useFinancialData(
   candidateId: string | undefined,
   cycle?: number | undefined
 ): UseFinancialDataResult {
+  const fetchFinancials = useCallback(
+    (signal: AbortSignal) => candidateApi.getFinancials(candidateId!, cycle, signal),
+    [candidateId, cycle]
+  );
+
+  const { data, loading, error, refresh } = useCachedQuery<FinancialSummary[]>({
+    queryKey: candidateId ? `financials:${candidateId}:${cycle ?? 'all'}` : 'financials:none',
+    fetcher: fetchFinancials,
+    enabled: Boolean(candidateId),
+  });
   const [financials, setFinancials] = useState<FinancialSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -74,17 +85,7 @@ export function useFinancialData(
     }
   };
 
-  useEffect(() => {
-    const abortController = new AbortController();
-    fetchFinancials(abortController.signal);
-    return () => {
-      abortController.abort();
-    };
-  }, [candidateId, cycle]);
-
-  const refresh = async () => {
-    await fetchFinancials(undefined, true);
-  };
+  const financials = data ?? [];
 
   // Sort financials by cycle descending (newest first)
   const sortedFinancials = useMemo(() => {

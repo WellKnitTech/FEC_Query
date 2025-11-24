@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useCallback } from 'react';
 import { candidateApi, Candidate } from '../services/api';
+import { useCachedQuery } from './useCachedQuery';
 
 interface UseCandidateDataResult {
   candidate: Candidate | null;
@@ -12,6 +13,7 @@ interface UseCandidateDataResult {
 const candidateCache = new Map<string, Candidate>();
 
 export function useCandidateData(candidateId: string | undefined): UseCandidateDataResult {
+  const fetchCandidate = useCallback((signal: AbortSignal) => candidateApi.getById(candidateId!, signal), [candidateId]);
   const [candidate, setCandidate] = useState<Candidate | null>(() => {
     if (candidateId) {
       return candidateCache.get(candidateId) ?? null;
@@ -21,12 +23,13 @@ export function useCandidateData(candidateId: string | undefined): UseCandidateD
   const [loading, setLoading] = useState(!candidate);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchCandidate = async (signal?: AbortSignal) => {
-    if (!candidateId) {
-      setLoading(false);
-      return;
-    }
+  const { data, loading, error, refresh } = useCachedQuery<Candidate>({
+    queryKey: candidateId ? `candidate:${candidateId}` : 'candidate:none',
+    fetcher: fetchCandidate,
+    enabled: Boolean(candidateId),
+  });
 
+  return { candidate: data, loading, error, refresh };
     setLoading(true);
     setError(null);
     try {

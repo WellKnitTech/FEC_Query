@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
+import { useCallback } from 'react';
 import { fraudApi, FraudAnalysis } from '../services/api';
+import { useCachedQuery } from './useCachedQuery';
 import { cacheManager, CacheNamespaces } from '../utils/cacheManager';
 
 interface UseFraudAnalysisResult {
@@ -16,6 +17,19 @@ export function useFraudAnalysis(
   useAggregation: boolean = true,
   refreshToken: number = 0
 ): UseFraudAnalysisResult {
+  const fetchAnalysis = useCallback(
+    (signal: AbortSignal) =>
+      useAggregation
+        ? fraudApi.analyzeWithAggregation(candidateId!, minDate, maxDate, true, signal)
+        : fraudApi.analyze(candidateId!, minDate, maxDate, signal),
+    [candidateId, minDate, maxDate, useAggregation]
+  );
+
+  const { data, loading, error, refresh } = useCachedQuery<FraudAnalysis>({
+    queryKey: `${candidateId || ''}-${minDate || 'all'}-${maxDate || 'all'}-${useAggregation}`,
+    fetcher: fetchAnalysis,
+    enabled: Boolean(candidateId),
+  });
   const [analysis, setAnalysis] = useState<FraudAnalysis | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -81,7 +95,7 @@ export function useFraudAnalysis(
   };
 
   return {
-    analysis,
+    analysis: data,
     loading,
     error,
     refresh,
