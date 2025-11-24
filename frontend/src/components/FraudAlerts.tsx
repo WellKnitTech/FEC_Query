@@ -6,14 +6,21 @@ interface FraudAlertsProps {
   candidateId: string;
   minDate?: string;
   maxDate?: string;
+  refreshToken?: number;
 }
 
-export default function FraudAlerts({ candidateId, minDate, maxDate }: FraudAlertsProps) {
+export default function FraudAlerts({ candidateId, minDate, maxDate, refreshToken = 0 }: FraudAlertsProps) {
   const [expandedPattern, setExpandedPattern] = useState<string | null>(null);
   const [useAggregation, setUseAggregation] = useState<boolean>(true);
-  
+
   // Use shared hook with aggregation option
-  const { analysis, loading, error, refresh } = useFraudAnalysis(candidateId, minDate, maxDate, useAggregation);
+  const { analysis, loading, error, refresh } = useFraudAnalysis(
+    candidateId,
+    minDate,
+    maxDate,
+    useAggregation,
+    refreshToken
+  );
 
   if (loading) {
     return (

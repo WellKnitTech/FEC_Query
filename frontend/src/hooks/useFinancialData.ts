@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from 'react';
 import { candidateApi, FinancialSummary } from '../services/api';
 import { useCachedQuery } from './useCachedQuery';
+import { cacheManager, CacheNamespaces } from '../utils/cacheManager';
 
 interface UseFinancialDataResult {
   financials: FinancialSummary[];
@@ -26,6 +27,63 @@ export function useFinancialData(
     fetcher: fetchFinancials,
     enabled: Boolean(candidateId),
   });
+  const [financials, setFinancials] = useState<FinancialSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const cacheKeyRef = useRef<string | null>(null);
+
+  const fetchFinancials = async (signal?: AbortSignal, forceRefresh = false) => {
+    if (!candidateId) {
+      setLoading(false);
+      return;
+    }
+
+    const cacheKey = `${candidateId}-${cycle ?? 'all'}`;
+    cacheKeyRef.current = cacheKey;
+
+    // Check cache first (unless forcing refresh)
+    if (!forceRefresh) {
+      const cachedData = cacheManager.get<FinancialSummary[]>(CacheNamespaces.financials, cacheKey);
+      if (cachedData && cachedData.length > 0) {
+        setFinancials(cachedData);
+        setLoading(false);
+        setError(null);
+        return;
+      }
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await candidateApi.getFinancials(candidateId, cycle, signal);
+      if (!signal?.aborted && cacheKeyRef.current === cacheKey) {
+        setFinancials(data);
+
+        // Update cache
+        cacheManager.set(CacheNamespaces.financials, cacheKey, data);
+
+        // Also cache individual cycles if we fetched all
+        if (cycle === undefined && data.length > 0) {
+          data.forEach((financial) => {
+            if (financial.cycle !== undefined) {
+              cacheManager.set(CacheNamespaces.financials, `${candidateId}-${financial.cycle}`, [financial]);
+            }
+          });
+        }
+      }
+    } catch (err: any) {
+      if (err.name === 'AbortError' || signal?.aborted) {
+        return;
+      }
+      if (!signal?.aborted && cacheKeyRef.current === cacheKey) {
+        setError(err?.response?.data?.detail || err?.message || 'Failed to load financial data');
+      }
+    } finally {
+      if (!signal?.aborted && cacheKeyRef.current === cacheKey) {
+        setLoading(false);
+      }
+    }
+  };
 
   const financials = data ?? [];
 
